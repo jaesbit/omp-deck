@@ -456,6 +456,36 @@ export interface KbBacklinksResponse {
 }
 
 /**
+ * Where a search query matched a file. Used by the UI to render
+ * differently — filename hits sort to the top, body hits get a snippet.
+ */
+export type KbSearchMatchKind = "stem" | "title" | "tag" | "body";
+
+export interface KbSearchResult {
+	/** Forward-slash kb-relative path. */
+	path: string;
+	/** Display title — frontmatter `name` if set, else filename stem. */
+	title: string;
+	/** Top-level directory ("" for root files). Used for color coding. */
+	dir: string;
+	/** Score (higher = better). Order is deterministic by score desc + path asc. */
+	score: number;
+	/** Best match kind for this file (a file may match many ways). */
+	matchKind: KbSearchMatchKind;
+	/** Body-context snippet centered on the first body match; empty otherwise. */
+	snippet: string;
+}
+
+export interface KbSearchResponse {
+	query: string;
+	results: KbSearchResult[];
+	/** Total candidate matches before the limit was applied. */
+	totalMatches: number;
+	/** True when the response was truncated to the requested limit. */
+	truncated: boolean;
+}
+
+/**
  * Co-located file under a skill's directory. Listed recursively (depth-first)
  * with `relPath` carrying the path from the skill dir; the UI groups by
  * parent. Symlinks and excluded dirs (`node_modules`, `__pycache__`, `.git`)

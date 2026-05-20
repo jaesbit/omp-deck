@@ -31,6 +31,7 @@ import { kbApi, type KbStatusResponse } from "@/lib/kb-api";
 import { useStore } from "@/lib/store";
 import { cn } from "@/lib/utils";
 import { KbGraphPane } from "./KbGraphPane";
+import { KbCommandPalette } from "./KbCommandPalette";
 
 /**
  * /kb — Karpathy-style llm-wiki viewer. Sidebar = tree; main = markdown
@@ -62,6 +63,28 @@ export function KbView() {
 	}, [currentPath]);
 
 	const kbChangeCounter = useStore((s) => s.kbChangeCounter);
+
+	// Quick-open palette state. Bound to Ctrl-P / Cmd-P globally while /kb is
+	// mounted. We swallow the default browser print dialog only when the
+	// active element isn't an input or textarea so cmd-P from inside the
+	// editor still prints if the user really wants to.
+	const [paletteOpen, setPaletteOpen] = useState(false);
+	useEffect(() => {
+		function onKey(e: KeyboardEvent): void {
+			const mod = e.ctrlKey || e.metaKey;
+			if (!mod || e.key.toLowerCase() !== "p") return;
+			const target = e.target as HTMLElement | null;
+			const tag = target?.tagName;
+			// Skip the binding when the user is typing into an input or textarea
+			// (e.g. the editor). Esc closes the editor; if they want search they
+			// can blur first.
+			if (tag === "INPUT" || tag === "TEXTAREA") return;
+			e.preventDefault();
+			setPaletteOpen((open) => !open);
+		}
+		window.addEventListener("keydown", onKey);
+		return () => window.removeEventListener("keydown", onKey);
+	}, []);
 
 	// Setup detection. An empty/missing kb is a first-run state; we render a
 	// welcome panel inside main instead of an empty tree so a fresh deck doesn't
@@ -97,6 +120,7 @@ export function KbView() {
 	);
 
 	return (
+		<>
 		<Layout
 			sidebar={<KbSidebar />}
 			inspector={
@@ -202,6 +226,7 @@ export function KbView() {
 												setCurrentPath(p);
 												setMobileDetailOpen(true);
 											}}
+											onOpenSearch={() => setPaletteOpen(true)}
 											kbChangeCounter={kbChangeCounter}
 										/>
 									</div>
@@ -223,7 +248,19 @@ export function KbView() {
 					)}
 				</div>
 			}
-		/>
+			/>
+			<KbCommandPalette
+				open={paletteOpen}
+				onClose={() => setPaletteOpen(false)}
+				onSelect={(p) => {
+					const next = new URLSearchParams(params);
+					next.set("path", p);
+					if (viewMode === "graph") next.set("view", "graph");
+					setParams(next, { replace: false });
+					setMobileDetailOpen(true);
+				}}
+			/>
+		</>
 	);
 }
 
@@ -411,16 +448,30 @@ function KbSidebar() {
 function KbTree({
 	currentPath,
 	onSelect,
+	onOpenSearch,
 	kbChangeCounter,
 }: {
 	currentPath: string | undefined;
 	onSelect: (p: string) => void;
+	onOpenSearch: () => void;
 	kbChangeCounter: number;
 }) {
 	return (
 		<div className="flex h-full min-h-0 flex-col">
 			<div className="border-b border-line px-3 py-2">
-				<div className="meta">Knowledge</div>
+				<div className="flex items-center gap-2">
+					<div className="meta">Knowledge</div>
+					<button
+						type="button"
+						onClick={onOpenSearch}
+						aria-label="Search KB (Ctrl-P)"
+						title="Search (Ctrl-P / ⌘P)"
+						className="ml-auto inline-flex h-7 items-center gap-1 rounded-md border border-line bg-paper-2 px-2 text-2xs text-ink-3 transition-colors hover:bg-paper-3 hover:text-ink"
+					>
+						<Search className="h-3 w-3" />
+						<span className="font-mono">Ctrl-P</span>
+					</button>
+				</div>
 				<div className="mt-0.5 text-xs text-ink-3">
 					Your Karpathy-style llm-wiki. Click a file to open; wikilinks navigate in-app.
 				</div>

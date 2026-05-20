@@ -40,6 +40,9 @@ import type {
 	KbTreeEntry,
 	KbTreeResponse,
 	KbWikilink,
+	KbSearchMatchKind,
+	KbSearchResponse,
+	KbSearchResult,
 } from "@omp-deck/protocol";
 
 import { logger } from "./log.ts";
@@ -97,6 +100,37 @@ const AMBIGUOUS_STEMS = new Set<string>([
 	"notes",
 ]);
 
+// Search match kinds, ranked by precedence. Lower rank = stronger match.
+// Used to pick the "best" kind to show in the result UI when a file
+// matches multiple ways.
+const KIND_RANK: Record<KbSearchMatchKind, number> = {
+	stem: 0,
+	title: 1,
+	tag: 2,
+	body: 3,
+};
+
+/**
+ * Build a single-line snippet centered on a body match. Avoids walking
+ * across line boundaries so the snippet reads cleanly even when the hit
+ * is mid-paragraph. Capped at SNIPPET_WIDTH chars with ellipsis on either
+ * side.
+ */
+function makeSnippet(text: string, matchIdx: number, matchLen: number): string {
+	const SNIPPET_WIDTH = 160;
+	const lineStart = Math.max(0, text.lastIndexOf("\n", matchIdx) + 1);
+	const lineEnd = text.indexOf("\n", matchIdx);
+	const end = lineEnd === -1 ? text.length : lineEnd;
+	const line = text.slice(lineStart, end);
+	if (line.length <= SNIPPET_WIDTH) return line.trim();
+	const relIdx = matchIdx - lineStart;
+	const half = Math.floor((SNIPPET_WIDTH - matchLen) / 2);
+	const from = Math.max(0, relIdx - half);
+	const to = Math.min(line.length, from + SNIPPET_WIDTH);
+	const prefix = from > 0 ? "…" : "";
+	const suffix = to < line.length ? "…" : "";
+	return (prefix + line.slice(from, to) + suffix).trim();
+}
 // Wikilink: `[[target|label]]`. Target may include `dir/path` and `#anchor`.
 // We deliberately exclude `]` and `|` from the target capture so labels work.
 const WIKILINK_RE = /\[\[([^\]|\n]+?)(?:\|([^\]\n]+?))?\]\]/g;
@@ -465,6 +499,112 @@ export class KbService {
 		}
 		const backlinks = this.graphCache.backlinks.get(cleanRel) ?? [];
 		return { path: cleanRel, backlinks };
+	}
+
+	/**
+	 * Hybrid scored search across the indexed kb. Cheap enough at v1 scale
+	 * (~1k files) to run end-to-end on every request; we don't pre-build an
+	 * inverted index yet. Scoring layers:
+	 *
+	 *   stem   filename matches the query (100 exact, 80 prefix, 60 contains)
+	 *   title  frontmatter `name` matches (60 exact, 40 prefix, 25 contains)
+	 *   tag    one of `frontmatter.tags` matches (50 exact, 20 contains)
+	 *   body   substring hit in the body (10 base + 1 per extra hit, capped)
+	 *
+	 * Body matches read each file once (this can grow expensive — at 1k
+	 * files of 9KB avg that's 9MB which still runs in ~50ms cold; we'll
+	 * revisit if the kb grows past 5k or queries get hammered). The first
+	 * body hit is centered into a 160-char snippet.
+	 */
+	async search(query: string, limit: number): Promise<KbSearchResponse> {
+		await this.ensureIndex();
+		const q = query.trim().toLowerCase();
+		if (!q) return { query, results: [], totalMatches: 0, truncated: false };
+		const cap = Math.max(1, Math.min(limit | 0 || 20, 100));
+
+		type Acc = { score: number; matchKind: KbSearchMatchKind; snippet: string };
+		const scored = new Map<string, Acc>();
+
+		const bump = (relPath: string, score: number, kind: KbSearchMatchKind, snippet: string): void => {
+			const prev = scored.get(relPath);
+			if (!prev) {
+				scored.set(relPath, { score, matchKind: kind, snippet });
+				return;
+			}
+			prev.score += score;
+			// Promote to a stronger match kind if this one outranks the existing.
+			if (KIND_RANK[kind] < KIND_RANK[prev.matchKind]) {
+				prev.matchKind = kind;
+			}
+			if (!prev.snippet && snippet) prev.snippet = snippet;
+		};
+
+		// Pass 1 — stem / title / tag against the cached index. No disk reads.
+		for (const r of this.records) {
+			const stem = r.stem; // already lowercased
+			if (stem === q) bump(r.relPath, 100, "stem", "");
+			else if (stem.startsWith(q)) bump(r.relPath, 80, "stem", "");
+			else if (stem.includes(q)) bump(r.relPath, 60, "stem", "");
+		}
+
+		// Pass 2 — title (frontmatter.name) and tags via the graph cache nodes.
+		if (!this.graphCache) this.graphCache = await this.buildGraph();
+		for (const node of this.graphCache.nodes) {
+			const title = node.title.toLowerCase();
+			if (title === q) bump(node.path, 60, "title", "");
+			else if (title.startsWith(q)) bump(node.path, 40, "title", "");
+			else if (title.includes(q)) bump(node.path, 25, "title", "");
+			for (const tag of node.tags) {
+				const t = tag.toLowerCase();
+				if (t === q) bump(node.path, 50, "tag", "");
+				else if (t.includes(q)) bump(node.path, 20, "tag", "");
+			}
+		}
+
+		// Pass 3 — body substring with snippet. Sequential reads (parallel
+		// here doesn't help much: the index is already in OS page cache from
+		// the graph build).
+		for (const r of this.records) {
+			let raw: string;
+			try {
+				raw = await readFile(r.absPath, "utf8");
+			} catch {
+				continue;
+			}
+			const lc = raw.toLowerCase();
+			const first = lc.indexOf(q);
+			if (first < 0) continue;
+			// Count additional hits (capped) for tiebreak signal.
+			let extra = 0;
+			let cursor = lc.indexOf(q, first + q.length);
+			while (cursor >= 0 && extra < 20) {
+				extra += 1;
+				cursor = lc.indexOf(q, cursor + q.length);
+			}
+			const snippet = makeSnippet(raw, first, q.length);
+			bump(r.relPath, 10 + extra, "body", snippet);
+		}
+
+		// Materialize results sorted by score desc, then path asc for stability.
+		const all: KbSearchResult[] = [];
+		for (const [relPath, acc] of scored) {
+			const record = this.byRelPath.get(relPath);
+			if (!record) continue;
+			const node = this.graphCache?.nodes.find((n) => n.path === relPath);
+			const dir = record.dir.split("/")[0] ?? "";
+			all.push({
+				path: relPath,
+				title: node?.title ?? record.stem,
+				dir,
+				score: acc.score,
+				matchKind: acc.matchKind,
+				snippet: acc.snippet,
+			});
+		}
+		all.sort((a, b) => b.score - a.score || a.path.localeCompare(b.path));
+		const truncated = all.length > cap;
+		const results = truncated ? all.slice(0, cap) : all;
+		return { query, results, totalMatches: all.length, truncated };
 	}
 
 	/**

@@ -105,6 +105,19 @@ export function buildKbRouter(service: KbService): Hono {
 		}
 	});
 
+	app.get("/kb/search", async (c) => {
+		const q = c.req.query("q") ?? "";
+		const limitRaw = c.req.query("limit");
+		const limit = limitRaw ? Number.parseInt(limitRaw, 10) : 20;
+		try {
+			const body = await service.search(q, Number.isFinite(limit) ? limit : 20);
+			return c.json(body);
+		} catch (err) {
+			log.error(`search failed`, err);
+			return c.json({ error: String(err) }, 500);
+		}
+	});
+
 	app.get("/kb/status", async (c) => {
 		try {
 			const body = await service.getStatus();

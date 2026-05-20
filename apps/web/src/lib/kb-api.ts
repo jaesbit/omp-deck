@@ -2,6 +2,7 @@ import type {
 	KbBacklinksResponse,
 	KbFileResponse,
 	KbGraphResponse,
+	KbSearchResponse,
 	KbTreeResponse,
 } from "@omp-deck/protocol";
 
@@ -52,6 +53,9 @@ export const kbApi = {
 	},
 	backlinks(path: string): Promise<KbBacklinksResponse> {
 		return req<KbBacklinksResponse>(`/kb/backlinks${qs({ path })}`);
+	},
+	search(q: string, limit = 20): Promise<KbSearchResponse> {
+		return req<KbSearchResponse>(`/kb/search${qs({ q, limit: String(limit) })}`);
 	},
 	status(): Promise<KbStatusResponse> {
 		return req<KbStatusResponse>("/kb/status");
