@@ -63,6 +63,37 @@ shares its session + auth store. Run both; they coexist.
   agent from your phone with allowlist gating and streaming `editMessageText`
   replies.
 
+## How it compares
+
+omp-deck only makes sense as a pair with the
+[`omp`](https://github.com/can1357/oh-my-pi) coding agent — omp is the agent
+loop, omp-deck is the cockpit you drive it from. Compared against the closest
+neighbors in the agentic-coding space:
+
+|                                | **omp + omp-deck**                                                                | **[Claude Code](https://github.com/anthropics/claude-code)** | **[Hermes Agent](https://github.com/NousResearch/hermes-agent)** | **[OpenClaw](https://github.com/openclaw/openclaw)**                       |
+|--------------------------------|-----------------------------------------------------------------------------------|--------------------------------------------------------------|------------------------------------------------------------------|----------------------------------------------------------------------------|
+| Form factor                    | Terminal TUI (omp) + web cockpit (omp-deck)                                       | Terminal CLI / IDE plugin                                    | Terminal TUI + multi-channel gateway                             | Daemon + multi-channel gateway                                             |
+| Underlying agent               | omp, in-process via `@oh-my-pi/pi-coding-agent` SDK                               | Anthropic-built CLI                                          | Hermes core (Nous Research)                                      | OpenClaw Gateway                                                           |
+| Model support                  | Anthropic, OpenAI, Google AI / Vertex, OpenRouter, Ollama, llama.cpp, LM Studio, any OpenAI-compatible | Anthropic Claude only                                        | Model-agnostic (Nous Portal, OpenRouter, NIM, …)                 | Model-agnostic (profiles in `openclaw.json`, w/ fallback chain)            |
+| Hosting                        | Self-hosted Bun process, loopback-only by default                                 | Anthropic-hosted CLI                                         | Local / Docker / SSH / Modal / Daytona / Vercel Sandbox          | Self-hosted on owned host (Mac mini, VPS)                                  |
+| Auth                           | OAuth, API key, or provider key — shared with the omp CLI                         | Anthropic OAuth / API key                                    | Per-provider keys                                                | Per-provider keys + profile rotation                                       |
+| Multi-session chat             | First-class sidebar in the deck                                                   | Single session at a time                                     | Single agent across channels                                     | Per-channel sessions                                                       |
+| Kanban / task board            | Built-in, WS-synced, `T-N` display IDs                                            | —                                                            | —                                                                | —                                                                          |
+| Scheduled routines             | Cron via `croner` (`bash` / `prompt` / `script`)                                  | —                                                            | —                                                                | Heartbeat scheduler (~30 min)                                              |
+| Inbox + promote-to-task        | Built-in                                                                          | —                                                            | —                                                                | —                                                                          |
+| Plugins / skills               | SDK loader + in-app marketplace (Anthropic plugin format)                         | `claude plugins` registry                                    | Skills with autonomous creation + refinement                     | Skills installed from ClawHub; skills can write skills                     |
+| Self-improving over time       | — (skills are user/marketplace-authored)                                          | —                                                            | ✅ learning loop, deepening user model                            | Skills can self-install                                                    |
+| Messenger bridges              | Telegram (Slack / Discord / Matrix on the roadmap)                                | —                                                            | Telegram, Discord, Slack, WhatsApp, Signal                       | 20+ (WhatsApp, Telegram, Slack, Discord, iMessage, Matrix, Teams, …)       |
+| License                        | MIT                                                                               | Proprietary (Anthropic Commercial Terms)                     | Open source (Nous Research)                                      | Open source                                                                |
+
+The short version: **Claude Code** is the polished, vendor-supported terminal
+experience for Claude. **Hermes** is the self-improving agent that compounds
+skills over time and supports serverless backends. **OpenClaw** is the
+multi-channel personal assistant that lives wherever you message from.
+**omp + omp-deck** is the cockpit shape — a model-agnostic coding agent in
+your terminal *plus* a kanban / routines / inbox / marketplace / Telegram-bridge
+web surface to drive it.
+
 ## Quickstart
 
 ### If you already use omp on this machine
