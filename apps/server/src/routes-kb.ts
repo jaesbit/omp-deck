@@ -82,6 +82,29 @@ export function buildKbRouter(service: KbService): Hono {
 		}
 	});
 
+	app.get("/kb/graph", async (c) => {
+		try {
+			const body = await service.getGraph();
+			return c.json(body);
+		} catch (err) {
+			log.error(`getGraph failed`, err);
+			return c.json({ error: String(err) }, 500);
+		}
+	});
+
+	app.get("/kb/backlinks", async (c) => {
+		const subpath = c.req.query("path");
+		if (!subpath) return c.json({ error: "path required" }, 400);
+		try {
+			const body = await service.getBacklinks(subpath);
+			if (!body) return c.json({ error: "not found" }, 404);
+			return c.json(body);
+		} catch (err) {
+			log.error(`getBacklinks failed`, err);
+			return c.json({ error: String(err) }, 500);
+		}
+	});
+
 	return app;
 }
 

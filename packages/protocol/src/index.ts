@@ -405,6 +405,57 @@ export interface KbFileResponse {
 }
 
 /**
+ * One node in the KB graph. `dir` is the top-level kb directory (used by the
+ * graph view to color-code: domains / tools / system / writing / cryptocracy).
+ * `inbound` / `outbound` are degrees for sizing + isolation toggles.
+ */
+export interface KbGraphNode {
+	/** Stable id — same as `path`. */
+	id: string;
+	path: string;
+	title: string;
+	/** Top-level directory ("" for files at kb root). */
+	dir: string;
+	inbound: number;
+	outbound: number;
+	/** Frontmatter tags, if any — used for tag filtering. */
+	tags: string[];
+}
+
+export interface KbGraphEdge {
+	source: string;
+	target: string;
+}
+
+export interface KbGraphResponse {
+	nodes: KbGraphNode[];
+	edges: KbGraphEdge[];
+	/** Number of wikilink occurrences that didn't resolve to a node. */
+	unresolvedCount: number;
+	/** Total nodes that exist in the index (>= nodes.length when truncated). */
+	totalNodes: number;
+	/**
+	 * True when the response was truncated at the v1 cap (10_000 nodes). UI
+	 * should surface a warning so the user knows the graph isn't whole.
+	 */
+	truncated: boolean;
+}
+
+export interface KbBacklink {
+	/** Source file whose body links to the queried path. */
+	source: string;
+	/** Short snippet of body around the link (best-effort, line-bounded). */
+	snippet: string;
+	/** Render label that was used in the source's wikilink. */
+	label: string;
+}
+
+export interface KbBacklinksResponse {
+	path: string;
+	backlinks: KbBacklink[];
+}
+
+/**
  * Co-located file under a skill's directory. Listed recursively (depth-first)
  * with `relPath` carrying the path from the skill dir; the UI groups by
  * parent. Symlinks and excluded dirs (`node_modules`, `__pycache__`, `.git`)

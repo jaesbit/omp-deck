@@ -31,7 +31,12 @@ import * as path from "node:path";
 import YAML from "yaml";
 
 import type {
+	KbBacklink,
+	KbBacklinksResponse,
 	KbFileResponse,
+	KbGraphEdge,
+	KbGraphNode,
+	KbGraphResponse,
 	KbTreeEntry,
 	KbTreeResponse,
 	KbWikilink,
@@ -84,6 +89,17 @@ const WIKILINK_RE = /\[\[([^\]|\n]+?)(?:\|([^\]\n]+?))?\]\]/g;
 const FENCED_CODE_RE = /```[\s\S]*?(?:```|$)/g;
 const INLINE_CODE_RE = /`[^`\n]+`/g;
 
+// Cap the graph payload at v1 so a runaway kb doesn't blow the wire. Sized
+// generously for the current ~600-node kb with headroom for several years
+// of growth. Bumping this is safe; the UI surfaces a `truncated` warning.
+const GRAPH_MAX_NODES = 10_000;
+
+interface GraphCache {
+	nodes: KbGraphNode[];
+	edges: KbGraphEdge[];
+	backlinks: Map<string, KbBacklink[]>;
+	unresolvedCount: number;
+}
 interface FileRecord {
 	relPath: string; // forward-slash kb-relative
 	absPath: string;
@@ -104,6 +120,7 @@ export class KbService {
 	private byStem = new Map<string, FileRecord[]>();
 	private indexReady = false;
 	private indexPromise: Promise<void> | undefined;
+	private graphCache: GraphCache | undefined;
 
 	constructor(opts: KbServiceOptions) {
 		// Always store the root as an absolute path with native separators.
@@ -125,6 +142,7 @@ export class KbService {
 	/** Invalidate cache + rebuild on next request. Called by the watcher. */
 	invalidate(): void {
 		this.indexReady = false;
+		this.graphCache = undefined;
 	}
 
 	/**
@@ -339,6 +357,129 @@ export class KbService {
 		return { kind: "ok", response };
 	}
 
+	/**
+	 * Full wiki-link graph + frontmatter-tag aggregation. Built lazily on
+	 * first request and cached until the watcher invalidates the index. For
+	 * the v1 scale (~600 visible nodes) the build cost is dominated by file
+	 * reads — runs in under a second even cold.
+	 *
+	 * Caps the response at GRAPH_MAX_NODES; sets `truncated: true` when the
+	 * cap fires so the UI can warn the user.
+	 */
+	async getGraph(): Promise<KbGraphResponse> {
+		await this.ensureIndex();
+		if (!this.graphCache) {
+			this.graphCache = await this.buildGraph();
+		}
+		return shapeGraphResponse(this.graphCache);
+	}
+
+	async getBacklinks(subpath: string): Promise<KbBacklinksResponse | undefined> {
+		await this.ensureIndex();
+		const cleanRel = normalizeRel(subpath);
+		if (!cleanRel) return undefined;
+		if (this.pathIsExcluded(cleanRel)) return undefined;
+		if (!this.byRelPath.has(cleanRel)) return undefined;
+		if (!this.graphCache) {
+			this.graphCache = await this.buildGraph();
+		}
+		const backlinks = this.graphCache.backlinks.get(cleanRel) ?? [];
+		return { path: cleanRel, backlinks };
+	}
+
+	/**
+	 * Walk every record, parse its body, extract wikilinks, build:
+	 *   - nodes[]: one per file with degree counts + tags
+	 *   - edges[]: one per resolved wikilink (deduplicated per source+target pair)
+	 *   - backlinks: target → KbBacklink[]
+	 *
+	 * Unresolved wikilinks bump the global counter only; they don't get a
+	 * placeholder node (the UI can prompt-create via the existing flow).
+	 */
+	private async buildGraph(): Promise<GraphCache> {
+		const t0 = performance.now();
+		const nodes = new Map<string, KbGraphNode>();
+		const edges: KbGraphEdge[] = [];
+		const backlinks = new Map<string, KbBacklink[]>();
+		const edgeSeen = new Set<string>();
+		let unresolvedCount = 0;
+
+		// Pass 1: seed nodes (so unreached files still appear as orphans).
+		for (const r of this.records) {
+			const dir = r.dir.split("/")[0] ?? "";
+			nodes.set(r.relPath, {
+				id: r.relPath,
+				path: r.relPath,
+				title: r.stem,
+				dir,
+				inbound: 0,
+				outbound: 0,
+				tags: [],
+			});
+		}
+
+		// Pass 2: read each file in parallel batches, parse frontmatter (for
+		// tags + title), extract wikilinks. Chunked at 32 to avoid opening
+		// too many fds on Windows where ENFILE shows up around 200+. At v1
+		// scale (805 files) this brings cold build from ~10s down to ~1s.
+		const CHUNK = 32;
+		for (let i = 0; i < this.records.length; i += CHUNK) {
+			const chunk = this.records.slice(i, i + CHUNK);
+			const reads = await Promise.all(
+				chunk.map((r) =>
+					readFile(r.absPath, "utf8").then(
+						(raw) => ({ r, raw }),
+						() => ({ r, raw: undefined as string | undefined }),
+					),
+				),
+			);
+			for (const { r, raw } of reads) {
+				if (raw === undefined) continue;
+			const { frontmatter, body } = parseFrontmatter(raw);
+			const node = nodes.get(r.relPath);
+			if (!node) continue;
+			if (typeof frontmatter.name === "string" && (frontmatter.name as string).trim()) {
+				node.title = (frontmatter.name as string).trim();
+			}
+			if (Array.isArray(frontmatter.tags)) {
+				node.tags = (frontmatter.tags as unknown[]).filter((t): t is string => typeof t === "string");
+			}
+
+			const sourceDir = r.dir;
+			const wikilinks = this.extractWikilinks(body, sourceDir);
+			for (const wl of wikilinks) {
+				if (!wl.resolved) {
+					unresolvedCount += 1;
+					continue;
+				}
+				const key = `${r.relPath}\0${wl.resolved}`;
+				if (edgeSeen.has(key)) continue;
+				edgeSeen.add(key);
+				edges.push({ source: r.relPath, target: wl.resolved });
+				node.outbound += 1;
+				const targetNode = nodes.get(wl.resolved);
+				if (targetNode) targetNode.inbound += 1;
+
+				const list = backlinks.get(wl.resolved) ?? [];
+				list.push({
+					source: r.relPath,
+					label: wl.label,
+					snippet: extractSnippet(body, wl.raw),
+				});
+				backlinks.set(wl.resolved, list);
+			}
+			}
+		}
+
+		const ms = (performance.now() - t0).toFixed(1);
+		log.info(`built kb graph: ${nodes.size} nodes, ${edges.length} edges, ${unresolvedCount} unresolved (${ms}ms)`);
+		return {
+			nodes: Array.from(nodes.values()),
+			edges,
+			backlinks,
+			unresolvedCount,
+		};
+	}
 	// ─── internals ───────────────────────────────────────────────────────
 
 	private async buildIndex(): Promise<void> {
@@ -675,6 +816,59 @@ function insideAnyRange(ranges: Array<[number, number]>, pos: number): boolean {
 		if (s > pos) return false;
 	}
 	return false;
+}
+
+/**
+ * Convert the in-memory `GraphCache` to a wire response with the v1
+ * truncation cap applied. Drops orphan nodes only as a last resort — we
+ * sort by inbound+outbound degree desc and keep the top GRAPH_MAX_NODES.
+ */
+function shapeGraphResponse(cache: GraphCache): KbGraphResponse {
+	const total = cache.nodes.length;
+	if (total <= GRAPH_MAX_NODES) {
+		return {
+			nodes: cache.nodes,
+			edges: cache.edges,
+			unresolvedCount: cache.unresolvedCount,
+			totalNodes: total,
+			truncated: false,
+		};
+	}
+	const sortedNodes = [...cache.nodes].sort(
+		(a, b) => b.inbound + b.outbound - (a.inbound + a.outbound),
+	);
+	const keep = new Set(sortedNodes.slice(0, GRAPH_MAX_NODES).map((n) => n.path));
+	const nodes = cache.nodes.filter((n) => keep.has(n.path));
+	const edges = cache.edges.filter((e) => keep.has(e.source) && keep.has(e.target));
+	return {
+		nodes,
+		edges,
+		unresolvedCount: cache.unresolvedCount,
+		totalNodes: total,
+		truncated: true,
+	};
+}
+
+/**
+ * Best-effort snippet for a backlink: return the line containing `raw`, or
+ * an empty string if not found. Lines are 1-indexed in the surrounding
+ * code, but the snippet itself just stands on its own.
+ */
+function extractSnippet(body: string, raw: string): string {
+	const needle = `[[${raw}]]`;
+	const idx = body.indexOf(needle);
+	if (idx < 0) return "";
+	const lineStart = body.lastIndexOf("\n", idx) + 1;
+	const lineEnd = body.indexOf("\n", idx);
+	const end = lineEnd === -1 ? body.length : lineEnd;
+	const line = body.slice(lineStart, end).trim();
+	if (line.length <= 200) return line;
+	// Long line — center the snippet on the wikilink.
+	const lineRelativeIdx = idx - lineStart;
+	const window = 100;
+	const from = Math.max(0, lineRelativeIdx - window);
+	const to = Math.min(line.length, lineRelativeIdx + window);
+	return (from > 0 ? "…" : "") + line.slice(from, to) + (to < line.length ? "…" : "");
 }
 
 export function resolveKbRoot(): string {
