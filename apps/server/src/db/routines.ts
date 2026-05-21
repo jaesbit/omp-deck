@@ -6,7 +6,13 @@
  * rebuild the schedule without re-evaluating every cron expression up front.
  */
 
-import type { Routine, RoutineActionKind, RoutineRun } from "@omp-deck/protocol";
+import type {
+	Routine,
+	RoutineActionKind,
+	RoutineBudget,
+	RoutineConcurrency,
+	RoutineRun,
+} from "@omp-deck/protocol";
 
 import { getDb, id, nowIso } from "./index.ts";
 
@@ -23,6 +29,13 @@ interface RoutineRow {
 	updated_at: string;
 	last_run_at: string | null;
 	next_run_at: string | null;
+	// V1 columns (003-routines-v1)
+	spec_yaml: string | null;
+	concurrency: string;
+	budget_json: string | null;
+	tags: string | null;
+	timezone: string | null;
+	spec_version: number;
 }
 
 interface RunRow {
@@ -35,9 +48,18 @@ interface RunRow {
 	stderr_excerpt: string;
 	error: string | null;
 	trigger: string;
+	// V1 columns (003-routines-v1)
+	trigger_payload: string | null;
+	total_llm_tokens: number;
+	total_llm_cost_micros: number;
+	aborted_at: string | null;
+	abort_reason: string | null;
+	step_count_total: number;
+	step_count_failed: number;
 }
 
 function rowToRoutine(r: RoutineRow): Routine {
+	const specVersion = (r.spec_version === 1 ? 1 : 0) as 0 | 1;
 	const out: Routine = {
 		id: r.id,
 		name: r.name,
@@ -48,10 +70,24 @@ function rowToRoutine(r: RoutineRow): Routine {
 		enabled: r.enabled === 1,
 		createdAt: r.created_at,
 		updatedAt: r.updated_at,
+		specVersion,
+		concurrency: r.concurrency as RoutineConcurrency,
 	};
 	if (r.action_cwd !== null) out.actionCwd = r.action_cwd;
 	if (r.last_run_at !== null) out.lastRunAt = r.last_run_at;
 	if (r.next_run_at !== null) out.nextRunAt = r.next_run_at;
+	if (r.spec_yaml !== null) out.specYaml = r.spec_yaml;
+	if (r.timezone !== null) out.timezone = r.timezone;
+	if (r.budget_json !== null) {
+		try {
+			out.budget = JSON.parse(r.budget_json) as RoutineBudget;
+		} catch {
+			/* malformed JSON in budget_json — silently drop; preserves row visibility */
+		}
+	}
+	if (r.tags !== null && r.tags.length > 0) {
+		out.tags = r.tags.split(",").map((t) => t.trim()).filter((t) => t.length > 0);
+	}
 	return out;
 }
 
@@ -62,11 +98,18 @@ function rowToRun(r: RunRow): RoutineRun {
 		startedAt: r.started_at,
 		stdoutExcerpt: r.stdout_excerpt,
 		stderrExcerpt: r.stderr_excerpt,
-		trigger: r.trigger as "cron" | "manual",
+		trigger: r.trigger as RoutineRun["trigger"],
+		totalLlmTokens: r.total_llm_tokens,
+		totalLlmCostMicros: r.total_llm_cost_micros,
+		stepCountTotal: r.step_count_total,
+		stepCountFailed: r.step_count_failed,
 	};
 	if (r.ended_at !== null) out.endedAt = r.ended_at;
 	if (r.exit_code !== null) out.exitCode = r.exit_code;
 	if (r.error !== null) out.error = r.error;
+	if (r.trigger_payload !== null) out.triggerPayload = r.trigger_payload;
+	if (r.aborted_at !== null) out.abortedAt = r.aborted_at;
+	if (r.abort_reason !== null) out.abortReason = r.abort_reason;
 	return out;
 }
 
@@ -74,7 +117,8 @@ export function listRoutines(): Routine[] {
 	const rows = getDb()
 		.query<RoutineRow, []>(
 			`SELECT id, name, description, cron, action_kind, action_body, action_cwd, enabled,
-			        created_at, updated_at, last_run_at, next_run_at
+			        created_at, updated_at, last_run_at, next_run_at,
+			        spec_yaml, concurrency, budget_json, tags, timezone, spec_version
 			 FROM routines ORDER BY name ASC`,
 		)
 		.all() as RoutineRow[];
@@ -85,7 +129,8 @@ export function getRoutine(routineId: string): Routine | undefined {
 	const row = getDb()
 		.query<RoutineRow, [string]>(
 			`SELECT id, name, description, cron, action_kind, action_body, action_cwd, enabled,
-			        created_at, updated_at, last_run_at, next_run_at
+			        created_at, updated_at, last_run_at, next_run_at,
+			        spec_yaml, concurrency, budget_json, tags, timezone, spec_version
 			 FROM routines WHERE id = ?`,
 		)
 		.get(routineId) as RoutineRow | null;
@@ -127,6 +172,142 @@ export function createRoutine(input: {
 	const out = getRoutine(routineId);
 	if (!out) throw new Error("createRoutine failed");
 	return out;
+}
+
+/**
+ * Create a V1 (multi-step) routine. Stores spec_yaml as the source of truth;
+ * derives `cron` from the first cron trigger (for V0-style queries that look
+ * at the column directly), and stuffs concurrency/budget/timezone/tags into
+ * their dedicated columns.
+ */
+export function createV1Routine(input: {
+	name: string;
+	description?: string;
+	specYaml: string;
+	spec: import("@omp-deck/protocol").RoutineSpec;
+	enabled?: boolean;
+}): Routine {
+	const routineId = `r_${id().toLowerCase().slice(0, 18)}`;
+	const now = nowIso();
+	const firstCron = input.spec.trigger.find((t) => "cron" in t) as { cron: string } | undefined;
+	const cron = firstCron?.cron ?? "";
+	const concurrency = input.spec.concurrency ?? "skip";
+	const budgetJson = input.spec.budget ? JSON.stringify(input.spec.budget) : null;
+	const tags = input.spec.tags?.join(",") ?? null;
+	const timezone = input.spec.timezone ?? null;
+	getDb()
+		.prepare<
+			unknown,
+			[
+				string,
+				string,
+				string,
+				string,
+				string,
+				string,
+				number,
+				string,
+				string,
+				string,
+				string,
+				string | null,
+				string | null,
+				string | null,
+				number,
+			]
+		>(
+			`INSERT INTO routines
+			   (id, name, description, cron, action_kind, action_body, enabled, created_at, updated_at,
+			    spec_yaml, concurrency, budget_json, tags, timezone, spec_version)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		)
+		.run(
+			routineId,
+			input.name,
+			input.description ?? "",
+			cron,
+			// Sentinel V0 fields — never read for spec_version=1 routines, but
+			// must satisfy the NOT NULL + CHECK constraints from 001-init.sql.
+			"script",
+			"",
+			input.enabled === false ? 0 : 1,
+			now,
+			now,
+			input.specYaml,
+			concurrency,
+			budgetJson,
+			tags,
+			timezone,
+			1,
+		);
+	const out = getRoutine(routineId);
+	if (!out) throw new Error("createV1Routine failed");
+	return out;
+}
+
+/**
+ * Update a V1 (multi-step) routine. Replaces spec_yaml + derived columns
+ * (cron mirror, concurrency, budget_json, tags, timezone) atomically. The
+ * `enabled` flag may be patched independently of the spec.
+ */
+export function updateV1Routine(
+	routineId: string,
+	patch: {
+		name?: string;
+		description?: string;
+		specYaml?: string;
+		spec?: import("@omp-deck/protocol").RoutineSpec;
+		enabled?: boolean;
+	},
+): Routine | undefined {
+	const existing = getRoutine(routineId);
+	if (!existing) return undefined;
+	if (existing.specVersion !== 1) return undefined;
+	const now = nowIso();
+	if (patch.specYaml !== undefined && patch.spec !== undefined) {
+		const spec = patch.spec;
+		const firstCron = spec.trigger.find((t) => "cron" in t) as { cron: string } | undefined;
+		const cron = firstCron?.cron ?? "";
+		const concurrency = spec.concurrency ?? "skip";
+		const budgetJson = spec.budget ? JSON.stringify(spec.budget) : null;
+		const tags = spec.tags && spec.tags.length > 0 ? spec.tags.join(",") : null;
+		const timezone = spec.timezone ?? null;
+		const name = patch.name ?? spec.name ?? existing.name;
+		const description = patch.description ?? spec.description ?? existing.description;
+		const enabled = patch.enabled === undefined ? existing.enabled : patch.enabled;
+		getDb()
+			.prepare<
+				unknown,
+				[string, string, string, string, string, string | null, string | null, string | null, number, string, string]
+			>(
+				`UPDATE routines SET name = ?, description = ?, cron = ?, spec_yaml = ?, concurrency = ?,
+				        budget_json = ?, tags = ?, timezone = ?, enabled = ?, updated_at = ?
+				 WHERE id = ?`,
+			)
+			.run(
+				name,
+				description,
+				cron,
+				patch.specYaml,
+				concurrency,
+				budgetJson,
+				tags,
+				timezone,
+				enabled ? 1 : 0,
+				now,
+				routineId,
+			);
+	} else if (patch.enabled !== undefined || patch.name !== undefined || patch.description !== undefined) {
+		const name = patch.name ?? existing.name;
+		const description = patch.description ?? existing.description;
+		const enabled = patch.enabled === undefined ? existing.enabled : patch.enabled;
+		getDb()
+			.prepare<unknown, [string, string, number, string, string]>(
+				`UPDATE routines SET name = ?, description = ?, enabled = ?, updated_at = ? WHERE id = ?`,
+			)
+			.run(name, description, enabled ? 1 : 0, now, routineId);
+	}
+	return getRoutine(routineId);
 }
 
 export function updateRoutine(
@@ -195,7 +376,7 @@ export function setRoutineSchedule(
 
 // ─── Runs ──────────────────────────────────────────────────────────────────
 
-export function startRun(routineId: string, trigger: "cron" | "manual"): RoutineRun {
+export function startRun(routineId: string, trigger: RoutineRun["trigger"]): RoutineRun {
 	const runId = `run_${id().toLowerCase().slice(0, 18)}`;
 	const startedAt = nowIso();
 	getDb()
@@ -231,7 +412,9 @@ export function finishRun(
 export function listRuns(routineId: string, limit = 20): RoutineRun[] {
 	const rows = getDb()
 		.query<RunRow, [string, number]>(
-			`SELECT id, routine_id, started_at, ended_at, exit_code, stdout_excerpt, stderr_excerpt, error, trigger
+			`SELECT id, routine_id, started_at, ended_at, exit_code, stdout_excerpt, stderr_excerpt, error, trigger,
+			        trigger_payload, total_llm_tokens, total_llm_cost_micros, aborted_at, abort_reason,
+			        step_count_total, step_count_failed
 			 FROM routine_runs
 			 WHERE routine_id = ?
 			 ORDER BY started_at DESC
@@ -244,7 +427,9 @@ export function listRuns(routineId: string, limit = 20): RoutineRun[] {
 export function getRun(runId: string): RoutineRun | undefined {
 	const row = getDb()
 		.query<RunRow, [string]>(
-			`SELECT id, routine_id, started_at, ended_at, exit_code, stdout_excerpt, stderr_excerpt, error, trigger
+			`SELECT id, routine_id, started_at, ended_at, exit_code, stdout_excerpt, stderr_excerpt, error, trigger,
+			        trigger_payload, total_llm_tokens, total_llm_cost_micros, aborted_at, abort_reason,
+			        step_count_total, step_count_failed
 			 FROM routine_runs WHERE id = ?`,
 		)
 		.get(runId) as RunRow | null;

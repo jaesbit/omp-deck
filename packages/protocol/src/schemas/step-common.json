@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://omp-deck.app/schemas/step-common.json",
+  "title": "RoutineStepCommon",
+  "description": "Fields shared by every routine step type. Step-specific schemas allOf-merge this with their own required fields.",
+  "type": "object",
+  "required": ["id"],
+  "properties": {
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[a-z][a-z0-9_]*$",
+      "description": "Unique within the routine. Lowercase alpha + digits + underscore. Used as the lookup key for steps.<id>.json downstream."
+    },
+    "when": {
+      "type": "string",
+      "description": "JS expression evaluated in the quickjs sandbox against the run context. If the expression is falsy, the step is skipped (status='skipped')."
+    },
+    "on_failure": {
+      "enum": ["abort", "continue", "retry"],
+      "default": "abort",
+      "description": "abort: stop the run; continue: log + go to next step; retry: per `retry` policy."
+    },
+    "retry": {
+      "type": "object",
+      "required": ["times", "backoff"],
+      "properties": {
+        "times": { "type": "integer", "minimum": 1, "maximum": 20 },
+        "backoff": { "enum": ["linear", "exponential"] },
+        "max_delay_secs": { "type": "number", "minimum": 0 },
+        "after_retry": { "enum": ["abort", "continue"], "default": "abort" }
+      },
+      "additionalProperties": false
+    },
+    "timeout_secs": {
+      "type": "number",
+      "minimum": 1,
+      "description": "Per-step wall clock. Default 60 for non-agent steps, 600 for agent steps. Hard-capped by routine-level budget.max_duration_secs."
+    }
+  }
+}

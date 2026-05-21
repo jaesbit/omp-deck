@@ -954,13 +954,15 @@ function ProviderCard({
 			: info.state === "api-key"
 				? "API key configured"
 				: "Not configured";
+	const stateBadgeTone: "success" | "accent" | "default" =
+		info.state === "oauth" ? "success" : info.state === "api-key" ? "accent" : "default";
 	return (
 		<div className={cn("flex flex-col gap-2 rounded border p-3", tone)}>
 			<div className="flex items-baseline justify-between gap-2">
 				<div className="truncate text-sm font-medium text-ink" title={info.name}>
 					{info.name}
 				</div>
-				<Badge>{stateLabel}</Badge>
+				<Badge tone={stateBadgeTone}>{stateLabel}</Badge>
 			</div>
 			<div className="font-mono text-2xs text-ink-4">
 				{info.id}

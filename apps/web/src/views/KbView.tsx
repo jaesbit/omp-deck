@@ -735,7 +735,8 @@ function KbFilePane({
 		(href: string) => {
 			if (href.startsWith("kb-link:")) {
 				const raw = href.slice("kb-link:".length);
-				const [target] = raw.split("?", 1);
+				const target = raw.split("?", 1)[0];
+				if (!target) return true;
 				onNavigate(decodeURI(target));
 				return true;
 			}

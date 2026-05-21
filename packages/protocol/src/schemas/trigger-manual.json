@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://omp-deck.app/schemas/trigger-manual.json",
+  "title": "RoutineTrigger — manual",
+  "description": "User-invoked trigger. The dashboard 'Run now' button uses this path; manual params are validated against params_schema if present.",
+  "type": "object",
+  "required": ["manual"],
+  "properties": {
+    "manual": {
+      "type": "object",
+      "properties": {
+        "params_schema": {
+          "description": "Optional JSON Schema for the manual-run dashboard form. When omitted, manual runs accept an empty params object."
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

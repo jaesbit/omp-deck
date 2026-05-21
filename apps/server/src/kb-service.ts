@@ -828,7 +828,9 @@ export class KbService {
 		const stripped = body.replace(FENCED_CODE_RE, "").replace(INLINE_CODE_RE, "");
 		const out: KbWikilink[] = [];
 		for (const m of stripped.matchAll(WIKILINK_RE)) {
-			const rawTarget = m[1].trim();
+			const rawTargetMatch = m[1];
+			if (rawTargetMatch === undefined) continue;
+			const rawTarget = rawTargetMatch.trim();
 			const label = (m[2] ?? rawTarget).trim();
 			let target = rawTarget;
 			let anchor: string | null = null;
@@ -887,7 +889,9 @@ export class KbService {
 				out += m[0]; // leave wikilinks inside code blocks alone
 				continue;
 			}
-			const rawTarget = m[1].trim();
+			const rawTargetMatch = m[1];
+			if (rawTargetMatch === undefined) continue;
+			const rawTarget = rawTargetMatch.trim();
 			const labelRaw = (m[2] ?? rawTarget).trim();
 			let target = rawTarget;
 			let anchor: string | null = null;
@@ -938,14 +942,17 @@ export class KbService {
 		if (!candidates || candidates.length === 0) {
 			return { resolved: null, reason: "no-match" };
 		}
-		if (candidates.length === 1) return { resolved: candidates[0].relPath };
+		const only = candidates[0];
+		if (candidates.length === 1 && only) return { resolved: only.relPath };
 
 		// Tiebreaker: prefer same-directory, then nearest-ancestor, then
 		// alphabetical relPath.
 		const sameDir = candidates.find((c) => c.dir === sourceDir);
 		if (sameDir) return { resolved: sameDir.relPath };
 		const sorted = [...candidates].sort((a, b) => a.relPath.localeCompare(b.relPath));
-		return { resolved: sorted[0].relPath };
+		const first = sorted[0];
+		if (first) return { resolved: first.relPath };
+		return { resolved: null, reason: "no-match" };
 	}
 }
 

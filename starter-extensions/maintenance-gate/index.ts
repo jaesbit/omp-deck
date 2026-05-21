@@ -1,27 +1,48 @@
 /**
  * maintenance-gate
  *
- * An omp SDK extension that nudges the agent at turn-end (every ~10 turns)
- * to capture the session's reusable output into the canonical OMP folders
- * before the conversation moves on. Synthesizes a follow-up user message
- * containing a structured "Maintenance check" prompt; the agent must either
- * write into a capture path or state the literal phrase
+ * Nudges the agent at turn-end to capture session output into the canonical
+ * OMP folders before the conversation moves on. Synthesizes a follow-up
+ * user message with a structured "Maintenance check" prompt; the agent
+ * either writes into a capture path or states the literal phrase
  * "No maintenance needed" to release the check.
  *
- * Adapted from vincitamore/opus-extensions maintenance-gate. Differences:
- *   - Org-root detection is structural (inbox/ + tasks/ + knowledge?/context?
- *     present) instead of hardcoded `documents/opus|materia` substrings.
- *     This makes the gate universal across OMP sessions: any cwd with the
- *     canonical org layout activates the gate.
- *   - Capture detection is path-only (no examen MCP). Watches `write` /
- *     `edit` tool calls for targets under inbox/ tasks/ knowledge/ queries/
- *     context/ reminders/ AND skill SKILL.md writes under .omp/(skills|agent/skills).
- *   - Drops mercury wake / hook-exec logging.
- *   - State file lives at `<orgDir>/.omp/maintenance-gate-state.json`.
- *   - Reminder copy is OMP-native (no principle lattice, no automation-
- *     proposal row — those concepts don't exist in our tree).
+ * Design (rewritten 2026-05-21 after "fires too often" feedback):
  *
- * Tuning constants are env-overridable for fast iteration without redeploy.
+ *   The gate fires AT MOST ONCE per "release segment". A release segment
+ *   begins at session start (or right after the most recent release event)
+ *   and ends at the next release event. A release event is:
+ *
+ *     - the agent writes into a capture path (inbox/, tasks/, knowledge/,
+ *       queries/, context/, reminders/, or a SKILL.md file), OR
+ *     - the agent emits the literal phrase "No maintenance needed".
+ *
+ *   Both kinds of release advance a `releaseCursor` (a tuple of branch
+ *   length + wall-clock time). Once the gate fires, it records its own
+ *   `lastFireBranchLength`; the gate is "spent" for the current segment
+ *   until the cursor advances past that point.
+ *
+ *   In addition to the once-per-segment invariant, the gate enforces three
+ *   floors so it doesn't fire on trivial activity right after a release:
+ *
+ *     - ≥ MIN_OP_MSGS_SINCE_RELEASE   operator messages since the cursor
+ *     - ≥ MIN_TIME_SINCE_RELEASE_MS   wall-clock since the cursor
+ *     - ≥ MIN_TIME_BETWEEN_FIRES_MS   wall-clock since the last fire
+ *
+ *   The first two are per-session; the last is persisted on disk so
+ *   restart-rapid sessions don't get re-nailed.
+ *
+ *   Compared to the previous 7-layer heuristic stack this collapses the
+ *   suppression model to one durable cursor + three thresholds, which
+ *   produces dramatically calmer behavior in long agentic sessions while
+ *   still firing at meaningful "yield" points.
+ *
+ * Tuning knobs are env-overridable:
+ *
+ *   OMP_MAINTENANCE_GATE_MIN_OP_MSGS         (default 4)
+ *   OMP_MAINTENANCE_GATE_MIN_RELEASE_AGE_MS  (default 8 * 60_000)
+ *   OMP_MAINTENANCE_GATE_FIRE_FLOOR_MS       (default 25 * 60_000)
+ *   OMP_MAINTENANCE_GATE_ROOTS               (CSV of explicit org roots)
  *
  * Installed by omp-deck's StarterExtensionsInstaller into
  * `~/.omp/agent/extensions/maintenance-gate/`. Idempotent — never
@@ -29,34 +50,31 @@
  */
 
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
-import {
-	existsSync,
-	mkdirSync,
-	readFileSync,
-	writeFileSync,
-} from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { homedir } from "node:os";
 
-// Marker phrase the agent uses to release the gate. Case-sensitive on
-// purpose so casual prose mentioning "no maintenance needed" doesn't
-// accidentally suppress.
+// Marker phrase the agent uses to release the gate. Case-sensitive so casual
+// prose mentioning "no maintenance needed" doesn't suppress accidentally.
 const NO_MAINT_PHRASE = "No maintenance needed";
 
-// Heading text the reminder uses. Doubles as the marker the branch-walk
-// uses to detect "have we already fired since the last operator message".
+// Heading text the reminder uses. Doubles as a branch-walk marker for
+// detecting "have we already fired in this segment".
 const FIRE_MARKER = "## Maintenance check";
 
-// Cadence knobs — env-overridable for tuning without redeploy.
-const TRIVIAL_ENTRY_THRESHOLD = envInt("OMP_MAINTENANCE_GATE_TRIVIAL", 10);
-const STALENESS_TURNS = envInt("OMP_MAINTENANCE_GATE_STALENESS", 8);
-const BRANCH_SCAN_WINDOW = 50;
-const FIRE_THROTTLE_MS = envInt("OMP_MAINTENANCE_GATE_FIRE_FLOOR_MS", 5 * 60 * 1000);
+// Tuning floors — env-overridable for fast iteration without redeploy.
+const MIN_OP_MSGS_SINCE_RELEASE = envInt("OMP_MAINTENANCE_GATE_MIN_OP_MSGS", 4);
+const MIN_TIME_SINCE_RELEASE_MS = envInt(
+	"OMP_MAINTENANCE_GATE_MIN_RELEASE_AGE_MS",
+	8 * 60 * 1000,
+);
+const MIN_TIME_BETWEEN_FIRES_MS = envInt(
+	"OMP_MAINTENANCE_GATE_FIRE_FLOOR_MS",
+	25 * 60 * 1000,
+);
 
 // Capture path detection. First-folder segment match against the canonical
-// OMP folders. Anchored on start-of-string OR a slash so relative paths
-// like `tasks/foo.md` match the same as `C:/.../tasks/foo.md`. Trailing
-// slash is mandatory so files at the root with the same name don't trigger.
+// OMP folders. Anchored on start-of-string OR a separator so relative paths
+// like `tasks/foo.md` match the same as `C:/.../tasks/foo.md`.
 const CAPTURE_PATH_RE =
 	/(?:^|[\/\\])(inbox|tasks|knowledge|queries|context|reminders)[\/\\]/i;
 
@@ -67,17 +85,22 @@ const SKILL_PATH_RE =
 
 type Profile = "active" | "inactive";
 
+/** In-memory state for a single session. */
 interface GateState {
-	captureObservedAtTurn: number;
-	overrideObservedAtTurn: number;
-	lastFireAtTurn: number;
+	/** Branch index of the most recent release event. -1 until set. */
+	releaseCursorBranchLength: number;
+	/** Wall clock of the most recent release event. */
+	releaseCursorTimeMs: number;
+	/** Branch index of the most recent fire. -1 = never fired in this session. */
+	lastFireBranchLength: number;
+	/** Re-entry guard so the turn_end that fires right after our own
+	 *  sendUserMessage doesn't recursively re-evaluate. */
 	firingNow: boolean;
-	turnCount: number;
 }
 
+/** Disk-persisted state for cross-session throttling. */
 interface GateDiskState {
 	lastFireMs: number;
-	lastFireBranchLength: number;
 }
 
 // ─── helpers ───────────────────────────────────────────────────────────────
@@ -91,14 +114,11 @@ function envInt(name: string, def: number): number {
 
 /**
  * Structural sniff for an OMP org root. Returns the absolute path when the
- * cwd looks like an org tree (or one of its ancestors does), else null.
- *
- * Requires inbox/ + tasks/ AND at least one of (knowledge/, context/).
- * Walks up the directory tree until the root or until a match is found,
- * so deeply-nested sessions still detect the right org root.
- *
- * Override: `OMP_MAINTENANCE_GATE_ROOTS=<csv of absolute paths>` forces
- * specific dirs to be treated as org roots regardless of structure.
+ * cwd looks like an org tree (or an ancestor does), else null. Requires
+ * inbox/ + tasks/ AND at least one of (knowledge/, context/). Walks up the
+ * directory tree until the filesystem root, so nested sessions still detect
+ * the right org root. `OMP_MAINTENANCE_GATE_ROOTS` (CSV of absolute paths)
+ * overrides the structural sniff.
  */
 function detectOrgRoot(cwd: string): string | null {
 	const explicit = (process.env.OMP_MAINTENANCE_GATE_ROOTS ?? "")
@@ -123,7 +143,6 @@ function detectOrgRoot(cwd: string): string | null {
 		}
 		prev = cursor;
 		cursor = join(cursor, "..");
-		// Stop at the filesystem root (path.join with .. on root yields root).
 		if (cursor === prev) break;
 	}
 	return null;
@@ -136,15 +155,11 @@ function gateStatePath(orgDir: string): string {
 function readGateState(orgDir: string): GateDiskState {
 	try {
 		const path = gateStatePath(orgDir);
-		if (!existsSync(path)) return { lastFireMs: 0, lastFireBranchLength: 0 };
+		if (!existsSync(path)) return { lastFireMs: 0 };
 		const data = JSON.parse(readFileSync(path, "utf-8")) as Partial<GateDiskState>;
-		return {
-			lastFireMs: typeof data.lastFireMs === "number" ? data.lastFireMs : 0,
-			lastFireBranchLength:
-				typeof data.lastFireBranchLength === "number" ? data.lastFireBranchLength : 0,
-		};
+		return { lastFireMs: typeof data.lastFireMs === "number" ? data.lastFireMs : 0 };
 	} catch {
-		return { lastFireMs: 0, lastFireBranchLength: 0 };
+		return { lastFireMs: 0 };
 	}
 }
 
@@ -164,7 +179,7 @@ function buildReminder(): string {
 		"",
 		FIRE_MARKER,
 		"",
-		`About ${STALENESS_TURNS}+ turns since the last capture pass. Did this session produce any of these? Capture **now** — writing to any of the paths below releases this check automatically. If nothing applies, state the literal phrase "${NO_MAINT_PHRASE}" to release.`,
+		`Did this segment of work produce any of the signals below? Capture **now** — writing to any of the paths releases this check automatically. If nothing applies, state the literal phrase "${NO_MAINT_PHRASE}" to release.`,
 		"",
 		"| Signal | Action if present |",
 		"|--------|-------------------|",
@@ -220,32 +235,10 @@ function extractRole(value: unknown): string | null {
 }
 
 /**
- * Walk backward through the branch until the most recent user-role message.
- * Return true iff that message is one of the gate's own injections (i.e.
- * we have already fired since the operator's last real prompt).
- *
- * Primary "once-per-operator-turn" suppression — does not depend on closure
- * state and does not care how long the current operator turn runs or how
- * many internal turn_end events fire inside it.
- */
-function gateFiredSinceLastOperatorTurn(branch: readonly unknown[]): boolean {
-	for (let i = branch.length - 1; i >= 0; i--) {
-		const entry = branch[i];
-		if (extractRole(entry) !== "user") continue;
-		const text = flattenText(entry);
-		return text.includes(FIRE_MARKER);
-	}
-	return false;
-}
-
-/**
- * Count real operator messages (user-role entries that are not gate
- * follow-up injections) at or after `fromIdx`. Used as the load-bearing
- * suppression for the queued-followUp scenario the upstream gate
- * documented: the harness queues sendUserMessage and flushes later;
- * between attempt and persistence, the branch does NOT show the pending
- * fire. Using the on-disk branch-length-at-attempt as the reference is
- * stable across this delay.
+ * Count real operator messages (user-role entries that are NOT one of the
+ * gate's own injected follow-ups) at branch indices `>= fromIdx`. This is
+ * the load-bearing "has the operator done meaningful work since the
+ * release cursor?" signal.
  */
 function countRealOperatorMsgsAfter(branch: readonly unknown[], fromIdx: number): number {
 	let count = 0;
@@ -260,24 +253,19 @@ function countRealOperatorMsgsAfter(branch: readonly unknown[], fromIdx: number)
 }
 
 /**
- * Rolling-window scan of the branch for the override phrase. Role-gated
- * to assistant messages so the gate's own reminder text (which mentions
- * the phrase as instructional copy) doesn't count as a release.
+ * Defense-in-depth: scan branch >= cursor for a fire marker already
+ * present (i.e. a previous attempt already injected, but state was lost).
+ * Caps the look at a window so we don't walk huge branches.
  */
-function branchSaysOverride(branch: readonly unknown[]): boolean {
-	const start = Math.max(0, branch.length - BRANCH_SCAN_WINDOW);
-	for (let i = branch.length - 1; i >= start; i--) {
+function branchHasFireMarkerSince(branch: readonly unknown[], cursor: number): boolean {
+	const start = Math.max(0, cursor);
+	for (let i = start; i < branch.length; i++) {
 		const entry = branch[i];
-		if (extractRole(entry) !== "assistant") continue;
+		if (extractRole(entry) !== "user") continue;
 		const text = flattenText(entry);
-		if (text.includes(NO_MAINT_PHRASE)) return true;
+		if (text.includes(FIRE_MARKER)) return true;
 	}
 	return false;
-}
-
-function messageEndText(event: unknown): string {
-	if (extractRole(event) !== "assistant") return "";
-	return flattenText(event);
 }
 
 function normalizeToolName(name: string): string {
@@ -309,121 +297,122 @@ export default function maintenanceGate(pi: ExtensionAPI): void {
 	let orgDir: string | null = null;
 
 	const state: GateState = {
-		captureObservedAtTurn: -1,
-		overrideObservedAtTurn: -1,
-		lastFireAtTurn: -1,
+		releaseCursorBranchLength: -1,
+		releaseCursorTimeMs: 0,
+		lastFireBranchLength: -1,
 		firingNow: false,
-		turnCount: 0,
 	};
+
+	function advanceReleaseCursor(branch: readonly unknown[]): void {
+		state.releaseCursorBranchLength = branch.length;
+		state.releaseCursorTimeMs = Date.now();
+	}
 
 	pi.on("session_start", async (_event, ctx) => {
 		orgDir = detectOrgRoot(ctx.cwd);
 		profile = orgDir ? "active" : "inactive";
-		if (orgDir) {
-			pi.logger?.info?.(`maintenance-gate: active for org root ${orgDir}`);
-		}
+		if (!orgDir) return;
+
+		// Initialize the release cursor at session-start so we never fire
+		// the moment a fresh session resumes against an already-large branch.
+		const branch = ctx.sessionManager.getBranch();
+		state.releaseCursorBranchLength = branch.length;
+		state.releaseCursorTimeMs = Date.now();
+		state.lastFireBranchLength = -1;
+		state.firingNow = false;
+		pi.logger?.info?.(`maintenance-gate: active for org root ${orgDir}`);
 	});
 
-	pi.on("tool_call", async (event) => {
+	pi.on("tool_call", async (event, ctx) => {
 		if (profile === "inactive" || !orgDir) return;
 		const tn = normalizeToolName(event.toolName);
 		if (tn !== "write" && tn !== "edit") return;
 		const target = pathFromToolInput(event.input);
 		if (target && looksLikeCapture(target)) {
-			state.captureObservedAtTurn = state.turnCount;
+			advanceReleaseCursor(ctx.sessionManager.getBranch());
 		}
 	});
 
-	pi.on("message_end", async (event) => {
+	pi.on("message_end", async (event, ctx) => {
 		if (profile === "inactive" || !orgDir) return;
-		const text = messageEndText(event);
-		if (text && text.includes(NO_MAINT_PHRASE)) {
-			state.overrideObservedAtTurn = state.turnCount;
+		if (extractRole(event) !== "assistant") return;
+		const text = flattenText(event);
+		if (text.includes(NO_MAINT_PHRASE)) {
+			advanceReleaseCursor(ctx.sessionManager.getBranch());
 		}
 	});
 
 	pi.on("turn_end", async (_event, ctx) => {
 		if (profile === "inactive" || !orgDir) return;
 
-		const diskState = readGateState(orgDir);
-		const now = Date.now();
-
-		// SAFETY NET 1: wall-clock throttle. Hard upper bound on fire rate
-		// independent of any closure state. Covers the race window where
-		// sendUserMessage was called but the followUp has not yet appeared
-		// anywhere visible.
-		if (
-			diskState.lastFireMs > 0 &&
-			now - diskState.lastFireMs < FIRE_THROTTLE_MS
-		) {
-			return;
-		}
-
-		state.turnCount++;
-
-		// Re-entry guard: the turn_end firing immediately after we
-		// synthesize is ours; skip without advancing the cooldown clock.
+		// Re-entry guard: the turn_end immediately after we synthesize is
+		// ours; skip it without touching any cursors.
 		if (state.firingNow) {
 			state.firingNow = false;
 			return;
 		}
 
+		const now = Date.now();
 		const branch = ctx.sessionManager.getBranch();
-		if (branch.length < TRIVIAL_ENTRY_THRESHOLD) return;
 
-		// PRIMARY SUPPRESSION: has the operator spoken since our last fire
-		// attempt? Disk-stored branch length is stable across the harness's
-		// sendUserMessage queue/flush delay; closure state is not.
-		const sinceRef =
-			diskState.lastFireBranchLength <= branch.length
-				? diskState.lastFireBranchLength
-				: 0;
-		if (sinceRef > 0) {
-			const opMsgsSinceLastFire = countRealOperatorMsgsAfter(branch, sinceRef);
-			if (opMsgsSinceLastFire === 0) return;
+		// FLOOR 1 — cross-session wall-clock minimum between fires.
+		const disk = readGateState(orgDir);
+		if (disk.lastFireMs > 0 && now - disk.lastFireMs < MIN_TIME_BETWEEN_FIRES_MS) {
+			return;
 		}
 
-		// SAFETY NET 2: branch walk for most-recent user message. Redundant
-		// with the disk-state check in normal operation, but catches the
-		// case where disk state was cleared mid-session while the branch
-		// already contains a recent followUp.
-		if (gateFiredSinceLastOperatorTurn(branch)) return;
+		// INVARIANT — at most one fire per release segment.
+		// If we've already fired since the most recent release, wait for
+		// the next release to advance the cursor before re-arming.
+		if (
+			state.lastFireBranchLength >= 0 &&
+			state.lastFireBranchLength >= state.releaseCursorBranchLength
+		) {
+			return;
+		}
 
-		const captureFresh =
-			state.captureObservedAtTurn >= 0 &&
-			state.turnCount - state.captureObservedAtTurn < STALENESS_TURNS;
-		const overrideFresh =
-			state.overrideObservedAtTurn >= 0 &&
-			state.turnCount - state.overrideObservedAtTurn < STALENESS_TURNS;
-		const recentlyFired =
-			state.lastFireAtTurn >= 0 &&
-			state.turnCount - state.lastFireAtTurn < STALENESS_TURNS;
+		// FLOOR 2 — wall-clock since the current release cursor. Prevents
+		// firing right after the user just released the previous segment.
+		if (now - state.releaseCursorTimeMs < MIN_TIME_SINCE_RELEASE_MS) {
+			return;
+		}
 
-		if (captureFresh) return;
-		if (overrideFresh) return;
-		if (recentlyFired) return;
+		// FLOOR 3 — operator messages since the current release cursor.
+		// One trivial "continue" should never re-trigger.
+		const opMsgs = countRealOperatorMsgsAfter(
+			branch,
+			Math.max(0, state.releaseCursorBranchLength),
+		);
+		if (opMsgs < MIN_OP_MSGS_SINCE_RELEASE) return;
 
-		if (branchSaysOverride(branch)) return;
+		// DEFENSE-IN-DEPTH — if the branch already contains a fire marker
+		// in this segment (e.g. state was lost mid-session), don't fire
+		// again until release advances past it.
+		if (branchHasFireMarkerSince(branch, state.releaseCursorBranchLength)) {
+			// Treat the existing marker as our fire for this segment.
+			state.lastFireBranchLength = branch.length;
+			return;
+		}
 
-		const fireStart = Date.now();
+		// Commit fire state BEFORE async send so a concurrent turn_end can
+		// see the new lastFireBranchLength and bail on the invariant check.
 		state.firingNow = true;
-		const previousLastFireAtTurn = state.lastFireAtTurn;
-		state.lastFireAtTurn = state.turnCount;
-		writeGateState(orgDir, {
-			lastFireMs: fireStart,
-			lastFireBranchLength: branch.length,
-		});
+		const previousLastFireBranchLength = state.lastFireBranchLength;
+		state.lastFireBranchLength = branch.length;
+		writeGateState(orgDir, { lastFireMs: now });
 
 		try {
 			await pi.sendUserMessage(buildReminder(), { deliverAs: "followUp" });
-			pi.logger?.info?.(`maintenance-gate: fired at turn ${state.turnCount}`);
+			pi.logger?.info?.(
+				`maintenance-gate: fired (branch=${branch.length}, opMsgsSinceRelease=${opMsgs})`,
+			);
 		} catch (err) {
 			pi.logger?.warn?.(
 				`maintenance-gate: sendUserMessage failed: ${(err as Error)?.message ?? String(err)}`,
 			);
 			state.firingNow = false;
-			state.lastFireAtTurn = previousLastFireAtTurn;
-			writeGateState(orgDir, diskState);
+			state.lastFireBranchLength = previousLastFireBranchLength;
+			writeGateState(orgDir, disk);
 		}
 	});
 }

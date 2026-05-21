@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://omp-deck.app/schemas/step-wait.json",
+  "title": "RoutineStep — wait",
+  "description": "Pause for a fixed duration. Useful between retries or for spacing API calls.",
+  "type": "object",
+  "allOf": [
+    { "$ref": "https://omp-deck.app/schemas/step-common.json" },
+    {
+      "type": "object",
+      "required": ["type", "duration_secs"],
+      "properties": {
+        "type": { "const": "wait" },
+        "duration_secs": {
+          "type": "number",
+          "minimum": 0.1,
+          "maximum": 300,
+          "description": "Seconds to sleep. Counts against the routine's budget.max_duration_secs."
+        }
+      }
+    }
+  ]
+}

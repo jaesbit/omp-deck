@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://omp-deck.app/schemas/step-agent.json",
+  "title": "RoutineStep — agent",
+  "description": "Invoke an omp session with a prompt; capture stdout + structured output. Token counts and cost feed the budget enforcer.",
+  "type": "object",
+  "allOf": [
+    { "$ref": "https://omp-deck.app/schemas/step-common.json" },
+    {
+      "type": "object",
+      "required": ["type", "prompt"],
+      "properties": {
+        "type": { "const": "agent" },
+        "prompt": {
+          "type": "string",
+          "minLength": 1,
+          "description": "User prompt. Templated. Long prompts are fine; budget caps total LLM tokens, not prompt length."
+        },
+        "model": {
+          "type": "string",
+          "description": "Model id (e.g. claude-sonnet-4-6). Defaults to the deck's active model setting."
+        },
+        "structured_output": {
+          "type": "object",
+          "required": ["schema"],
+          "properties": {
+            "schema": {
+              "description": "JSON Schema (or schema-like object) describing the expected structured output. Validated by Ajv after the agent returns."
+            },
+            "strict": {
+              "type": "boolean",
+              "default": true,
+              "description": "true: invalid output fails the step. false: best-effort; raw stdout is captured even if parsing fails."
+            }
+          },
+          "additionalProperties": false
+        },
+        "skills_allowed": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Restrict the agent's native skill surface to this allowlist. Default (omitted): all installed skills available."
+        },
+        "mcp_servers_allowed": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Restrict the agent's MCP tool surface to these server ids. Default (omitted): all installed MCP servers available."
+        }
+      }
+    }
+  ]
+}

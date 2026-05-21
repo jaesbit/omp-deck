@@ -6,8 +6,15 @@
  * we keep payloads structurally typed via `unknown`-ish records on the
  * web side and import the real SDK types on the server side.
  *
- * This package is dep-free on purpose — it's the contract.
+ * This package is dep-free on purpose — it's the contract. Note: V1 added
+ * `ajv` + `ajv-formats` as runtime deps so the validator (re-exported below)
+ * can compile the JSON schemas. The schemas under `src/schemas/` remain the
+ * single source of truth for both runtime validation and the visual builder.
  */
+
+// Re-export the V1 routine spec validator. JSON Schemas live in src/schemas/.
+export { validateRoutineSpec } from "./validate";
+export type { ValidationError, ValidationResult } from "./validate";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // REST shapes
@@ -625,6 +632,40 @@ export type ServerFrame =
 	| { type: "oauth_failed"; flowId: string; provider: string; message: string }
 	/** Broadcast: model registry availability changed (post-login / post-revoke). */
 	| { type: "models_changed" }
+	/** V1 routine: a new multi-step run has started. */
+	| {
+			type: "routine_run_started";
+			routineId: string;
+			runId: string;
+			triggerKind: "cron" | "manual" | "webhook" | "event";
+			startedAt: string;
+		}
+	/** V1 routine: a single step transitioned (running -> success/failed/skipped/aborted). */
+	| {
+			type: "routine_step_event";
+			runId: string;
+			stepId: string;
+			stepIndex: number;
+			status: RoutineStepStatus;
+			startedAt?: string;
+			endedAt?: string;
+			durationMs?: number;
+			excerpt?: { stdout?: string; stderr?: string };
+			outputJson?: unknown;
+			error?: string;
+			model?: string;
+			tokens?: { in: number; out: number };
+		}
+	/** V1 routine: the run finished (or was aborted). Total cost is in USD micro-cents. */
+	| {
+			type: "routine_run_finished";
+			runId: string;
+			status: "success" | "failed" | "aborted";
+			abortReason?: string;
+			endedAt: string;
+			durationMs: number;
+			totalCostMicros: number;
+		}
 	| { type: "error"; sessionId?: string; error: string };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -795,6 +836,19 @@ export interface Routine {
 	updatedAt: string;
 	lastRunAt?: string;
 	nextRunAt?: string;
+	// V1 additions — see "V1 routine spec" section below for the parsed-spec types.
+	/** 0 = V0 single-action routine (cron+actionKind+actionBody); 1 = V1 multi-step (specYaml). */
+	specVersion: 0 | 1;
+	/** Concurrency policy. V0 routines default to 'skip'; V1 routines set it explicitly in their spec. */
+	concurrency: RoutineConcurrency;
+	/** Full V1 spec source-of-truth. NULL/undefined for V0 routines. */
+	specYaml?: string;
+	/** Optional runtime budget caps. */
+	budget?: RoutineBudget;
+	/** IANA timezone for cron evaluation. NULL = system default. */
+	timezone?: string;
+	/** User-authored tags for the filter UI. */
+	tags?: string[];
 }
 
 export interface CreateRoutineRequest {
@@ -826,9 +880,223 @@ export interface RoutineRun {
 	stdoutExcerpt: string;
 	stderrExcerpt: string;
 	error?: string;
-	trigger: "cron" | "manual";
+	/**
+	 * Trigger kind. V0 routines only ever see 'cron' or 'manual'; V1 routines
+	 * can additionally be triggered by 'webhook' (HMAC-verified POST to /hooks/*)
+	 * or 'event' (telegram, deck_inbox, deck_task, future MCP notifications).
+	 */
+	trigger: "cron" | "manual" | "webhook" | "event";
+	// V1 additions — populated by the V1 runner; 0/undefined for V0 rows.
+	/** JSON-serialized trigger payload (webhook body, manual params, event payload). */
+	triggerPayload?: string;
+	/** Sum of input+output LLM tokens across all agent steps in this run. */
+	totalLlmTokens: number;
+	/** Estimated cost in USD micro-cents (token counts × model price table). */
+	totalLlmCostMicros: number;
+	/** When the runner aborted, distinct from endedAt (which is the last-step finish). */
+	abortedAt?: string;
+	/** 'budget' | 'timeout' | 'cancelled' | 'failure' | 'signature_invalid' | 'concurrency_skipped'. */
+	abortReason?: string;
+	/** Count of routine_step_runs rows for this run. */
+	stepCountTotal: number;
+	/** Count of step runs ending in status='failed' or 'aborted'. */
+	stepCountFailed: number;
 }
 
+
+// ─── V1 routine spec (multi-step pipelines, spec_version=1) ──────────────
+
+export type RoutineConcurrency =
+	| "skip"
+	| "queue"
+	| "cancel-previous"
+	| "parallel";
+
+export interface RoutineBudget {
+	/** Wall-clock cap across the whole run. */
+	max_duration_secs?: number;
+	/** Hard cap on estimated LLM spend per run. Estimated from token counts × model price table. */
+	max_llm_cost_usd?: number;
+	max_llm_tokens_input?: number;
+	max_llm_tokens_output?: number;
+	/** Guards against infinite-branch bugs in routine specs. */
+	max_steps_executed?: number;
+}
+
+export type RoutineOnFailure = "abort" | "continue" | "retry";
+
+export interface RoutineRetryPolicy {
+	times: number;
+	backoff: "linear" | "exponential";
+	max_delay_secs?: number;
+	/** What to do if all retries fail. Defaults to 'abort'. */
+	after_retry?: "abort" | "continue";
+}
+
+export type RoutineDeckAction =
+	| "create_inbox_item"
+	| "create_task"
+	| "move_task"
+	| "promote_inbox_item_to_task";
+
+
+/** Common fields every step type accepts. */
+export interface RoutineStepCommon {
+	id: string;
+	/** Boolean JS expression over the context. If false, step is skipped. */
+	when?: string;
+	on_failure?: RoutineOnFailure;
+	retry?: RoutineRetryPolicy;
+	timeout_secs?: number;
+}
+
+/** Discriminated union by `type`. Add a new step type here AND author its JSON schema. */
+export type RoutineStep =
+	| (RoutineStepCommon & {
+			type: "run";
+			command: string;
+			cwd?: string;
+		})
+	| (RoutineStepCommon & {
+			type: "agent";
+			prompt: string;
+			model?: string;
+			structured_output?: { schema: unknown; strict?: boolean };
+			skills_allowed?: string[];
+			mcp_servers_allowed?: string[];
+		})
+	| (RoutineStepCommon & {
+			type: "write";
+			path: string;
+			content: string;
+			append?: boolean;
+		})
+	| (RoutineStepCommon & {
+			type: "http";
+			method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
+			url: string;
+			headers?: Record<string, string>;
+			query?: Record<string, string | number | boolean>;
+			body?: unknown;
+			expect_json?: boolean;
+		})
+	| (RoutineStepCommon &
+			(
+				| {
+						type: "deck";
+						action: "create_inbox_item";
+						kind: InboxKind;
+						title: string;
+						body?: string;
+						source?: string;
+				  }
+				| {
+						type: "deck";
+						action: "create_task";
+						title: string;
+						body?: string;
+						/** Task state id or case-insensitive state-name substring. Defaults to the default state. */
+						state_ref?: string;
+						cwd?: string;
+				  }
+				| {
+						type: "deck";
+						action: "move_task";
+						/** Accepts `T-58` or `t_01...`. */
+						task_ref: string;
+						/** Required destination state id or case-insensitive state-name substring. */
+						state_ref: string;
+						/** 0-based destination index. Defaults to 0 (top of column). */
+						index?: number;
+				  }
+				| {
+						type: "deck";
+						action: "promote_inbox_item_to_task";
+						/** Inbox item id, usually from a prior fetch step. */
+						inbox_ref: string;
+						/** Destination state id or case-insensitive state-name substring. Defaults to the default state. */
+						state_ref?: string;
+						/** Defaults to true — promoted inbox items are marked processed. */
+						mark_processed?: boolean;
+				  }
+			))
+	| (RoutineStepCommon & {
+			type: "mcp";
+			server: string;
+			tool: string;
+			args?: Record<string, unknown>;
+		})
+	| (RoutineStepCommon & {
+			type: "transform";
+			/** JS expression source. Evaluated in a quickjs sandbox; no network, no fs. */
+			body: string;
+		})
+	| (RoutineStepCommon & {
+			type: "wait";
+			duration_secs: number;
+		})
+	| (RoutineStepCommon & {
+			type: "set_state";
+			/** Key/value pairs to upsert into routine_state. Values may use template substitution. */
+			state: Record<string, unknown>;
+		});
+
+/** Discriminated union over the four trigger kinds. A routine may have multiple. */
+export type RoutineTrigger =
+	| { cron: string }
+	| { webhook: { path: string; secret_env: string } }
+	| { manual: { params_schema?: unknown } }
+	| { event: { source: string; type?: string; filter?: string } };
+
+/** The parsed V1 routine spec. Source-of-truth lives in routines.spec_yaml. */
+export interface RoutineSpec {
+	name: string;
+	description?: string;
+	trigger: RoutineTrigger[];
+	concurrency?: RoutineConcurrency;
+	timezone?: string;
+	budget?: RoutineBudget;
+	/** Declared cross-run state keys (informational; runtime can write any key via set_state). */
+	state?: { declared_keys?: string[] };
+	tags?: string[];
+	steps: RoutineStep[];
+}
+
+export type RoutineStepStatus =
+	| "pending"
+	| "running"
+	| "success"
+	| "skipped"
+	| "failed"
+	| "aborted";
+
+/** Per-step execution record. One row in routine_step_runs per step per run attempt. */
+export interface RoutineStepRun {
+	id: string;
+	runId: string;
+	stepId: string;
+	stepIndex: number;
+	stepType: RoutineStep["type"];
+	startedAt: string;
+	endedAt?: string;
+	status: RoutineStepStatus;
+	stdoutExcerpt: string;
+	stderrExcerpt: string;
+	/** JSON-serialized structured output captured to the context for downstream steps. */
+	outputJson?: string;
+	error?: string;
+	model?: string;
+	llmTokensIn?: number;
+	llmTokensOut?: number;
+	llmCostMicros?: number;
+	durationMs?: number;
+	/** Retry attempt number; 1 for first attempt. */
+	attempt: number;
+}
+
+export interface ListRoutineStepRunsResponse {
+	steps: RoutineStepRun[];
+}
 export interface ListRoutinesResponse {
 	routines: Routine[];
 }

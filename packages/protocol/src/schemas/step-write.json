@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://omp-deck.app/schemas/step-write.json",
+  "title": "RoutineStep — write",
+  "description": "Write or append a file. Path and content are templated.",
+  "type": "object",
+  "allOf": [
+    { "$ref": "https://omp-deck.app/schemas/step-common.json" },
+    {
+      "type": "object",
+      "required": ["type", "path", "content"],
+      "properties": {
+        "type": { "const": "write" },
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Filesystem path. Relative paths resolve against the routine's cwd. Templated."
+        },
+        "content": {
+          "type": "string",
+          "description": "File body. Templated."
+        },
+        "append": {
+          "type": "boolean",
+          "default": false,
+          "description": "true: append (creating if absent). false (default): overwrite."
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,87 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://omp-deck.app/schemas/routine-spec.json",
+  "title": "RoutineSpec (V1)",
+  "description": "The parsed V1 routine spec. Source-of-truth lives in routines.spec_yaml; this schema validates the deserialized object.",
+  "type": "object",
+  "required": ["name", "trigger", "steps"],
+  "properties": {
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 100,
+      "pattern": "^[a-z][a-z0-9-]*$",
+      "description": "Routine slug. Lowercase kebab-case. Used in template marketplace + as a stable identifier across renames."
+    },
+    "description": {
+      "type": "string",
+      "maxLength": 500
+    },
+    "trigger": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "oneOf": [
+          { "$ref": "https://omp-deck.app/schemas/trigger-cron.json" },
+          { "$ref": "https://omp-deck.app/schemas/trigger-webhook.json" },
+          { "$ref": "https://omp-deck.app/schemas/trigger-manual.json" },
+          { "$ref": "https://omp-deck.app/schemas/trigger-event.json" }
+        ]
+      },
+      "description": "At least one trigger. Multiple triggers compose via union semantics (any one fires the routine)."
+    },
+    "concurrency": {
+      "enum": ["skip", "queue", "cancel-previous", "parallel"],
+      "default": "skip"
+    },
+    "timezone": {
+      "type": "string",
+      "description": "IANA timezone for cron evaluation. Defaults to the system timezone."
+    },
+    "budget": {
+      "type": "object",
+      "properties": {
+        "max_duration_secs": { "type": "number", "minimum": 1 },
+        "max_llm_cost_usd": { "type": "number", "minimum": 0 },
+        "max_llm_tokens_input": { "type": "integer", "minimum": 0 },
+        "max_llm_tokens_output": { "type": "integer", "minimum": 0 },
+        "max_steps_executed": { "type": "integer", "minimum": 1 }
+      },
+      "additionalProperties": false
+    },
+    "state": {
+      "type": "object",
+      "properties": {
+        "declared_keys": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "uniqueItems": true
+        }
+      },
+      "additionalProperties": false
+    },
+    "tags": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 },
+      "uniqueItems": true
+    },
+    "steps": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "oneOf": [
+          { "$ref": "https://omp-deck.app/schemas/step-run.json" },
+          { "$ref": "https://omp-deck.app/schemas/step-agent.json" },
+          { "$ref": "https://omp-deck.app/schemas/step-write.json" },
+          { "$ref": "https://omp-deck.app/schemas/step-http.json" },
+          { "$ref": "https://omp-deck.app/schemas/step-deck.json" },
+          { "$ref": "https://omp-deck.app/schemas/step-mcp.json" },
+          { "$ref": "https://omp-deck.app/schemas/step-transform.json" },
+          { "$ref": "https://omp-deck.app/schemas/step-wait.json" },
+          { "$ref": "https://omp-deck.app/schemas/step-set_state.json" }
+        ]
+      }
+    }
+  },
+  "additionalProperties": false
+}

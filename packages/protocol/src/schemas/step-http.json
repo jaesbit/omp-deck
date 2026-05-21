@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://omp-deck.app/schemas/step-http.json",
+  "title": "RoutineStep — http",
+  "description": "HTTP request. Localhost requests automatically get the internal routine-runner bearer token. Templating applied to url, headers, query, and body.",
+  "type": "object",
+  "allOf": [
+    { "$ref": "https://omp-deck.app/schemas/step-common.json" },
+    {
+      "type": "object",
+      "required": ["type", "method", "url"],
+      "properties": {
+        "type": { "const": "http" },
+        "method": { "enum": ["GET", "POST", "PUT", "PATCH", "DELETE"] },
+        "url": {
+          "type": "string",
+          "format": "uri-reference",
+          "description": "Templated."
+        },
+        "headers": {
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        },
+        "query": {
+          "type": "object",
+          "additionalProperties": {
+            "type": ["string", "number", "boolean"]
+          }
+        },
+        "body": {
+          "description": "Request body. JSON-serialized when Content-Type is application/json (default for POST/PUT/PATCH). Strings sent raw."
+        },
+        "expect_json": {
+          "type": "boolean",
+          "default": false,
+          "description": "true: parse response body as JSON and capture to steps.X.json. false: capture as stdout text."
+        }
+      }
+    }
+  ]
+}

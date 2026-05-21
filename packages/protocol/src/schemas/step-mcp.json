@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://omp-deck.app/schemas/step-mcp.json",
+  "title": "RoutineStep — mcp",
+  "description": "Deterministic MCP tool call. The named server must be installed via /mcp install. Args are validated against the tool's input schema (cached from tools/list) at runtime before invocation.",
+  "type": "object",
+  "allOf": [
+    { "$ref": "https://omp-deck.app/schemas/step-common.json" },
+    {
+      "type": "object",
+      "required": ["type", "server", "tool"],
+      "properties": {
+        "type": { "const": "mcp" },
+        "server": {
+          "type": "string",
+          "minLength": 1,
+          "description": "MCP server id as registered with the omp SDK's MCP client. In V1.5+ the Integrations page surfaces installed servers; for V1 this is a free-form string."
+        },
+        "tool": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Tool name as advertised by the server's tools/list."
+        },
+        "args": {
+          "type": "object",
+          "description": "Tool arguments. Templated. Validated against the tool's input schema at runtime."
+        }
+      }
+    }
+  ]
+}

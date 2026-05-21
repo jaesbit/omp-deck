@@ -3,8 +3,8 @@ import type { ServerFrame } from "@omp-deck/protocol";
 /**
  * Singleton fan-out for non-session-scoped events the deck wants every
  * connected WebSocket client to see. Producers (route handlers, deck slash
- * dispatcher) call `broadcast(frame)`; the WS hub subscribes once and relays
- * to every open connection.
+ * dispatcher, routine runner) call `broadcast(frame)`; the WS hub subscribes
+ * once and relays to every open connection.
  *
  * This decouples mutation sites from transport — `routes-tasks.ts` does not
  * import the hub, and the hub does not import every route module.
@@ -20,6 +20,9 @@ export type BroadcastFrame = Extract<
 	| { type: "oauth_complete" }
 	| { type: "oauth_failed" }
 	| { type: "models_changed" }
+	| { type: "routine_run_started" }
+	| { type: "routine_step_event" }
+	| { type: "routine_run_finished" }
 >;
 
 type Listener = (frame: BroadcastFrame) => void;

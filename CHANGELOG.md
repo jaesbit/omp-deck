@@ -3,6 +3,129 @@
 All notable changes to omp-deck. The format is loosely based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.3.0] — V1 routines: multi-step pipelines + visual builder
+
+Routines graduate from "single-action cron jobs" to a first-class Pattern-3
+agent platform: multi-step pipelines, multiple trigger types per routine,
+shared context across steps, cross-run state, budget caps, and a form-mode
+visual builder so authoring doesn't require YAML literacy.
+
+### Routine engine
+- Multi-step pipeline runner at `apps/server/src/routines/v1-runner.ts`
+  dispatching 8 step types: `run`, `agent`, `write`, `http`, `mcp` (stubbed
+  for V1.5), `transform`, `wait`, `set_state`. Each step type has its own
+  executor file under `apps/server/src/routines/steps/`.
+- `RoutineSpec` is a YAML document persisted in `routines.spec_yaml` (V1
+  source of truth) with derived columns (`cron`, `concurrency`, `budget_json`,
+  `tags`, `timezone`) mirrored for query speed. V0 single-action routines
+  keep working unchanged — the runner branches on `spec_version`.
+- Per-step record persistence: `routine_step_runs` table populated with
+  status, stdout/stderr excerpts, structured JSON output, error, model used,
+  tokens in/out, cost micros, duration, retry attempt.
+- Templating engine (`{{ run.id }}`, `{{ run.date }}`, `{{ steps.X.json.field }}`,
+  `{{ steps.X.stdout }}`) at `apps/server/src/routines/template.ts`. Value-mode
+  preserves type for single-expression payloads; string-mode for embedded use.
+- Sandboxed `when:` + `transform` evaluator at `apps/server/src/routines/sandbox.ts`
+  using quickjs-emscripten with a 100ms wall-clock cap. Secrets are redacted
+  at marshal time so adversarial expressions can't exfiltrate them.
+
+### Triggers
+- Three trigger sources per routine: `cron` (multi-cron supported per
+  routine), `webhook` (POST to `/hooks/*` with `X-Routine-Signature: sha256=...`
+  HMAC verification), `manual` (POST to `/api/routines/:id/run` with optional
+  params).
+- `event:` triggers reserved in the schema for V1.5.
+- Internal HMAC-signed bearer token for the `http` step's localhost calls
+  (`apps/server/src/routines/internal-auth.ts`) — wired but unused in V1,
+  ready for managed-hosting V1.5.
+
+### Runtime controls
+- Concurrency policies: `skip` (default), `queue`, `cancel-previous`,
+  `parallel`. In-memory controller at `routines/concurrency.ts`.
+- Budget enforcer (`routines/budget.ts`): `max_duration_secs`,
+  `max_llm_cost_usd`, `max_llm_tokens_input/output`, `max_steps_executed`.
+  Checked between steps; hard-aborts with `abort_reason: 'budget'` on excess.
+  Cost estimation uses a static `PRICES_PER_MILLION` table (documented as
+  estimate, not invoice).
+- Cross-run persistent state: `routine_state` table keyed by (routine_id, key).
+  The `set_state` step UPSERTs; `state.*` is in the template + sandbox context.
+- Per-step `on_failure` (`abort` / `continue` / `retry`) + retry policy
+  (`times`, `backoff: linear | exponential`, `max_delay_secs`, `after_retry`).
+
+### Visual builder (Tier 1)
+- Form-mode editor for V1 routines at `apps/web/src/components/routines/`,
+  driven by the same JSON Schemas Ajv validates against — single source of
+  truth, two renderings.
+- Tabs: **Steps** (one card per step, expandable, with up/down/delete and
+  the type-specific form), **Triggers** (cron with next-5-runs preview,
+  webhook with path + secret_env, manual), **Settings** (name, description,
+  concurrency dropdown, IANA timezone, tags, full budget grid, declared
+  state keys), **Spec (YAML)** (raw YAML buffer with Apply-to-form).
+- Form ↔ YAML round-tripping. Form edits update the YAML buffer; valid
+  YAML edits parse back into the form. Invalid YAML disables the apply
+  with a line-numbered parse error + schema error list.
+- Add-step picker with one-line descriptions per type. Up/down reorder
+  (DnD ships in V1.5).
+- "Pipeline" vs "Single-action" toggle on the editor header. New routines
+  default to V1; existing V0 routines continue to render in the legacy
+  single-action form.
+- Webhook secret rotation button: mints a fresh server-side secret on
+  demand, shown once with a copy-to-clipboard control.
+
+### Templates
+- Curated YAML templates under `apps/server/src/templates/`. `GET
+  /api/routine-templates` lists; `POST /api/routine-templates/:slug` installs
+  the routine in disabled state for review.
+- V1 ships **daily-briefing** as the proof-point: 7 steps (should_run gate,
+  fetch_tasks, fetch_inbox, digest, agent summary, write to inbox, persist
+  state). Verified end-to-end with a real LLM call (1483 tokens, ~$0.011).
+
+### Run observability
+- New route `/routines/:id/runs/:runId` — **RunDetailView** with polling
+  live updates, per-step expansion (stdout / stderr / structured json /
+  error), status pill, replay button.
+- Metrics endpoint `GET /api/routines/:id/metrics` returns total,
+  successCount, successRate30d, p50/p95 duration, mtdCostMicros, last-30
+  sparkline data.
+- WS broadcasts: `routine_run_started`, `routine_step_event`,
+  `routine_run_finished` frames consumed by the client for live updates.
+
+### Integrations stub
+- New nav-rail entry **Integrations** at `/integrations`. V1 ships a stub
+  pointing at the V1.5 plan: install MCP servers via `/mcp install` in chat
+  for now; Workspace MCP (taylorwilsdon/google_workspace_mcp) lands as the
+  curated install in V1.5.
+
+### Schema + protocol
+- DB migration `003-routines-v1.sql`: extends `routines` (`spec_yaml`,
+  `concurrency`, `budget_json`, `tags`, `timezone`, `spec_version`),
+  extends `routine_runs` (`trigger_payload`, `total_llm_tokens`,
+  `total_llm_cost_micros`, `aborted_at`, `abort_reason`, `step_count_*`),
+  adds `routine_step_runs`, `routine_webhook_secrets`, `routine_state`.
+- Protocol: new types `RoutineSpec`, `RoutineStep` (8-variant discriminated
+  union), `RoutineTrigger` (4-variant union), `RoutineBudget`,
+  `RoutineRetryPolicy`, `RoutineStepRun`, `RoutineConcurrency`,
+  `RoutineStepStatus`. New WS frames per above. Ajv validator at
+  `packages/protocol/src/validate.ts` over 14 JSON Schemas.
+
+### What's deferred to V1.5
+- DnD step reordering (uses the existing dnd-kit DragOverlay pattern)
+- MCP step type real implementation (currently stubbed with a clear V1.5
+  pointer; use `agent` step with `mcp_servers_allowed` for now)
+- Smart-reorder warnings when reordering breaks a downstream context
+  reference
+- `mcp` step form auto-completes (`server` + `tool` dropdowns from installed
+  MCP servers) once the Integrations page ships
+- Workspace MCP integration (Gmail / Calendar / Drive / Docs) for the
+  inbox-triager template
+- Skill / MCP-server allowlist enforcement on `agent` steps (the SDK does
+  not yet expose per-invocation surface restriction)
+
+### Dependencies
+- `apps/server`: `quickjs-emscripten@^0.31.0`, `yaml@^2.9.0`
+- `packages/protocol`: `ajv@^8.17.1`, `ajv-formats@^3.0.1`
+- `apps/web`: `yaml@^2.9.0`
+
 ## [0.2.0] — KB Cockpit + Maintenance Gate
 
 Two big surfaces land alongside several smaller refinements.

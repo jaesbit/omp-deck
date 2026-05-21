@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://omp-deck.app/schemas/trigger-webhook.json",
+  "title": "RoutineTrigger — webhook",
+  "description": "HMAC-verified webhook trigger. Mounted at /hooks/<path> on the deck server.",
+  "type": "object",
+  "required": ["webhook"],
+  "properties": {
+    "webhook": {
+      "type": "object",
+      "required": ["path", "secret_env"],
+      "properties": {
+        "path": {
+          "type": "string",
+          "pattern": "^/hooks/[a-z][a-z0-9-]*$",
+          "description": "Public path on the deck server. Lowercase, kebab-case under /hooks/."
+        },
+        "secret_env": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Env var name holding the HMAC secret. Argon2id-hashed copy lives in routine_webhook_secrets; rotation via POST /api/routines/:id/webhook-secret/rotate."
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}
