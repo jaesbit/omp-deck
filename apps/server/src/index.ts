@@ -22,6 +22,7 @@ import { startSkillsWatcher } from "./skills-watcher.ts";
 import { KbService, resolveKbRoot } from "./kb-service.ts";
 import { startKbWatcher } from "./kb-watcher.ts";
 import { installStarterSkills } from "./starter-skills.ts";
+import { installStarterExtensions } from "./starter-extensions.ts";
 import { buildDefaultBridgeSupervisor } from "./bridge-supervisor.ts";
 import type { RestartServerResponse } from "@omp-deck/protocol";
 
@@ -42,6 +43,7 @@ async function main(): Promise<void> {
 	// spins up. Idempotent — never overwrites a user-edited target — so this
 	// is safe on every boot. Disable with OMP_DECK_INSTALL_STARTER_SKILLS=0.
 	await installStarterSkills();
+	await installStarterExtensions();
 
 
 	const bridge = new InProcessAgentBridge({
