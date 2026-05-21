@@ -7,7 +7,7 @@ import { useCallback, useEffect, useState } from "react";
  * reload still lands on the saved theme.
  */
 
-export type ThemeId = "paper" | "slate";
+export type ThemeId = "paper" | "slate" | "horizon";
 
 export interface ThemeDefinition {
 	id: ThemeId;
@@ -44,6 +44,19 @@ export const THEMES: ThemeDefinition[] = [
 			{ token: "accent", label: "Accent" },
 		],
 		metaThemeColor: "#0f131a",
+		colorScheme: "dark",
+	},
+	{
+		id: "horizon",
+		label: "Horizon",
+		description: "Pink-on-deep-navy with mint + peach. Ported from opus-extensions/horizon.",
+		swatchTokens: [
+			{ token: "paper", label: "Page" },
+			{ token: "paper-3", label: "Inset" },
+			{ token: "ink", label: "Ink" },
+			{ token: "accent", label: "Accent" },
+		],
+		metaThemeColor: "#1c1e26",
 		colorScheme: "dark",
 	},
 ];

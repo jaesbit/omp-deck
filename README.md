@@ -6,7 +6,7 @@ kanban backed by SQLite, cron routines, an inbox with one-click promote, a
 plugin marketplace, themable settings, and a Telegram bridge — all in a single
 Bun process, designed to run loopback-only behind Tailscale or an SSH tunnel.
 
-> Status: **v0.1 public release.** End-to-end verified against live omp turns.
+> Status: **v0.2 release — KB Cockpit + Maintenance Gate.**
 > See [CHANGELOG.md](./CHANGELOG.md) for the full feature inventory.
 
 ![omp-deck chat surface — live tool calls + orientation summary](./docs/screenshots/00-hero-chat-paper.png)
@@ -45,6 +45,27 @@ shares its session + auth store. Run both; they coexist.
 - **Slash commands** with four scopes (`deck` / `builtin` / `user` /
   `project`) and in-process dispatch — `/task add`, `/context`, `/compact`,
   `/usage` run instantly with no model round-trip.
+- **Knowledge base** — `/kb` view over your local Karpathy-style llm-wiki at
+  `~/kb` (override via `OMP_DECK_KB_ROOT`). Lazy tree, markdown viewer with
+  `[[wikilink]]` resolution + create-on-click, in-pane editor, Obsidian-
+  style force-directed graph view (`?view=graph`) with click-to-isolate per
+  source directory, full-text search + Ctrl-P quick-open palette, inspector
+  with outbound links + backlinks + tag chips + orphan badge. Empty kb
+  surfaces a one-click setup flow. Hide subtrees with
+  `OMP_DECK_KB_EXCLUDE_DIRS=<csv>`.
+- **Skills** — `/skills` surfaces every skill omp loads across all providers
+  (`native`, `claude-plugins`, `claude`, `codex`, …), not just marketplace
+  plugins. Native (`~/.omp/agent/skills/`) sorts first. Ships an omp-native
+  `create-skill` starter — first-party authoring loop with no Claude-Code
+  dependencies.
+- **Maintenance gate** — bundled omp SDK extension (installed to
+  `~/.omp/agent/extensions/` on boot) that nudges the agent at turn-end
+  (~every 10 turns) to capture reusable output into the canonical org
+  folders (`inbox/`, `tasks/`, `knowledge/`, `queries/`, `context/`, …)
+  or state "No maintenance needed" to release. Structural org-root sniff
+  only activates for cwds with the canonical layout. Universal across
+  deck, omp TUI, and ACP sessions (the deck wires `ExtensionRunner` into
+  `InProcessAgentBridge`).
 - **Kanban** with Jira-style display IDs (`T-1`, `T-2`, ...), drag-and-drop,
   configurable columns, and live WebSocket broadcasts — agent or external
   scripts mutating tasks refresh every open kanban without polling.
@@ -53,7 +74,7 @@ shares its session + auth store. Run both; they coexist.
 - **Inbox** — quick capture surface with promote-to-task.
 - **Settings** — masked secret store with atomic `.env` writes + audit log,
   hot-applied env updates where possible, a one-click server restart for the
-  rest. Paper / Slate themes with FOUC-free pre-paint.
+  rest. Paper / Slate / Horizon themes with FOUC-free pre-paint.
 - **Marketplace** — browse and install plugins/skills/MCPs over the SDK's
   `MarketplaceManager`. Empty state seeds with
   `anthropics/claude-plugins-official`.
@@ -163,7 +184,7 @@ Full diagram in [docs/architecture.md](./docs/architecture.md).
 - [Skills](./docs/skills.md) — `/skills` view, plugin→skill hierarchy, scope
   semantics, live refresh, REST surface.
 - [Telegram bridge](./docs/telegram.md) — DM-driven agent from your phone.
-- [Themes](./docs/themes.md) — Paper / Slate / adding more.
+- [Themes](./docs/themes.md) — Paper / Slate / Horizon / adding more.
 - [Start command template](./docs/start-command-template.md) — define
   `/start` for an auto-orientation greeting.
 - [Architecture](./docs/architecture.md) — workspace layout, frame model,
@@ -185,14 +206,26 @@ request. The deck never logs values, only redacted forms.
 
 ## Status & roadmap
 
-v0.1 ships the surfaces above end-to-end. Notable items deferred to v0.2:
+**v0.2 shipped:**
+
+- KB Cockpit (tree / viewer / editor / graph / search / inspector) over
+  `~/kb` with live updates.
+- Skills cockpit pivoted to omp-native (`loadCapability` over all providers).
+- Bundled `create-skill` and `maintenance-gate` starters; deck installs
+  them on boot and `InProcessAgentBridge` now wires `ExtensionRunner` so
+  extensions actually fire in deck sessions.
+- Horizon theme (ported from
+  [opus-extensions/omp-themes/horizon.json](https://github.com/vincitamore/misc/tree/main/opus-extensions/omp-themes)).
+- External links open in a new tab across every markdown surface.
+- CRLF-tolerant frontmatter parsing fixes Windows-saved YAML.
+
+**Still deferred:**
 
 - Permission prompts (`ask` tool) via bidirectional WS UI bridge.
 - Plan-mode UI (banner + plan file viewer).
 - File browser in the inspector.
 - Subprocess-per-session bridge impl for crash isolation.
 - Slack / Discord / Matrix bridges (same supervisor pattern as Telegram).
-- Skill management UI (filed; see backlog).
 - `bunx omp-deck` install path / Docker image build verified.
 
 ## License

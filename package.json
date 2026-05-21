@@ -1,6 +1,6 @@
 {
   "name": "omp-deck",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "Cockpit web UI for the omp (oh-my-pi) coding agent — multi-session chat, kanban, cron routines, inbox, messaging bridges, and a marketplace browser. Designed to be served loopback-only behind a Tailscale gate or SSH tunnel.",
   "keywords": [
