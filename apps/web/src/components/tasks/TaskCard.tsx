@@ -1,6 +1,7 @@
 import { useSortable } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import type { Task } from "@omp-deck/protocol";
+import { formatBriefTime } from "@/lib/time";
 import { cn, truncate } from "@/lib/utils";
 
 interface Props {
@@ -76,6 +77,11 @@ export function TaskCard({ task, onOpen }: Props) {
  * identical in shape; only the chrome differs (shadow, scale, rotation).
  */
 export function TaskCardBody({ task, lifted }: { task: Task; lifted: boolean }) {
+	// Surface the most recent activity timestamp — body edits bump updatedAt
+	// without disturbing the per-column sort, which is exactly the signal a
+	// glance at the card should reveal.
+	const stamp = task.updatedAt;
+	const brief = formatBriefTime(stamp);
 	return (
 		<div
 			className={cn(
@@ -85,8 +91,17 @@ export function TaskCardBody({ task, lifted }: { task: Task; lifted: boolean }) 
 					: "border-line cursor-grab hover:border-line-strong active:cursor-grabbing",
 			)}
 		>
-			<div className="font-mono text-[10px] uppercase tracking-meta text-ink-3">
-				T-{task.displayId}
+			<div className="flex items-baseline gap-2 font-mono text-[10px] uppercase tracking-meta text-ink-3">
+				<span>T-{task.displayId}</span>
+				{brief ? (
+					<time
+						dateTime={stamp}
+						title={new Date(stamp).toLocaleString()}
+						className="ml-auto text-ink-4"
+					>
+						{brief}
+					</time>
+				) : null}
 			</div>
 			<div className="mt-0.5 font-medium leading-snug text-ink">{task.title}</div>
 			{task.body ? (
