@@ -58,4 +58,10 @@ export const tasksApi = {
 	removeState(id: string): Promise<{ reassigned: number }> {
 		return req(`/task-states/${encodeURIComponent(id)}`, { method: "DELETE" });
 	},
+	reorderStates(orderedIds: string[]): Promise<{ states: TaskState[] }> {
+		return req<{ states: TaskState[] }>(`/task-states/reorder`, {
+			method: "POST",
+			body: JSON.stringify({ orderedIds }),
+		});
+	},
 };

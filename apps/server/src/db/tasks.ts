@@ -130,6 +130,45 @@ export function updateState(
 }
 
 /**
+ * Atomically renumber `task_states.position` to match `orderedIds`. Used by
+ * the kanban column drag-reorder. `orderedIds` must be a permutation of the
+ * current `task_states.id` set — missing, extra, or duplicate ids throw
+ * before any UPDATE runs, so the column ordering is never left half-applied.
+ *
+ * Renumbering uses 100-unit gaps so an ad-hoc `position` insert (e.g. a
+ * `createState({ position })` call) can still slot between two columns
+ * without re-running this whole reorder.
+ */
+export function reorderStates(orderedIds: string[]): TaskState[] {
+	const db = getDb();
+	const current = listStates();
+	const knownIds = new Set(current.map((s) => s.id));
+
+	if (orderedIds.length !== current.length) {
+		throw new Error(
+			`reorderStates: expected ${current.length} ids, got ${orderedIds.length}`,
+		);
+	}
+	const seen = new Set<string>();
+	for (const sid of orderedIds) {
+		if (!knownIds.has(sid)) throw new Error(`reorderStates: unknown state id "${sid}"`);
+		if (seen.has(sid)) throw new Error(`reorderStates: duplicate state id "${sid}"`);
+		seen.add(sid);
+	}
+
+	db.transaction(() => {
+		const update = db.prepare<unknown, [number, string]>(
+			"UPDATE task_states SET position = ? WHERE id = ?",
+		);
+		for (let i = 0; i < orderedIds.length; i++) {
+			update.run((i + 1) * 100, orderedIds[i]!);
+		}
+	})();
+
+	return listStates();
+}
+
+/**
  * Delete a state. Reassigns any tasks in that state to the default state.
  * Refuses to delete the default state.
  */

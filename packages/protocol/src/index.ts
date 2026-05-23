@@ -827,6 +827,16 @@ export interface UpdateTaskStateRequest {
 	position?: number;
 }
 
+/** Body for the "reorder task states" endpoint (kanban column drag). */
+export interface ReorderTaskStatesRequest {
+	/** Permutation of every existing `TaskState.id`, top-of-board first. */
+	orderedIds: string[];
+}
+
+export interface ReorderTaskStatesResponse {
+	states: TaskState[];
+}
+
 /** Body for the "move task" convenience endpoint (kanban drop). */
 export interface MoveTaskRequest {
 	stateId: string;

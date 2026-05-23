@@ -29,6 +29,7 @@ import {
 	listStates,
 	listTasks,
 	moveTask,
+	reorderStates,
 	updateState,
 	updateTask,
 } from "./db/tasks.ts";
@@ -140,6 +141,26 @@ export function buildTasksRouter(): Hono {
 			return c.json(state, 201);
 		} catch (err) {
 			log.error(`createState failed`, err);
+			return c.json({ error: String(err) }, 400);
+		}
+	});
+
+	app.post("/task-states/reorder", async (c) => {
+		let body: { orderedIds?: unknown };
+		try {
+			body = (await c.req.json()) as { orderedIds?: unknown };
+		} catch {
+			return c.json({ error: "invalid json" }, 400);
+		}
+		if (!Array.isArray(body.orderedIds) || body.orderedIds.some((x) => typeof x !== "string")) {
+			return c.json({ error: "orderedIds must be string[]" }, 400);
+		}
+		try {
+			const states = reorderStates(body.orderedIds as string[]);
+			notifyTasksChanged();
+			return c.json({ states });
+		} catch (err) {
+			log.error(`reorderStates failed`, err);
 			return c.json({ error: String(err) }, 400);
 		}
 	});
