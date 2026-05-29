@@ -9,14 +9,15 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Copy, RefreshCcw } from "lucide-react";
 
-import type {
-	Routine,
-	RoutineDeckAction,
-	RoutineRun,
-	RoutineSpec,
-	RoutineStep,
-	RoutineTrigger,
-	ValidationError,
+import {
+	validateRoutineSpec,
+	type Routine,
+	type RoutineDeckAction,
+	type RoutineRun,
+	type RoutineSpec,
+	type RoutineStep,
+	type RoutineTrigger,
+	type ValidationError,
 } from "@omp-deck/protocol";
 
 import { routinesApi } from "@/lib/routines-api";
@@ -30,6 +31,17 @@ import { AddStepPicker } from "./AddStepPicker";
 import { SettingsForm } from "./SettingsForm";
 import { StepCard } from "./StepCard";
 import { TriggerPicker } from "./TriggerPicker";
+import {
+	appendStepRenderKey,
+	makeStepRenderKeys,
+	moveStepRenderKey,
+	reconcileStepRenderKeys,
+	removeStepRenderKey,
+} from "./step-render-keys";
+import {
+	type RoutineValidationMessage,
+	summarizeRoutineValidationErrors,
+} from "./routine-validation";
 import {
 	emptyV1Spec,
 	insertStep,
@@ -71,7 +83,21 @@ export function RoutineBuilder({ routine, onSaved, onError }: Props) {
 		return emptyV1Spec();
 	}, [routine]);
 
+	const stepKeySeq = useRef(0);
+	function nextStepKey(): string {
+		const n = stepKeySeq.current;
+		stepKeySeq.current += 1;
+		return `step-${n}`;
+	}
+	function makeStepKeys(count: number): string[] {
+		return makeStepRenderKeys(count, nextStepKey);
+	}
+	function reconcileStepKeys(next: RoutineSpec): void {
+		setStepKeys((prev) => reconcileStepRenderKeys(prev, next.steps.length, nextStepKey));
+	}
+
 	const [spec, setSpec] = useState<RoutineSpec>(initialSpec);
+	const [stepKeys, setStepKeys] = useState<string[]>(() => makeStepKeys(initialSpec.steps.length));
 	const [yamlBuffer, setYamlBuffer] = useState<string>(() =>
 		routine?.specYaml ?? stringifySpec(initialSpec),
 	);
@@ -97,6 +123,7 @@ export function RoutineBuilder({ routine, onSaved, onError }: Props) {
 	useEffect(() => {
 		if (lastRoutineId.current === routine?.id) return;
 		lastRoutineId.current = routine?.id;
+		setStepKeys(makeStepKeys(initialSpec.steps.length));
 		setSpec(initialSpec);
 		setYamlBuffer(routine?.specYaml ?? stringifySpec(initialSpec));
 		setYamlDirty(false);
@@ -111,8 +138,12 @@ export function RoutineBuilder({ routine, onSaved, onError }: Props) {
 		void routinesApi.runs(routine.id, 10).then((r) => setRuns(r.runs));
 	}, [routine]);
 
-	// Form -> YAML sync.
-	function updateSpec(next: RoutineSpec): void {
+	// Form -> YAML sync. Step cards use render-only keys that are deliberately
+	// separate from editable step ids; otherwise changing `id` remounts the
+	// active input and drops focus after every character.
+	function updateSpec(next: RoutineSpec, nextStepKeys?: string[]): void {
+		if (nextStepKeys) setStepKeys(nextStepKeys);
+		else reconcileStepKeys(next);
 		setSpec(next);
 		setYamlBuffer(stringifySpec(next));
 		setYamlDirty(false);
@@ -130,7 +161,9 @@ export function RoutineBuilder({ routine, onSaved, onError }: Props) {
 			else setSchemaErrors(undefined);
 			return false;
 		}
-		setSpec(result.spec ?? emptyV1Spec());
+		const nextSpec = result.spec ?? emptyV1Spec();
+		setStepKeys(makeStepKeys(nextSpec.steps.length));
+		setSpec(nextSpec);
 		setYamlDirty(false);
 		setYamlError(undefined);
 		setSchemaErrors(undefined);
@@ -147,6 +180,11 @@ export function RoutineBuilder({ routine, onSaved, onError }: Props) {
 		setTab(next);
 	}
 
+	const specValidation = useMemo(() => validateRoutineSpec(spec), [spec]);
+	const specValidationMessages = useMemo(
+		() => summarizeRoutineValidationErrors(specValidation.errors, spec),
+		[specValidation.errors, spec],
+	);
 	// Compile the canvas graph on every spec change. In the linear short-circuit
 	// path (no `layout.edges`), this is the identity function; it only does work
 	// when the user has wired explicit edges via the canvas. Errors gate Save
@@ -167,6 +205,11 @@ export function RoutineBuilder({ routine, onSaved, onError }: Props) {
 				return;
 			}
 		}
+		if (!specValidation.valid) {
+			onError(`Cannot save: ${specValidationMessages[0]?.message ?? "Spec is invalid"}`);
+			return;
+		}
+
 		// Re-compile against the freshest spec (applyYaml may have mutated it
 		// since the memo snapshotted). Block save when any error is present;
 		// the canvas error strip already shows the user what is broken.
@@ -258,22 +301,27 @@ export function RoutineBuilder({ routine, onSaved, onError }: Props) {
 
 	const existingStepIds = spec.steps.map((s) => s.id);
 	function onAddStep(type: RoutineStep["type"], presetAction?: RoutineDeckAction): void {
-		updateSpec(insertStep(spec, scaffoldStep(type, existingStepIds, presetAction)));
+		updateSpec(
+			insertStep(spec, scaffoldStep(type, existingStepIds, presetAction)),
+			appendStepRenderKey(stepKeys, nextStepKey),
+		);
 	}
 	function onChangeStep(index: number, next: RoutineStep): void {
-		updateSpec(replaceStep(spec, index, next));
+		updateSpec(replaceStep(spec, index, next), stepKeys);
 	}
 	function onRemoveStep(index: number): void {
-		updateSpec(removeStep(spec, index));
+		updateSpec(removeStep(spec, index), removeStepRenderKey(stepKeys, index));
 	}
 	function onMoveUp(index: number): void {
-		updateSpec(moveStep(spec, index, Math.max(0, index - 1)));
+		const target = Math.max(0, index - 1);
+		updateSpec(moveStep(spec, index, target), moveStepRenderKey(stepKeys, index, target));
 	}
 	function onMoveDown(index: number): void {
-		updateSpec(moveStep(spec, index, Math.min(spec.steps.length - 1, index + 1)));
+		const target = Math.min(spec.steps.length - 1, index + 1);
+		updateSpec(moveStep(spec, index, target), moveStepRenderKey(stepKeys, index, target));
 	}
 	function onChangeTriggers(triggers: RoutineTrigger[]): void {
-		updateSpec(replaceTriggers(spec, triggers));
+		updateSpec(replaceTriggers(spec, triggers), stepKeys);
 	}
 
 	// ─── Render ────────────────────────────────────────────────────────────
@@ -282,6 +330,7 @@ export function RoutineBuilder({ routine, onSaved, onError }: Props) {
 		spec.name.trim().length > 0 &&
 		spec.trigger.length > 0 &&
 		spec.steps.length > 0 &&
+		specValidation.valid &&
 		compile.errors.length === 0 &&
 		!busy;
 
@@ -312,7 +361,7 @@ export function RoutineBuilder({ routine, onSaved, onError }: Props) {
 						) : (
 							spec.steps.map((step, idx) => (
 								<StepCard
-									key={`${step.id}-${idx}`}
+									key={`${routine?.id ?? "new"}-${stepKeys[idx] ?? idx}`}
 									step={step}
 									index={idx}
 									total={spec.steps.length}
@@ -445,6 +494,9 @@ export function RoutineBuilder({ routine, onSaved, onError }: Props) {
 					</div>
 				) : null}
 			</div>
+			{specValidationMessages.length > 0 ? (
+				<ValidationSummary messages={specValidationMessages} />
+			) : null}
 			<Footer
 				routine={routine}
 				canSave={canSave}
@@ -514,6 +566,18 @@ function TabBar({
 		</div>
 	);
 }
+function ValidationSummary({ messages }: { messages: readonly RoutineValidationMessage[] }) {
+	return (
+		<div className="border-t border-danger/30 bg-danger/5 px-3 py-2">
+			<div className="meta mb-1 text-danger">Fix before saving</div>
+			<ul className="space-y-0.5 font-mono text-2xs text-danger">
+				{messages.slice(0, 4).map((message) => (
+					<li key={`${message.path}:${message.message}`}>{message.message}</li>
+				))}
+			</ul>
+		</div>
+	);
+}
 
 function Footer({
 	routine,
@@ -540,7 +604,7 @@ function Footer({
 			</label>
 			<div className="ml-auto flex items-center gap-1.5">
 				{routine ? (
-					<button type="button" onClick={onRunNow} className="btn-ghost text-2xs">
+					<button type="button" onClick={onRunNow} className="btn-ghost h-7 px-2 text-2xs">
 						Run now
 					</button>
 				) : null}
@@ -548,7 +612,7 @@ function Footer({
 					type="button"
 					onClick={onSave}
 					disabled={!canSave}
-					className="btn-primary text-2xs disabled:opacity-50"
+					className="btn-primary h-7 px-2 text-2xs disabled:opacity-50"
 				>
 					{busy ? "Saving..." : routine ? "Save" : "Create"}
 				</button>

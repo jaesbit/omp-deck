@@ -1,6 +1,7 @@
 import type { RoutineOnFailure, RoutineRetryPolicy, RoutineStep } from "@omp-deck/protocol";
 
 import { Field, NumInput, TextInput } from "./form-primitives";
+import { validateStepId } from "./routine-validation";
 
 interface Props {
 	step: RoutineStep;
@@ -23,12 +24,14 @@ export function StepCommonFields({ step, onChange, existingIds }: Props) {
 		onChange(next);
 	}
 	const idCollision = existingIds.includes(step.id);
+	const idError = validateStepId(step.id);
+	const idHint = idCollision ? "duplicate" : idError;
 	const retry = step.retry;
 
 	return (
 		<div className="space-y-2 rounded border border-line bg-paper-2/40 p-2">
 			<div className="grid grid-cols-2 gap-2">
-				<Field label="id" hint={idCollision ? "duplicate" : undefined} tone={idCollision ? "danger" : undefined}>
+				<Field label="id" hint={idHint} tone={idHint ? "danger" : undefined}>
 					<TextInput value={step.id} onChange={(v) => set("id", v)} placeholder="fetch_tasks" mono />
 				</Field>
 				<Field label="on_failure">
