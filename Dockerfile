@@ -17,14 +17,23 @@
 #     omp-deck
 
 # ─── Stage 1: build web ────────────────────────────────────────────────────
-FROM oven/bun:1.3.14-alpine AS web-build
+#
+# `oven/bun:<ver>` is the Debian-slim variant (glibc). We avoid `-alpine`
+# because `@oh-my-pi/pi-natives` ships prebuilt `.node` binaries linked
+# against glibc's `ld-linux-x86-64.so.2`; Alpine's musl libc would fail
+# to load them at runtime (no `linux-x64-musl` variant exists).
+FROM oven/bun:1.3.14 AS web-build
 WORKDIR /app
 
-# Workspace manifests first for cache-friendly install.
+# Workspace manifests first for cache-friendly install. All five must be
+# present so bun's frozen-lockfile resolver sees the same workspace graph
+# the lockfile was generated against — including the telegram bridge,
+# whose runtime is opt-in but whose manifest is part of the lockfile.
 COPY package.json bun.lock* tsconfig.base.json ./
 COPY packages/protocol/package.json packages/protocol/
 COPY apps/web/package.json apps/web/
 COPY apps/server/package.json apps/server/
+COPY apps/bridges/telegram/package.json apps/bridges/telegram/
 RUN bun install --frozen-lockfile
 
 # Web sources + protocol (referenced as workspace:*).
@@ -35,7 +44,7 @@ WORKDIR /app/apps/web
 RUN bun run build
 
 # ─── Stage 2: runtime ──────────────────────────────────────────────────────
-FROM oven/bun:1.3.14-alpine AS runtime
+FROM oven/bun:1.3.14 AS runtime
 WORKDIR /app
 
 # Re-install with only server-relevant workspace (still pulls protocol).
@@ -43,6 +52,7 @@ COPY package.json bun.lock* tsconfig.base.json ./
 COPY packages/protocol/package.json packages/protocol/
 COPY apps/server/package.json apps/server/
 COPY apps/web/package.json apps/web/
+COPY apps/bridges/telegram/package.json apps/bridges/telegram/
 
 RUN bun install --frozen-lockfile --production
 

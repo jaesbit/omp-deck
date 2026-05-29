@@ -5,6 +5,17 @@ All notable changes to omp-deck. The format is loosely based on
 
 ## [Unreleased]
 
+### Fixed
+
+- **Docker build is now correct end-to-end on Linux.** Two regressions were silently broken before v0.4.0 even though `docs/deployment.md` advertised the path:
+  - `Dockerfile` stages now copy `apps/bridges/telegram/package.json` alongside the four other workspace manifests. The lockfile knows about five workspaces; copying only four made `bun install --frozen-lockfile` fail with "lockfile had changes".
+  - Base image switched from `oven/bun:1.3.14-alpine` to `oven/bun:1.3.14` (Debian-slim, glibc). `@oh-my-pi/pi-natives` ships prebuilt `.node` binaries linked against glibc's `ld-linux-x86-64.so.2`; Alpine's musl libc fails to load them (no `linux-x64-musl` variant exists). Image is ~40 MB larger; the trade is a runtime that actually boots.
+
+### Added
+
+- **`Start-OMP-Deck.sh`** — bash sibling to the Windows `.cmd` launcher. Same shape (start dev server + Vite, write logs, open browser), plus `start` / `stop` / `status` subcommands. Bare invocation runs foreground equivalent to `bun run dev`.
+- **GitHub Actions CI matrix** (`.github/workflows/ci.yml`) — runs `bun install --frozen-lockfile` + `bun run typecheck` + `bun test` + `bun --cwd apps/web run build` on `ubuntu-latest` / `macos-latest` / `windows-latest`. Separate `docker` job builds the image and smoke-tests `/api/health` on every push to `main` and every PR. Catches platform-divergent regressions before release instead of at user-install time.
+
 ## [0.4.0] — 2026-05-28 — Plan mode, queued-prompt editing, todo live-sync, docs pass
 
 Mid-cycle release focused on user-visible polish to the chat loop. Plan mode brings TUI parity to the deck so the agent can propose work before it executes. Queued prompts you sent mid-stream can now be edited or cancelled. The Inspector's todo panel updates intra-turn instead of waiting for SDK reminder ticks. Session rename failures surface their error instead of silently reverting. The README was rewritten human-forward and the supporting docs got an accuracy pass.

@@ -71,9 +71,9 @@ bun run dev
 
 Open <http://127.0.0.1:5173>. Your existing `~/.omp/agent` is picked up automatically — no re-auth.
 
-On Windows, you can also double-click `Start-OMP-Deck.cmd` from the repo root — it boots the server on `:8787`, starts the Vite app on `:5173`, opens the deck in your browser, and writes logs under `.logs/`.
+On **Windows**, you can also double-click `Start-OMP-Deck.cmd` from the repo root — it boots the server on `:8787`, starts the Vite app on `:5173`, opens the deck in your browser, and writes logs under `.logs/`. On **macOS / Linux**, the sibling is `bash Start-OMP-Deck.sh start` (`stop` / `status` subcommands too); bare invocation runs foreground, same as `bun run dev`.
 
-If you don't have omp yet, see [docs/install.md](./docs/install.md) for the full path (install Bun → install the omp CLI → authenticate → clone + run). Or skip the CLI entirely and paste a provider API key into Settings → Env after the deck is up.
+If you don't have omp yet, see [docs/install.md](./docs/install.md) for the full path (install Bun → install the omp CLI → authenticate → clone + run). Or skip the CLI entirely and paste a provider API key into Settings → Env after the deck is up. For container-based deployment, the repo ships a `Dockerfile` (Debian-slim base, glibc-compatible); see [docs/deployment.md](./docs/deployment.md).
 
 ## How it compares
 

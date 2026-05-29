@@ -1,0 +1,10 @@
+# Force LF line endings on files that POSIX shells / runtimes execute
+# verbatim. CRLF in these breaks the shebang lookup on macOS / Linux
+# (`#!/usr/bin/env bash\r` → "bash\r: not found").
+#
+# Without this, Windows clones with `core.autocrlf=true` (Git for Windows
+# default) silently convert these to CRLF, the file commits clean, but
+# fails to run on the other side.
+*.sh   text eol=lf
+*.bash text eol=lf
+Dockerfile text eol=lf
