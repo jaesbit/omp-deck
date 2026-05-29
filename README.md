@@ -29,12 +29,12 @@ pi is known for its flexibility and omp applies some opinions on how to leverage
 You're already running an agent. You've felt the friction of trying to:
 
 - **Track what it's actually doing for you** as a body of work, not a scroll of terminal output that ends at `Ctrl+L`.
-- **Ask it something from somewhere that isn't your laptop** — the couch, a walk, bed.
+- **Ask it something from somewhere that isn't your laptop** such as the couch, a walk, bed.
 - **Decide carefully** when it's about to do something big, instead of trusting it on the first try.
 - **Capture an idea or a bug** without breaking your current focus.
 - **Have it remember things** across sessions without you stuffing context windows by hand.
 
-omp-deck is the cockpit that holds all of that. The chat surface stays at parity with the terminal — but everything *around* the chat is built for the rest of the work.
+omp-deck is the cockpit that holds all of that. The chat surface stays at parity with the terminal,  but everything *around* the chat is built for the rest of the work.
 
 ## What you get
 
