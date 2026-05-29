@@ -25,6 +25,8 @@ import {
 	updateV1Routine,
 } from "./db/routines.ts";
 import {
+	deleteWebhookSecret,
+	ensureWebhookSecret,
 	listStepRuns,
 	upsertWebhookSecret,
 } from "./db/routine-step-runs.ts";
@@ -209,7 +211,8 @@ export function buildRoutinesRouter(runner: RoutinesRunner): Hono {
 		}
 		const secret = randomBytes(32).toString("base64url");
 		const hash = hashSecretForStorage(secret);
-		upsertWebhookSecret({ routineId: id, path: webhookTrigger.webhook.path, secretHash: hash });
+		const registered = upsertWebhookSecret({ routineId: id, path: webhookTrigger.webhook.path, secretHash: hash });
+		if (!registered) return c.json({ error: "webhook path already in use" }, 409);
 		return c.json({ ok: true, secret, path: webhookTrigger.webhook.path });
 	});
 
@@ -295,24 +298,22 @@ export function buildRoutinesRouter(runner: RoutinesRunner): Hono {
 }
 
 function registerWebhookTriggers(spec: RoutineSpec, routineId: string): void {
-	// If any webhook trigger is declared, generate an initial secret. The caller
-	// retrieves it via /webhook-secret/rotate (which always returns the plain
-	// secret — same endpoint serves both initial issuance and rotation).
-	// V1 limitation: webhook paths are globally unique. If a path is already
-	// claimed by another routine, silently skip; the routine is still created
-	// without that webhook trigger active. V1.5 will surface this in the UI.
-	for (const t of spec.trigger) {
-		if ("webhook" in t) {
-			const secret = randomBytes(32).toString("base64url");
-			try {
-				upsertWebhookSecret({
-					routineId,
-					path: t.webhook.path,
-					secretHash: hashSecretForStorage(secret),
-				});
-			} catch (err) {
-				log.warn(`webhook path ${t.webhook.path} already in use; skipping registration for ${routineId}`, err);
-			}
-		}
+	// Keep the registration table in sync with the authored spec. Registering a
+	// trigger should be idempotent on save; only the explicit rotate endpoint
+	// replaces the stored secret hash.
+	const webhookTrigger = spec.trigger.find((t) => "webhook" in t) as { webhook: { path: string } } | undefined;
+	if (!webhookTrigger) {
+		deleteWebhookSecret(routineId);
+		return;
+	}
+
+	const secret = randomBytes(32).toString("base64url");
+	const registered = ensureWebhookSecret({
+		routineId,
+		path: webhookTrigger.webhook.path,
+		secretHash: hashSecretForStorage(secret),
+	});
+	if (!registered) {
+		log.warn(`webhook path ${webhookTrigger.webhook.path} already in use; skipping registration for ${routineId}`);
 	}
 }

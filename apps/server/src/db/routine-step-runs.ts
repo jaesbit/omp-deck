@@ -183,7 +183,9 @@ export function upsertWebhookSecret(input: {
 	routineId: string;
 	path: string;
 	secretHash: string;
-}): void {
+}): boolean {
+	if (isWebhookPathClaimedByAnotherRoutine(input.path, input.routineId)) return false;
+
 	const now = nowIso();
 	getDb()
 		.prepare<unknown, [string, string, string, string]>(
@@ -195,6 +197,42 @@ export function upsertWebhookSecret(input: {
 			   created_at = excluded.created_at`,
 		)
 		.run(input.routineId, input.path, input.secretHash, now);
+	return true;
+}
+
+export function ensureWebhookSecret(input: {
+	routineId: string;
+	path: string;
+	secretHash: string;
+}): boolean {
+	if (isWebhookPathClaimedByAnotherRoutine(input.path, input.routineId)) return false;
+
+	const existing = getWebhookSecretByRoutine(input.routineId);
+	if (existing) {
+		if (existing.path !== input.path) {
+			getDb()
+				.prepare<unknown, [string, string]>(
+					"UPDATE routine_webhook_secrets SET path = ? WHERE routine_id = ?",
+				)
+				.run(input.path, input.routineId);
+		}
+		return true;
+	}
+
+	const now = nowIso();
+	getDb()
+		.prepare<unknown, [string, string, string, string]>(
+			`INSERT INTO routine_webhook_secrets (routine_id, path, secret_hash, created_at)
+			 VALUES (?, ?, ?, ?)`,
+		)
+		.run(input.routineId, input.path, input.secretHash, now);
+	return true;
+}
+
+export function deleteWebhookSecret(routineId: string): void {
+	getDb()
+		.prepare<unknown, [string]>("DELETE FROM routine_webhook_secrets WHERE routine_id = ?")
+		.run(routineId);
 }
 
 export function getWebhookSecretByPath(path: string): WebhookSecretRow | undefined {
@@ -204,6 +242,20 @@ export function getWebhookSecretByPath(path: string): WebhookSecretRow | undefin
 		)
 		.get(path) as WebhookSecretRow | null;
 	return row ?? undefined;
+}
+
+function getWebhookSecretByRoutine(routineId: string): WebhookSecretRow | undefined {
+	const row = getDb()
+		.query<WebhookSecretRow, [string]>(
+			"SELECT routine_id, path, secret_hash, created_at, last_used_at FROM routine_webhook_secrets WHERE routine_id = ?",
+		)
+		.get(routineId) as WebhookSecretRow | null;
+	return row ?? undefined;
+}
+
+function isWebhookPathClaimedByAnotherRoutine(path: string, routineId: string): boolean {
+	const owner = getWebhookSecretByPath(path);
+	return owner !== undefined && owner.routine_id !== routineId;
 }
 
 export function touchWebhookSecret(routineId: string): void {
