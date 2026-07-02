@@ -19,10 +19,12 @@ import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Modal } from "@/components/ui/Modal";
 import { OAuthFlowModal } from "@/components/settings/OAuthFlowModal";
+import { api } from "@/lib/api";
 import { bridgesApi } from "@/lib/bridges-api";
 import { settingsApi } from "@/lib/settings-api";
 import { orientationApi } from "@/lib/orientation-api";
 import { authApi } from "@/lib/auth-api";
+import { useModelCatalog } from "@/lib/model-catalog";
 import { playNotificationTone } from "@/lib/audio";
 import { useNotificationPermission } from "@/lib/notifications";
 import { DEFAULT_ABORT_SHORTCUT_KEY, useStore, type NotificationItem } from "@/lib/store";
@@ -94,6 +96,8 @@ export function SettingsView() {
 								<AppearanceSection />
 							) : selected === "notifications" ? (
 								<NotificationsSection />
+							) : selected === "workspaces" ? (
+								<WorkspacesSection />
 							) : (
 								<StubSection section={selected} />
 							)}
@@ -854,6 +858,188 @@ function NotificationsSection() {
 			/>
 		</div>
 	);
+}
+
+/**
+ * Workspaces section (T-42): per-cwd default model override. Lists every
+ * workspace `GET /workspaces` derives (default cwd + `OMP_DECK_WORKSPACES`
+ * roots + distinct session cwds), lets the user pick or clear a default
+ * model per exact cwd, and shows the effective origin (override vs global).
+ * Session creation resolves model precedence as: explicit per-session choice
+ * > this override > SDK/OMP_MODEL global default (see `routes.ts` `POST /sessions`).
+ */
+function WorkspacesSection() {
+	const [workspaces, setWorkspaces] = useState<import("@omp-deck/protocol").WorkspaceEntry[]>([]);
+	const [loading, setLoading] = useState(true);
+	const [error, setError] = useState<string | undefined>();
+	const [editingCwd, setEditingCwd] = useState<string | undefined>();
+
+	async function refresh(): Promise<void> {
+		try {
+			const resp = await api.listWorkspaces();
+			setWorkspaces(resp.workspaces);
+			setError(undefined);
+		} catch (e) {
+			setError(String(e));
+		} finally {
+			setLoading(false);
+		}
+	}
+
+	useEffect(() => {
+		void refresh();
+	}, []);
+
+	async function clear(cwd: string): Promise<void> {
+		try {
+			await api.setWorkspacePreference(cwd, null);
+			await refresh();
+		} catch (e) {
+			setError(String(e));
+		}
+	}
+
+	return (
+		<div className="mx-auto max-w-3xl">
+			<div className="mb-4">
+				<h1 className="text-lg font-semibold text-ink">Workspaces</h1>
+				<p className="mt-1 text-sm text-ink-3">
+					Pin a default model per exact workspace path. New sessions use it unless a
+					model is chosen explicitly at creation time.
+				</p>
+			</div>
+			{error ? (
+				<div className="mb-3 rounded-md border border-danger/30 bg-danger/10 px-3 py-2 font-mono text-xs text-danger">
+					{error}
+				</div>
+			) : null}
+			{loading ? (
+				<div className="py-6 text-center text-sm text-ink-3">Loading…</div>
+			) : workspaces.length === 0 ? (
+				<div className="py-6 text-center text-sm text-ink-3">No known workspaces yet.</div>
+			) : (
+				<ul className="divide-y divide-line rounded-md border border-line bg-paper-2">
+					{workspaces.map((w) => (
+						<li key={w.cwd} className="flex items-center gap-3 px-3 py-2.5">
+							<div className="min-w-0 flex-1">
+								<div className="truncate text-sm font-medium text-ink">{w.label}</div>
+								<div className="truncate font-mono text-2xs text-ink-3" title={w.cwd}>{w.cwd}</div>
+							</div>
+							<div className="shrink-0 text-right">
+								{w.defaultModel ? (
+									<div className="font-mono text-2xs text-ink-2">
+										{w.defaultModel.provider}/{w.defaultModel.id}
+									</div>
+								) : (
+									<div className="font-mono text-2xs text-ink-4">global/SDK default</div>
+								)}
+							</div>
+							<div className="flex shrink-0 items-center gap-1.5">
+								<Button variant="ghost" size="sm" onClick={() => setEditingCwd(w.cwd)}>
+									Change
+								</Button>
+								{w.defaultModel ? (
+									<Button variant="ghost" size="sm" onClick={() => void clear(w.cwd)}>
+										Clear
+									</Button>
+								) : null}
+							</div>
+						</li>
+					))}
+				</ul>
+			)}
+			<WorkspaceModelPickerModal
+				cwd={editingCwd}
+				onClose={() => setEditingCwd(undefined)}
+				onPicked={() => void refresh()}
+			/>
+		</div>
+	);
+}
+
+function WorkspaceModelPickerModal({
+	cwd,
+	onClose,
+	onPicked,
+}: {
+	cwd: string | undefined;
+	onClose: () => void;
+	onPicked: () => void;
+}) {
+	const open = cwd !== undefined;
+	const { loading, error: catalogError, query, setQuery, grouped } = useModelCatalog(undefined, open);
+	const [busyKey, setBusyKey] = useState<string | undefined>();
+	const [error, setError] = useState<string | undefined>();
+
+	useEffect(() => {
+		if (!open) return;
+		setQuery("");
+		setError(undefined);
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, [open]);
+
+	async function pick(provider: string, id: string): Promise<void> {
+		if (!cwd) return;
+		setBusyKey(`${provider}/${id}`);
+		setError(undefined);
+		try {
+			await api.setWorkspacePreference(cwd, { provider, id });
+			onPicked();
+			onClose();
+		} catch (err) {
+			setError(err instanceof Error ? err.message : String(err));
+		} finally {
+			setBusyKey(undefined);
+		}
+	}
+
+	return (
+		<Modal open={open} onClose={onClose} widthClass="max-w-xl">
+			<div className="flex h-11 items-center gap-2 border-b border-line px-3">
+				<div className="meta">Default model — {cwd ? shortWorkspacePath(cwd) : ""}</div>
+			</div>
+			<div className="border-b border-line px-3 py-2">
+				<input
+						value={query}
+						onChange={(e) => setQuery(e.target.value)}
+						placeholder="Filter by name, id, or provider"
+						className="field h-8 w-full px-2 text-sm"
+				/>
+			</div>
+			{error ?? catalogError ? (
+				<div className="mx-3 my-2 rounded-md border border-danger/30 bg-danger/10 px-3 py-2 font-mono text-xs text-danger">
+					{error ?? catalogError}
+				</div>
+			) : null}
+			<div className="max-h-[50vh] overflow-y-auto">
+				{loading ? <div className="px-3 py-6 text-center text-sm text-ink-3">Loading…</div> : null}
+				{grouped.map((g) => (
+					<div key={g.provider}>
+						<div className="border-b border-line bg-paper-2 px-3 py-1 font-mono text-2xs uppercase tracking-meta text-ink-3">
+							{g.provider}
+						</div>
+						{g.items.map((m) => (
+							<button
+								key={`${m.provider}/${m.id}`}
+								type="button"
+								disabled={busyKey === `${m.provider}/${m.id}`}
+								onClick={() => void pick(m.provider, m.id)}
+								className="flex w-full items-center gap-2 border-b border-line px-3 py-2 text-left text-sm last:border-b-0 hover:bg-paper-3/60"
+							>
+								<span className="min-w-0 flex-1 truncate">{m.label}</span>
+								<span className="shrink-0 font-mono text-2xs text-ink-3">{m.id}</span>
+							</button>
+						))}
+					</div>
+				))}
+			</div>
+		</Modal>
+	);
+}
+
+function shortWorkspacePath(cwd: string): string {
+	const parts = cwd.split(/[\\/]/).filter(Boolean);
+	return parts[parts.length - 1] ?? cwd;
 }
 
 function PermissionCard({
@@ -1703,7 +1889,7 @@ function GateKnobInput({
 	);
 }
 
-function StubSection({ section }: { section: Exclude<SectionId, "env" | "messaging" | "appearance" | "notifications"> }) {
+function StubSection({ section }: { section: Exclude<SectionId, "env" | "messaging" | "appearance" | "notifications" | "workspaces"> }) {
 	const spec = SECTIONS.find((s) => s.id === section)!;
 	return (
 		<div className="mx-auto max-w-3xl rounded-md border border-dashed border-line bg-paper-2 p-6">
