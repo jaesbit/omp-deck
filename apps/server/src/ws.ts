@@ -123,6 +123,9 @@ export class WsHub {
 			case "plan_response":
 				await this.handlePlanResponse(ws, frame);
 				return;
+			case "goal_action":
+				await this.handleGoalAction(ws, frame);
+				return;
 
 			default:
 				send(ws, { type: "error", error: `unknown frame type` });
@@ -387,6 +390,40 @@ export class WsHub {
 				type: "error",
 				sessionId: frame.sessionId,
 				error: `set_plan_mode failed: ${String((err as Error).message ?? err)}`,
+			});
+		}
+	}
+
+	private async handleGoalAction(
+		ws: ServerWebSocket<ConnectionData>,
+		frame: Extract<ClientFrame, { type: "goal_action" }>,
+	): Promise<void> {
+		const handle = this.bridge.getSession(frame.sessionId);
+		if (!handle) {
+			send(ws, { type: "error", sessionId: frame.sessionId, error: "session not active" });
+			return;
+		}
+		if (frame.action === "create" && !frame.objective?.trim()) {
+			send(ws, { type: "error", sessionId: frame.sessionId, error: "goal_action create requires an objective" });
+			return;
+		}
+		if (frame.action !== "create" && frame.objective !== undefined) {
+			send(ws, { type: "error", sessionId: frame.sessionId, error: "objective is only valid for goal_action create" });
+			return;
+		}
+		this.bridge.bumpActivity(frame.sessionId);
+		try {
+			await handle.actOnGoal({
+				action: frame.action,
+				...(frame.objective !== undefined ? { objective: frame.objective } : {}),
+				...(frame.tokenBudget !== undefined ? { tokenBudget: frame.tokenBudget } : {}),
+			} as import("./bridge/goal-mode-bridge.ts").GoalAction);
+		} catch (err) {
+			log.warn(`goal_action threw`, err);
+			send(ws, {
+				type: "error",
+				sessionId: frame.sessionId,
+				error: `goal_action failed: ${String((err as Error).message ?? err)}`,
 			});
 		}
 	}

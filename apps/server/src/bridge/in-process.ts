@@ -25,6 +25,7 @@ import type {
 	ExtUiDialogResponse,
 	ModelInfo,
 	ModelRef,
+	GoalModeContextWire,
 	PendingPlanApprovalWire,
 	PlanModeContextWire,
 	ServerFrame,
@@ -38,6 +39,7 @@ import { looksLikePlaceholderKey } from "../credential-quality.ts";
 import { getEffectivePrelude } from "../orientation-store.ts";
 import { notificationService } from "../notifications/index.ts";
 import { ExtensionUIBridge } from "./ext-ui-bridge.ts";
+import { GoalModeBridge, type GoalModeState } from "./goal-mode-bridge.ts";
 import { PlanModeBridge } from "./plan-mode-bridge.ts";
 import type {
 	AgentBridge,
@@ -75,6 +77,8 @@ interface Active {
 	uiBridge: ExtensionUIBridge;
 	/** Per-session bridge for the SDK plan-mode lifecycle. */
 	planBridge: PlanModeBridge;
+	/** Per-session bridge for the SDK Goal Mode lifecycle. */
+	goalBridge: GoalModeBridge;
 }
 
 export class InProcessAgentBridge implements AgentBridge {
@@ -137,7 +141,7 @@ export class InProcessAgentBridge implements AgentBridge {
 			log.info(`extension paths: ${ext.extensions.map(e => (e as { path?: string }).path ?? "<unknown>").join(" | ")}`);
 		}
 		await this.wireExtensionRunner(session);
-		const handle = this.attach(session, opts.cwd, sessionManager, result.setToolUIContext);
+		const handle = await this.attach(session, opts.cwd, sessionManager, result.setToolUIContext);
 		if (!opts.suppressAutoStart && this.autoStartCommand) {
 			this.pendingAutoPrompts.set(handle.sessionId, this.autoStartCommand);
 		}
@@ -159,7 +163,7 @@ export class InProcessAgentBridge implements AgentBridge {
 			hasUI: true,
 		});
 		const session = result.session;
-		const handle = this.attach(session, cwd, sessionManager, result.setToolUIContext);
+		const handle = await this.attach(session, cwd, sessionManager, result.setToolUIContext);
 		await this.wireExtensionRunner(session);
 		log.info(`resumed session ${handle.sessionId} from ${opts.sessionPath}`);
 		return handle;
@@ -389,12 +393,12 @@ export class InProcessAgentBridge implements AgentBridge {
 		}
 	}
 
-	private attach(
+	private async attach(
 		session: AgentSession,
 		cwd: string,
 		sessionManager: SessionManager,
 		setToolUIContext: import("@oh-my-pi/pi-coding-agent").CreateAgentSessionResult["setToolUIContext"],
-	): InProcessSessionHandle {
+	): Promise<InProcessSessionHandle> {
 		const sessionId = (session as any).sessionId as string;
 		const uiBridge = new ExtensionUIBridge(sessionId);
 		// Wire the per-session UI context into the SDK's tool-context store so
@@ -409,6 +413,11 @@ export class InProcessAgentBridge implements AgentBridge {
 			getSessionId: () => (sessionManager as unknown as { getSessionId: () => string | null }).getSessionId(),
 		});
 
+		const goalBridge = new GoalModeBridge(
+			session as unknown as import("./goal-mode-bridge.ts").GoalModeSessionSurface,
+			() => planBridge.exit("user_cancelled"),
+		);
+
 		const handle = new InProcessSessionHandle({
 			session,
 			sessionManager,
@@ -416,8 +425,10 @@ export class InProcessAgentBridge implements AgentBridge {
 			sessionId,
 			getModelRegistry: () => this.ensureModelRegistry(),
 			planBridge,
+			goalBridge,
 			onDispose: () => {
 				uiBridge.dispose();
+				goalBridge.dispose();
 				planBridge.dispose();
 				this.active.delete(sessionId);
 				this.pendingAutoPrompts.delete(sessionId);
@@ -435,6 +446,7 @@ export class InProcessAgentBridge implements AgentBridge {
 				else if (type === "turn_end" || type === "agent_end") entry.turnInFlight = false;
 			}
 			handle.emit(event as unknown as AgentSessionEventJson);
+			goalBridge.observe(event as { type?: string });
 			// After the SDK's own event reaches subscribers, fire a synthetic
 			// `context_usage` event on the moments where the underlying number
 			// changes: a turn finishing (fresh assistant usage now available)
@@ -487,7 +499,23 @@ export class InProcessAgentBridge implements AgentBridge {
 			subscribers: new Set(),
 			uiBridge,
 			planBridge,
+			goalBridge,
 		});
+		const persistedGoal = sessionManager.buildSessionContext() as unknown as {
+			mode?: string;
+			modeData?: { goal?: GoalModeState["goal"] };
+		};
+		if (persistedGoal.mode === "goal" || persistedGoal.mode === "goal_paused") {
+			await goalBridge.restore(
+				persistedGoal.modeData?.goal
+					? {
+						enabled: persistedGoal.mode === "goal",
+						mode: "active",
+						goal: persistedGoal.modeData.goal,
+					}
+					: undefined,
+			);
+		}
 		return handle;
 	}
 
@@ -604,6 +632,7 @@ export class InProcessSessionHandle implements SessionHandle {
 	private readonly sessionManager: SessionManager;
 	private readonly modelRegistryRef: () => Promise<ModelRegistry>;
 	private readonly planBridge: PlanModeBridge;
+	private readonly goalBridge: GoalModeBridge;
 	private listeners = new Set<EventListener>();
 	private onDisposeCallback: () => void;
 	private disposed = false;
@@ -629,6 +658,7 @@ export class InProcessSessionHandle implements SessionHandle {
 		sessionId: string;
 		getModelRegistry: () => Promise<ModelRegistry>;
 		planBridge: PlanModeBridge;
+		goalBridge: GoalModeBridge;
 		onDispose: () => void;
 	}) {
 		this.session = args.session;
@@ -637,6 +667,7 @@ export class InProcessSessionHandle implements SessionHandle {
 		this.sessionId = args.sessionId;
 		this.modelRegistryRef = args.getModelRegistry;
 		this.planBridge = args.planBridge;
+		this.goalBridge = args.goalBridge;
 		this.onDisposeCallback = args.onDispose;
 	}
 
@@ -730,6 +761,8 @@ export class InProcessSessionHandle implements SessionHandle {
 		if (planMode) snap.planMode = planMode;
 		const pendingPlan = this.planBridge.getPendingPlanApproval();
 		if (pendingPlan) snap.pendingPlanApproval = pendingPlan;
+		const goalMode = this.goalBridge.getContext();
+		if (goalMode) snap.goalMode = goalMode;
 		if (this.shadowQueue.length > 0) snap.queuedPrompts = [...this.shadowQueue];
 		return snap;
 	}
@@ -1105,6 +1138,7 @@ export class InProcessSessionHandle implements SessionHandle {
 
 	async setPlanMode(enabled: boolean): Promise<void> {
 		if (enabled) {
+			await this.goalBridge.pauseForPlanMode();
 			await this.planBridge.enter();
 		} else {
 			await this.planBridge.exit("user_cancelled");
@@ -1124,6 +1158,14 @@ export class InProcessSessionHandle implements SessionHandle {
 		response: PlanApprovalResponse,
 	): Promise<"settled" | "unknown"> {
 		return this.planBridge.respond(proposalId, response);
+	}
+
+	async actOnGoal(action: import("./goal-mode-bridge.ts").GoalAction): Promise<void> {
+		await this.goalBridge.act(action);
+	}
+
+	getGoalModeContext(): GoalModeContextWire | undefined {
+		return this.goalBridge.getContext();
 	}
 
 	async dispose(): Promise<void> {

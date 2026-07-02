@@ -708,6 +708,17 @@ export interface PlanModeContextWire {
 	planFilePath: string;
 }
 
+/** Live Goal Mode state for a session. Present for active and paused goals. */
+export interface GoalModeContextWire {
+	enabled: boolean;
+	objective: string;
+	status: "active" | "paused" | "budget-limited" | "complete" | "dropped";
+	tokenBudget?: number;
+	tokensUsed: number;
+	timeUsedSeconds: number;
+	reason?: "completed";
+}
+
 /**
  * A plan the agent has proposed for approval. The deck UI renders this as an
  * inline `PlanApproval` card. Replayed on `subscribed` so a page-reload during
@@ -757,6 +768,8 @@ export interface SessionSnapshot {
 	 * page reload re-renders the PlanApproval inline component.
 	 */
 	pendingPlanApproval?: PendingPlanApprovalWire;
+	/** Goal-mode state, present for active and paused goals. */
+	goalMode?: GoalModeContextWire;
 	/**
 	 * Prompts the SDK currently has queued for execution after the active
 	 * turn finishes. Empty when no turn is in flight or no queued prompts
@@ -876,6 +889,14 @@ export type ClientFrame =
 			approved: boolean;
 			finalPath?: string;
 			editedContent?: string;
+	  }
+	/** Create, pause, resume, cancel, or budget a session Goal Mode objective. */
+	| {
+			type: "goal_action";
+			sessionId: string;
+			action: "create" | "pause" | "resume" | "cancel" | "set_budget";
+			objective?: string;
+			tokenBudget?: number;
 	  };
 
 /** Server → Client. */

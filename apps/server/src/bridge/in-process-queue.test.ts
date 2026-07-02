@@ -95,6 +95,12 @@ function makeHandle(): { handle: InProcessSessionHandle; session: StubSession; e
 			getPlanModeContext: () => undefined,
 			getPendingPlanApproval: () => undefined,
 		} as never,
+		goalBridge: {
+			getContext: () => undefined,
+			act: async () => {},
+			pauseForPlanMode: async () => {},
+			dispose() {},
+		} as never,
 		onDispose: () => {},
 	});
 	handle.subscribe((ev) => emitted.push(ev));

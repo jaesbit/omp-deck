@@ -54,6 +54,7 @@ export function initSession(snapshot: SessionSnapshot): SessionUi {
 		queuedPrompts: hydrateQueuedPrompts(snapshot.queuedPrompts),
 		planMode: snapshot.planMode,
 		pendingPlanApproval: snapshot.pendingPlanApproval,
+		goalMode: snapshot.goalMode,
 	};
 	for (const m of snapshot.messages) {
 		ingestMessage(state, m);
@@ -285,11 +286,24 @@ export function applyEvent(state: SessionUi, event: AgentSessionEventJson): Sess
 				...state,
 				thinkingLevel: (event as any).thinkingLevel as string | undefined,
 			};
-		case "goal_updated":
+		case "goal_updated": {
+			const goal = (event as any).goal as Record<string, unknown> | null;
+			const goalState = (event as any).state as { enabled?: boolean; reason?: "completed" } | undefined;
+			if (!goal) return { ...state, goal: null, goalMode: undefined };
 			return {
 				...state,
-				goal: { goal: (event as any).goal, state: (event as any).state },
+				goal: { goal, state: goalState },
+				goalMode: {
+					enabled: goalState?.enabled === true,
+					objective: String(goal.objective ?? ""),
+					status: (goal.status as any) ?? "paused",
+					tokenBudget: typeof goal.tokenBudget === "number" ? goal.tokenBudget : undefined,
+					tokensUsed: typeof goal.tokensUsed === "number" ? goal.tokensUsed : 0,
+					timeUsedSeconds: typeof goal.timeUsedSeconds === "number" ? goal.timeUsedSeconds : 0,
+					reason: goalState?.reason,
+				},
 			};
+		}
 		case "irc_message": {
 			const msg = (event as any).message;
 			if (!msg) return state;

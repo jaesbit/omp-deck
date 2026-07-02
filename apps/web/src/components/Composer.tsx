@@ -42,7 +42,9 @@ export function Composer() {
 	const abort = useStore((s) => s.abort);
 	const clearQueue = useStore((s) => s.clearQueue);
 	const setPlanMode = useStore((s) => s.setPlanMode);
+	const actOnGoal = useStore((s) => s.actOnGoal);
 	const planModeEnabled = session?.planMode?.enabled ?? false;
+	const goalMode = session?.goalMode;
 	const pendingDraft = useStore((s) => s.pendingDraft);
 	const setPendingDraft = useStore((s) => s.setPendingDraft);
 	const queuedCount = session?.queuedPrompts.length ?? 0;
@@ -124,8 +126,14 @@ export function Composer() {
 					: "Enter plan mode — agent reads + proposes only (or Shift+Tab)",
 				argumentHint: "[on|off]",
 			},
+			{
+				name: "goal",
+				scope: "deck",
+				description: goalMode ? `Goal ${goalMode.status}: pause, resume, or cancel` : "Start an autonomous goal",
+				argumentHint: "<objective> | pause | resume | cancel",
+			},
 		],
-		[planModeEnabled],
+		[goalMode, planModeEnabled],
 	);
 
 	const allSlashCommands = useMemo(
@@ -266,16 +274,23 @@ export function Composer() {
 	const dispatchVirtualCommand = useCallback(
 		(name: string, args: string): boolean => {
 			if (name === "plan") {
-				if (!session) return true; // swallow with no-op when no session
+				if (!session) return true;
 				const arg = args.trim().toLowerCase();
 				if (arg === "on") setPlanMode(true);
 				else if (arg === "off") setPlanMode(false);
 				else setPlanMode(!planModeEnabled);
 				return true;
 			}
+			if (name === "goal") {
+				const arg = args.trim();
+				if (!arg) return false;
+				if (arg === "pause" || arg === "resume" || arg === "cancel") actOnGoal(arg);
+				else actOnGoal("create", { objective: arg });
+				return true;
+			}
 			return false;
 		},
-		[session, planModeEnabled, setPlanMode],
+		[actOnGoal, planModeEnabled, session, setPlanMode],
 	);
 
 	const pickSlashCommand = useCallback(
@@ -609,7 +624,9 @@ export function Composer() {
 						"relative flex items-end gap-2 rounded-lg border bg-paper-2 px-2 py-1.5",
 						planModeEnabled
 							? "border-thinking/60 focus-within:border-thinking"
-							: "border-line focus-within:border-ink/30",
+							: goalMode?.enabled
+								? "border-accent/60 focus-within:border-accent"
+								: "border-line focus-within:border-ink/30",
 					)}
 				>
 					<SlashCommandPicker
@@ -656,11 +673,13 @@ export function Composer() {
 								? "Pick a session first"
 								: planModeEnabled
 									? "Plan mode — agent reads + proposes only"
-									: isBusy
-										? "Streaming… enter to queue"
-										: dragOver
-											? "Drop images here"
-											: "Message omp…"
+									: goalMode?.enabled
+										? `Goal active — ${goalMode.objective}`
+										: isBusy
+											? "Streaming… enter to queue"
+											: dragOver
+												? "Drop images here"
+												: "Message omp…"
 						}
 						onChange={(e) => {
 							setDraft(e.target.value);
