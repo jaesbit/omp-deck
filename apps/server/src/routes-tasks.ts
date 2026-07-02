@@ -36,6 +36,8 @@ import {
 
 const log = logger("routes:tasks");
 
+const TASK_PRIORITIES = new Set(["P0", "P1", "P2", "P3", "P4", "P5"]);
+
 function notifyTasksChanged(): void {
 	broadcastBus.broadcast({ type: "tasks_changed" });
 }
@@ -63,6 +65,9 @@ export function buildTasksRouter(): Hono {
 		if (!body.title || typeof body.title !== "string") {
 			return c.json({ error: "title is required" }, 400);
 		}
+		if (body.priority !== undefined && !TASK_PRIORITIES.has(body.priority)) {
+			return c.json({ error: `invalid priority: ${body.priority}` }, 400);
+		}
 		try {
 			const task = createTask(body);
 			notifyTasksChanged();
@@ -85,6 +90,9 @@ export function buildTasksRouter(): Hono {
 			body = (await c.req.json()) as UpdateTaskRequest;
 		} catch {
 			return c.json({ error: "invalid json" }, 400);
+		}
+		if (body.priority !== undefined && !TASK_PRIORITIES.has(body.priority)) {
+			return c.json({ error: `invalid priority: ${body.priority}` }, 400);
 		}
 		try {
 			const updated = updateTask(c.req.param("id"), body);

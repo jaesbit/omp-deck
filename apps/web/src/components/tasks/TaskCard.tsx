@@ -1,8 +1,19 @@
 import { useSortable } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
-import type { Task } from "@omp-deck/protocol";
+import type { Task, TaskPriority } from "@omp-deck/protocol";
 import { formatBriefTime } from "@/lib/time";
 import { cn, truncate } from "@/lib/utils";
+
+/** P0 reads as urgent, P5 fades into the background — matches the badge's
+ * role as a governance signal, not decoration. */
+const PRIORITY_TONE: Record<TaskPriority, string> = {
+	P0: "bg-danger/15 text-danger",
+	P1: "bg-warn/15 text-warn",
+	P2: "bg-accent-soft text-accent",
+	P3: "bg-paper-3 text-ink-2",
+	P4: "text-ink-3",
+	P5: "text-ink-4",
+};
 
 interface Props {
 	task: Task;
@@ -110,6 +121,15 @@ export function TaskCardBody({
 					/>
 				) : null}
 				<span>T-{task.displayId}</span>
+				<span
+					className={cn(
+						"rounded px-1 py-px",
+						PRIORITY_TONE[task.priority],
+					)}
+					title="Priority"
+				>
+					{task.priority}
+				</span>
 				{brief ? (
 					<time
 						dateTime={stamp}

@@ -6,7 +6,7 @@
  * tricks. A move == one transaction that renumbers the destination column.
  */
 
-import type { Task, TaskState } from "@omp-deck/protocol";
+import type { Task, TaskPriority, TaskState } from "@omp-deck/protocol";
 
 import { getDb, id, nowIso } from "./index.ts";
 
@@ -17,6 +17,7 @@ interface TaskRow {
 	body: string;
 	state_id: string;
 	order_in_state: number;
+	priority: string;
 	cwd: string | null;
 	created_at: string;
 	updated_at: string;
@@ -40,6 +41,7 @@ function rowToTask(r: TaskRow): Task {
 		body: r.body,
 		stateId: r.state_id,
 		orderInState: r.order_in_state,
+		priority: (r.priority as TaskPriority) ?? "P5",
 		createdAt: r.created_at,
 		updatedAt: r.updated_at,
 		stateEnteredAt: r.state_entered_at,
@@ -202,7 +204,7 @@ export function listTasks(opts: { includeArchived?: boolean } = {}): Task[] {
 	const where = opts.includeArchived ? "" : "WHERE archived_at IS NULL";
 	const rows = getDb()
 		.query<TaskRow, []>(
-			`SELECT id, display_id, title, body, state_id, order_in_state, cwd, created_at, updated_at, state_entered_at, archived_at
+			`SELECT id, display_id, title, body, state_id, order_in_state, priority, cwd, created_at, updated_at, state_entered_at, archived_at
 			 FROM tasks
 			 ${where}
 			 ORDER BY state_id, state_entered_at DESC, order_in_state ASC`,
@@ -214,7 +216,7 @@ export function listTasks(opts: { includeArchived?: boolean } = {}): Task[] {
 export function getTask(taskId: string): Task | undefined {
 	const row = getDb()
 		.query<TaskRow, [string]>(
-			`SELECT id, display_id, title, body, state_id, order_in_state, cwd, created_at, updated_at, state_entered_at, archived_at
+			`SELECT id, display_id, title, body, state_id, order_in_state, priority, cwd, created_at, updated_at, state_entered_at, archived_at
 			 FROM tasks WHERE id = ?`,
 		)
 		.get(taskId) as TaskRow | null;
@@ -226,6 +228,7 @@ export function createTask(input: {
 	body?: string;
 	stateId?: string;
 	cwd?: string;
+	priority?: TaskPriority;
 }): Task {
 	const db = getDb();
 	const state = input.stateId ? getState(input.stateId) : getDefaultState();
@@ -248,10 +251,10 @@ export function createTask(input: {
 			.get() as { value: number } | null;
 		if (!seqRow) throw new Error("tasks sequence missing — migration 002 not applied");
 		displayId = seqRow.value;
-		db.prepare<unknown, [string, number, string, string, string, number, string | null, string, string, string]>(
-			`INSERT INTO tasks (id, display_id, title, body, state_id, order_in_state, cwd, created_at, updated_at, state_entered_at)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		).run(taskId, displayId, input.title, input.body ?? "", state.id, maxOrder + 1000, input.cwd ?? null, now, now, now);
+		db.prepare<unknown, [string, number, string, string, string, number, string, string | null, string, string, string]>(
+			`INSERT INTO tasks (id, display_id, title, body, state_id, order_in_state, priority, cwd, created_at, updated_at, state_entered_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		).run(taskId, displayId, input.title, input.body ?? "", state.id, maxOrder + 1000, input.priority ?? "P5", input.cwd ?? null, now, now, now);
 	})();
 	const out = getTask(taskId);
 	if (!out) throw new Error("createTask failed");
@@ -267,6 +270,7 @@ export function updateTask(
 		orderInState?: number;
 		cwd?: string;
 		archived?: boolean;
+		priority?: TaskPriority;
 	},
 ): Task | undefined {
 	const existing = getTask(taskId);
@@ -282,10 +286,10 @@ export function updateTask(
 	const stateEnteredAt = stateChanged ? nowIso() : existing.stateEnteredAt;
 	db.prepare<
 		unknown,
-		[string, string, string, number, string | null, string, string, string | null, string]
+		[string, string, string, number, string, string | null, string, string, string | null, string]
 	>(
 		`UPDATE tasks
-		   SET title = ?, body = ?, state_id = ?, order_in_state = ?, cwd = ?,
+		   SET title = ?, body = ?, state_id = ?, order_in_state = ?, priority = ?, cwd = ?,
 		       updated_at = ?, state_entered_at = ?, archived_at = ?
 		 WHERE id = ?`,
 	).run(
@@ -293,6 +297,7 @@ export function updateTask(
 		next.body,
 		next.stateId,
 		next.orderInState,
+		next.priority,
 		next.cwd ?? null,
 		nowIso(),
 		stateEnteredAt,
@@ -383,7 +388,7 @@ export function findTaskByDisplayOrId(ref: string): Task | undefined {
 		if (!Number.isFinite(num)) return undefined;
 		const row = getDb()
 			.query<TaskRow, [number]>(
-				`SELECT id, display_id, title, body, state_id, order_in_state, cwd, created_at, updated_at, archived_at
+				`SELECT id, display_id, title, body, state_id, order_in_state, priority, cwd, created_at, updated_at, state_entered_at, archived_at
 				 FROM tasks WHERE display_id = ?`,
 			)
 			.get(num) as TaskRow | null;

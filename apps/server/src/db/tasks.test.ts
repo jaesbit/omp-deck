@@ -11,6 +11,7 @@ import { closeDb, openDb } from "./index.ts";
 import {
 	createState,
 	createTask,
+	getTask,
 	listStates,
 	listTasks,
 	moveTask,
@@ -169,5 +170,35 @@ describe("state_entered_at + recency sort", () => {
 
 		const done = listTasks().filter((t) => t.stateId === "s_done");
 		expect(done.map((t) => t.id)).toEqual([a.id, b.id]);
+	});
+});
+
+describe("priority (T-38)", () => {
+	test("createTask defaults priority to P5 when unset", () => {
+		bootDb();
+		const t = createTask({ title: "no priority given", stateId: "s_backlog" });
+		expect(t.priority).toBe("P5");
+	});
+
+	test("createTask accepts an explicit priority", () => {
+		bootDb();
+		const t = createTask({ title: "urgent", stateId: "s_backlog", priority: "P0" });
+		expect(t.priority).toBe("P0");
+	});
+
+	test("updateTask can change priority independently of other fields", () => {
+		bootDb();
+		const t = createTask({ title: "reprioritize me", stateId: "s_backlog" });
+		expect(t.priority).toBe("P5");
+		const updated = updateTask(t.id, { priority: "P1" })!;
+		expect(updated.priority).toBe("P1");
+		expect(updated.title).toBe(t.title);
+	});
+
+	test("listTasks and getTask round-trip priority", () => {
+		bootDb();
+		const t = createTask({ title: "roundtrip", stateId: "s_backlog", priority: "P2" });
+		expect(getTask(t.id)?.priority).toBe("P2");
+		expect(listTasks().find((x) => x.id === t.id)?.priority).toBe("P2");
 	});
 });
