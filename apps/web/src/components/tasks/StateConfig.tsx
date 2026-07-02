@@ -1,10 +1,14 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Plus, Trash2, X } from "lucide-react";
-import type { TaskState } from "@omp-deck/protocol";
+import type { Task, TaskState } from "@omp-deck/protocol";
+import type { ProjectColorMap } from "@/lib/project-colors";
 import { tasksApi } from "@/lib/tasks-api";
 
 interface Props {
 	states: TaskState[];
+	tasks: Task[];
+	projectColors: ProjectColorMap;
+	onProjectColorChange: (cwd: string, color: string | undefined) => void;
 	onClose: () => void;
 	onChanged: () => void;
 }
@@ -20,10 +24,24 @@ const PRESET_COLORS = [
 ];
 
 /** Inline drawer to manage kanban columns: add / rename / recolor / delete. */
-export function StateConfig({ states, onClose, onChanged }: Props) {
+export function StateConfig({
+	states,
+	tasks,
+	projectColors,
+	onProjectColorChange,
+	onClose,
+	onChanged,
+}: Props) {
 	const [newName, setNewName] = useState("");
 	const [busy, setBusy] = useState(false);
 	const [err, setErr] = useState<string | undefined>();
+	const projectCwds = useMemo(() => {
+		const cwds = new Set<string>();
+		for (const task of tasks) {
+			if (task.cwd) cwds.add(task.cwd);
+		}
+		return [...cwds].sort();
+	}, [tasks]);
 
 	useEffect(() => setErr(undefined), [states.length]);
 
@@ -76,7 +94,7 @@ export function StateConfig({ states, onClose, onChanged }: Props) {
 	return (
 		<div className="flex h-full flex-col">
 			<div className="flex h-11 items-center gap-2 border-b border-line px-3">
-				<div className="meta">Columns</div>
+				<div className="meta">Board</div>
 				<button
 					type="button"
 					onClick={onClose}
@@ -136,6 +154,47 @@ export function StateConfig({ states, onClose, onChanged }: Props) {
 						</li>
 					))}
 				</ul>
+
+				<div className="mt-4 border border-line bg-paper-2 px-3 py-2">
+					<div className="meta">Project colors</div>
+					<p className="mt-1 text-xs text-ink-3">
+						Map a workspace to a color. Unmapped workspaces have no card marker.
+					</p>
+					{projectCwds.length === 0 ? (
+						<div className="mt-2 text-xs text-ink-4">No task workspaces yet.</div>
+					) : (
+						<ul className="mt-3 space-y-2">
+							{projectCwds.map((cwd) => {
+								const color = projectColors[cwd];
+								return (
+									<li key={cwd} className="flex items-center gap-2">
+										<input
+											type="color"
+											value={color ?? "#6e6a62"}
+											onChange={(event) => onProjectColorChange(cwd, event.target.value)}
+											aria-label={`Set project color for ${cwd}`}
+											className="h-7 w-7 shrink-0 cursor-pointer rounded border border-line bg-paper p-0.5"
+										/>
+										<span className="min-w-0 flex-1 truncate font-mono text-2xs text-ink-2" title={cwd}>
+											{cwd}
+										</span>
+										{color ? (
+											<button
+												type="button"
+												onClick={() => onProjectColorChange(cwd, undefined)}
+												className="btn-ghost h-7 px-2 text-2xs"
+											>
+												Clear
+											</button>
+										) : (
+											<span className="font-mono text-2xs text-ink-4">unset</span>
+										)}
+									</li>
+								);
+							})}
+						</ul>
+					)}
+				</div>
 
 				<div className="mt-4 border border-line bg-paper-2 px-3 py-2">
 					<div className="meta mb-1.5">Add column</div>

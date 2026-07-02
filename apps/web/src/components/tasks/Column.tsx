@@ -7,12 +7,14 @@ import {
 import { CSS } from "@dnd-kit/utilities";
 import { GripVertical, Plus } from "lucide-react";
 import type { Task, TaskState } from "@omp-deck/protocol";
+import { projectColorForCwd, type ProjectColorMap } from "@/lib/project-colors";
 import { cn } from "@/lib/utils";
 import { TaskCard } from "./TaskCard";
 
 interface Props {
 	state: TaskState;
 	tasks: Task[];
+	projectColors: ProjectColorMap;
 	onCreate: (stateId: string, title: string) => void;
 	onOpen: (task: Task) => void;
 	onRenameRequest?: (state: TaskState) => void;
@@ -37,6 +39,7 @@ interface Props {
 export function Column({
 	state,
 	tasks,
+	projectColors,
 	onCreate,
 	onOpen,
 	onRenameRequest,
@@ -127,7 +130,12 @@ export function Column({
 				<SortableContext items={tasks.map((t) => t.id)} strategy={verticalListSortingStrategy}>
 					<div className="flex flex-col gap-1.5">
 						{tasks.map((t) => (
-							<TaskCard key={t.id} task={t} onOpen={onOpen} />
+							<TaskCard
+								key={t.id}
+								task={t}
+								onOpen={onOpen}
+								projectColor={projectColorForCwd(t.cwd, projectColors)}
+							/>
 						))}
 					</div>
 				</SortableContext>
