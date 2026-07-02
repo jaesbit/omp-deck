@@ -478,6 +478,18 @@ export class InProcessAgentBridge implements AgentBridge {
 			}
 		});
 
+		// A resume/create call for a sessionId that's already active would
+		// otherwise silently overwrite this.active's entry, orphaning the
+		// previous handle: its subscriptions and any in-flight turn keep
+		// running forever with no way to reach or abort it (getSession only
+		// ever returns the newest entry). Dispose the superseded instance
+		// first so at most one process ever drives a given session file.
+		const existing = this.active.get(sessionId);
+		if (existing) {
+			log.warn(`attach: superseding already-active session ${sessionId}, disposing previous instance`);
+			existing.handle.dispose().catch((err) => log.warn(`dispose of superseded session ${sessionId} failed`, err));
+		}
+
 		this.active.set(sessionId, {
 			handle,
 			session,
