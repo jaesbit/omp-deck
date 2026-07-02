@@ -2,9 +2,11 @@ import { useEffect, useRef, useState } from "react";
 import { ChevronDown, Plus } from "lucide-react";
 import type { SessionUi } from "@/lib/types";
 import { selectActiveSession, useStore } from "@/lib/store";
+import { launchSession } from "@/lib/first-prompt";
 import { cn, shortPath } from "@/lib/utils";
 import { ContextIndicator } from "./ContextIndicator";
 import { ModelPickerModal } from "./ModelPickerModal";
+import { SessionLaunchModal, type SessionLaunchOpts } from "./SessionLaunchModal";
 
 /**
  * Sticky header row above the chat scroll area when a session is selected.
@@ -23,6 +25,7 @@ export function ChatHeader() {
 function Inner({ session }: { session: SessionUi }) {
 	const renameSession = useStore((s) => s.renameSession);
 	const createSession = useStore((s) => s.createSession);
+	const setPendingDraft = useStore((s) => s.setPendingDraft);
 	const selectSession = useStore((s) => s.selectSession);
 	const defaultCwd = useStore((s) => s.defaultCwd);
 	const sessionsById = useStore((s) => s.sessionsById);
@@ -33,6 +36,7 @@ function Inner({ session }: { session: SessionUi }) {
 	const [renameError, setRenameError] = useState<string | undefined>(undefined);
 	const [switcherOpen, setSwitcherOpen] = useState(false);
 	const [modelOpen, setModelOpen] = useState(false);
+	const [launchOpen, setLaunchOpen] = useState(false);
 	const switcherRef = useRef<HTMLDivElement>(null);
 
 	useEffect(() => {
@@ -225,21 +229,17 @@ function Inner({ session }: { session: SessionUi }) {
 				</button>
 				{switcherOpen ? (
 					<div className="absolute right-0 top-full mt-1 w-72 rounded-md border border-line bg-paper-2 shadow-[0_8px_24px_-8px_rgba(26,24,20,0.25)]">
-						<button
-							type="button"
-							onClick={async () => {
-								setSwitcherOpen(false);
-								try {
-									await createSession({ cwd: defaultCwd });
-								} catch (err) {
-									console.error(err);
-								}
-							}}
-							className="flex w-full items-center gap-2 border-b border-line px-3 py-2 text-left text-sm text-accent hover:bg-paper-3/60"
-						>
-							<Plus className="h-3.5 w-3.5" />
-							New session
-						</button>
+					<button
+						type="button"
+						onClick={() => {
+							setSwitcherOpen(false);
+							setLaunchOpen(true);
+						}}
+						className="flex w-full items-center gap-2 border-b border-line px-3 py-2 text-left text-sm text-accent hover:bg-paper-3/60"
+					>
+						<Plus className="h-3.5 w-3.5" />
+						New session
+					</button>
 						{otherSessions.length === 0 ? (
 							<div className="px-3 py-3 font-mono text-2xs text-ink-3">
 								No other live sessions.
@@ -277,6 +277,15 @@ function Inner({ session }: { session: SessionUi }) {
 				onClose={() => setModelOpen(false)}
 				onPicked={() => {
 					// Snapshot will update on the SDK's next event; nothing else to do here.
+				}}
+			/>
+			<SessionLaunchModal
+				open={launchOpen}
+				initialCwd={defaultCwd}
+				onCancel={() => setLaunchOpen(false)}
+				onConfirm={async (opts: SessionLaunchOpts) => {
+					await launchSession(createSession, setPendingDraft, opts);
+					setLaunchOpen(false);
 				}}
 			/>
 		</div>

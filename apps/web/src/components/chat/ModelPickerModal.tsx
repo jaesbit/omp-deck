@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Check, Search, X } from "lucide-react";
 import type { ModelInfo } from "@omp-deck/protocol";
 
@@ -6,6 +6,7 @@ import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Modal } from "@/components/ui/Modal";
 import { api } from "@/lib/api";
+import { useModelCatalog } from "@/lib/model-catalog";
 import { cn } from "@/lib/utils";
 
 interface Props {
@@ -26,69 +27,32 @@ interface Props {
  * the server (typically "no auth configured for ...").
  */
 export function ModelPickerModal({ open, sessionId, onClose, onPicked }: Props) {
-	const [showUnauth, setShowUnauth] = useState(false);
-	const [models, setModels] = useState<ModelInfo[]>([]);
-	const [loading, setLoading] = useState(false);
-	const [query, setQuery] = useState("");
+	const {
+		models,
+		loading,
+		error: catalogError,
+		query,
+		setQuery,
+		showUnauth,
+		setShowUnauth,
+		availableCount,
+		totalCount,
+		grouped,
+	} = useModelCatalog(sessionId, open);
 	const [error, setError] = useState<string | undefined>();
 	const [busyKey, setBusyKey] = useState<string | undefined>();
 	const searchRef = useRef<HTMLInputElement>(null);
 
 	useEffect(() => {
 		if (!open) return;
-		setLoading(true);
-		setError(undefined);
-		void api
-			.listModels(sessionId)
-			.then((resp) => setModels(resp.models))
-			.catch((err) => setError(String(err)))
-			.finally(() => setLoading(false));
-	}, [open, sessionId]);
-
-	useEffect(() => {
-		if (!open) return;
 		setQuery("");
 		setShowUnauth(false);
+		setError(undefined);
 		queueMicrotask(() => searchRef.current?.focus());
+		// Only reset transient UI state when the modal opens, not on every
+		// keystroke — `setQuery`/`setShowUnauth` are stable setters.
+		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, [open]);
-
-	const availableCount = useMemo(() => models.filter((m) => m.isAvailable).length, [models]);
-	const totalCount = models.length;
-
-	const grouped = useMemo(() => {
-		const q = query.trim().toLowerCase();
-		const base = showUnauth ? models : models.filter((m) => m.isAvailable);
-		const filtered = q
-			? base.filter(
-					(m) =>
-						m.id.toLowerCase().includes(q) ||
-						m.label.toLowerCase().includes(q) ||
-						m.provider.toLowerCase().includes(q),
-				)
-			: base;
-		const byProvider = new Map<string, ModelInfo[]>();
-		for (const m of filtered) {
-			const list = byProvider.get(m.provider) ?? [];
-			list.push(m);
-			byProvider.set(m.provider, list);
-		}
-		// Providers carrying the active model float to the top; ties broken alpha.
-		return Array.from(byProvider.entries())
-			.map(([provider, items]) => ({
-				provider,
-				items: items.sort((a, b) => {
-					if (a.isCurrent && !b.isCurrent) return -1;
-					if (!a.isCurrent && b.isCurrent) return 1;
-					return a.label.localeCompare(b.label);
-				}),
-				hasCurrent: items.some((m) => m.isCurrent),
-			}))
-			.sort((a, b) => {
-				if (a.hasCurrent && !b.hasCurrent) return -1;
-				if (!a.hasCurrent && b.hasCurrent) return 1;
-				return a.provider.localeCompare(b.provider);
-			});
-	}, [models, query, showUnauth]);
 
 	async function pick(model: ModelInfo): Promise<void> {
 		const key = `${model.provider}/${model.id}`;
@@ -106,6 +70,7 @@ export function ModelPickerModal({ open, sessionId, onClose, onPicked }: Props) 
 	}
 
 	const matchCount = grouped.reduce((n, g) => n + g.items.length, 0);
+	const shownError = error ?? catalogError;
 
 	return (
 		<Modal open={open} onClose={onClose} widthClass="max-w-2xl">
@@ -155,9 +120,9 @@ export function ModelPickerModal({ open, sessionId, onClose, onPicked }: Props) 
 					/>
 				</div>
 			</div>
-			{error ? (
+			{shownError ? (
 				<div className="mx-3 my-2 rounded-md border border-danger/30 bg-danger/10 px-3 py-2 font-mono text-xs text-danger">
-					{error}
+					{shownError}
 				</div>
 			) : null}
 			<div className="max-h-[60vh] overflow-y-auto">
@@ -228,7 +193,7 @@ export function ModelPickerModal({ open, sessionId, onClose, onPicked }: Props) 
 	);
 }
 
-function formatContext(tokens: number): string {
+export function formatContext(tokens: number): string {
 	if (tokens >= 1_000_000) return `${(tokens / 1_000_000).toFixed(1).replace(/\.0$/, "")}M`;
 	if (tokens >= 1_000) return `${Math.round(tokens / 1_000)}k`;
 	return String(tokens);

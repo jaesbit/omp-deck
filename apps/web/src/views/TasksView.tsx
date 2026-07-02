@@ -13,14 +13,16 @@ import {
 	SortableContext,
 	horizontalListSortingStrategy,
 } from "@dnd-kit/sortable";
-import { Settings2 } from "lucide-react";
+import { ArrowDownWideNarrow, Settings2 } from "lucide-react";
 
-import type { Task, TaskState } from "@omp-deck/protocol";
+import type { Task, TaskPriority, TaskState } from "@omp-deck/protocol";
 
 import { Layout } from "@/components/Layout";
 import { Column } from "@/components/tasks/Column";
 import { TaskCardBody } from "@/components/tasks/TaskCard";
 import { TaskModal } from "@/components/tasks/TaskModal";
+import { SessionLaunchModal, type SessionLaunchOpts } from "@/components/chat/SessionLaunchModal";
+import { combineWithAutoStart, SESSION_INITIALISATION_COMMAND } from "@/lib/first-prompt";
 import { StateConfig } from "@/components/tasks/StateConfig";
 import { projectColorForCwd, useProjectColors } from "@/lib/project-colors";
 import {
@@ -30,7 +32,7 @@ import {
 } from "@/lib/task-workspace-filter";
 import { tasksApi } from "@/lib/tasks-api";
 import { useStore } from "@/lib/store";
-import { shortPath } from "@/lib/utils";
+import { cn, shortPath } from "@/lib/utils";
 
 export function TasksView() {
 	const navigate = useNavigate();
@@ -46,6 +48,9 @@ export function TasksView() {
 	const [loading, setLoading] = useState(true);
 
 	const [openTask, setOpenTask] = useState<Task | undefined>();
+	const [launchTarget, setLaunchTarget] = useState<
+		{ task: Task; draft: "full" | "short" } | undefined
+	>();
 	const [showStateConfig, setShowStateConfig] = useState(false);
 	const { colors: projectColors, setColor: setProjectColor } = useProjectColors();
 
@@ -99,15 +104,20 @@ export function TasksView() {
 
 	const workspaces = useMemo(() => taskWorkspaces(tasks), [tasks]);
 	const [selectedWorkspace, setSelectedWorkspace] = useTaskWorkspaceFilter(workspaces, !loading);
-	const visibleTasks = useMemo(
-		() => filterTasksByWorkspace(tasks, selectedWorkspace),
-		[tasks, selectedWorkspace],
-	);
+	const [priorityFilter, setPriorityFilter] = useState<TaskPriority | "">("");
+	const [sortByPriority, setSortByPriority] = useState(false);
+	const visibleTasks = useMemo(() => {
+		const byWorkspace = filterTasksByWorkspace(tasks, selectedWorkspace);
+		return priorityFilter ? byWorkspace.filter((t) => t.priority === priorityFilter) : byWorkspace;
+	}, [tasks, selectedWorkspace, priorityFilter]);
 
-	const allTasksByState = useMemo(() => groupTasksByState(tasks, states), [tasks, states]);
+	const allTasksByState = useMemo(
+		() => groupTasksByState(sortForDisplay(tasks, sortByPriority), states),
+		[tasks, states, sortByPriority],
+	);
 	const tasksByState = useMemo(
-		() => groupTasksByState(visibleTasks, states),
-		[visibleTasks, states],
+		() => groupTasksByState(sortForDisplay(visibleTasks, sortByPriority), states),
+		[visibleTasks, states, sortByPriority],
 	);
 
 	async function onCreate(stateId: string, title: string): Promise<void> {
@@ -268,16 +278,37 @@ export function TasksView() {
 		await refresh();
 	}
 
-	async function openInChat(task: Task): Promise<void> {
-		const cwd = task.cwd || defaultCwd;
-		try {
-			await createSession({ cwd });
-		} catch (e) {
-			console.warn("createSession failed; falling back to draft only", e);
-		}
-		setPendingDraft({
-			text: `# ${task.title}\n\n${task.body}`.trim(),
+	function openInChat(task: Task): void {
+		setLaunchTarget({ task, draft: "full" });
+	}
+
+	function sendToAgent(task: Task): void {
+		setLaunchTarget({ task, draft: "short" });
+	}
+
+	async function confirmLaunch(opts: SessionLaunchOpts): Promise<void> {
+		if (!launchTarget) return;
+		const { task, draft } = launchTarget;
+		// Throwing here (createSession rejects) keeps the modal open with the
+		// task/draft/dialog intact so the user can retry (T-41) — do NOT
+		// swallow the error into a draft-only fallback like the old direct-create
+		// path used to.
+		const sessionId = await createSession({
+			cwd: opts.cwd,
+			model: opts.model,
+			planMode: opts.planMode,
+			suppressAutoStart: true,
 		});
+		const message =
+			draft === "full"
+				? `# ${task.title}\n\n${task.body}`.trim()
+				: `Work on T-${task.displayId}: ${task.title}`;
+		setPendingDraft({
+			text: combineWithAutoStart(SESSION_INITIALISATION_COMMAND, message),
+			sessionId,
+			autoSend: true,
+		});
+		setLaunchTarget(undefined);
 		navigate("/");
 	}
 
@@ -306,11 +337,38 @@ export function TasksView() {
 									))}
 								</select>
 							</label>
+							<label className="flex items-center gap-2 text-xs text-ink-3">
+								<span className="font-mono text-2xs uppercase tracking-meta">Priority</span>
+								<select
+									value={priorityFilter}
+									onChange={(event) => setPriorityFilter(event.target.value as TaskPriority | "")}
+									className="field h-7 w-20 px-2 font-mono text-2xs"
+									aria-label="Filter tasks by priority"
+								>
+									<option value="">All</option>
+									{(["P0", "P1", "P2", "P3", "P4", "P5"] as const).map((p) => (
+										<option key={p} value={p}>{p}</option>
+									))}
+								</select>
+							</label>
+							<button
+								type="button"
+								onClick={() => setSortByPriority((v) => !v)}
+								className={cn("btn-ghost h-7 px-2 text-xs", sortByPriority && "bg-accent-soft text-accent")}
+								title="Sort each column by priority (P0 first)"
+								aria-pressed={sortByPriority}
+							>
+								<ArrowDownWideNarrow className="h-3.5 w-3.5" />
+								Priority sort
+							</button>
 							<button
 								type="button"
 								onClick={() => {
-									setShowStateConfig((v) => !v);
-									setInspectorOpen(true);
+									setShowStateConfig((v) => {
+										const next = !v;
+										setInspectorOpen(next);
+										return next;
+									});
 								}}
 								className="btn-ghost h-7 px-2 text-xs"
 								title="Configure board"
@@ -411,7 +469,10 @@ export function TasksView() {
 							tasks={tasks}
 							projectColors={projectColors}
 							onProjectColorChange={setProjectColor}
-							onClose={() => setShowStateConfig(false)}
+							onClose={() => {
+								setShowStateConfig(false);
+								setInspectorOpen(false);
+							}}
 							onChanged={refresh}
 						/>
 					) : (
@@ -427,7 +488,17 @@ export function TasksView() {
 				onSave={(patch) => void saveTask(patch)}
 				onDelete={() => void deleteOpenTask()}
 				onArchive={() => void archiveOpenTask()}
-				onOpenInChat={() => openTask && void openInChat(openTask)}
+				onOpenInChat={() => openTask && openInChat(openTask)}
+				onSendToAgent={() => openTask && sendToAgent(openTask)}
+			/>
+			<SessionLaunchModal
+				open={launchTarget !== undefined}
+				title={launchTarget?.draft === "short" ? `Assign to agent — T-${launchTarget.task.displayId}` : "Open in chat"}
+				confirmLabel="Open chat"
+				initialCwd={launchTarget?.task.cwd || defaultCwd}
+				showInitialPrompt={false}
+				onCancel={() => setLaunchTarget(undefined)}
+				onConfirm={confirmLaunch}
 			/>
 		</>
 	);
@@ -472,6 +543,22 @@ function TasksSidebar({ tasks, states }: { tasks: Task[]; states: TaskState[] })
 			</div>
 		</div>
 	);
+}
+
+const PRIORITY_RANK: Record<TaskPriority, number> = { P0: 0, P1: 1, P2: 2, P3: 3, P4: 4, P5: 5 };
+
+/**
+ * Optional priority sort for kanban rendering (T-38). Returns a new array —
+ * never mutates `list` — so the default (manual `orderInState`) ordering is
+ * always recoverable by toggling this off. Drag-and-drop math in `onDragEnd`
+ * derives its "peers" from the *same* sorted grouping this feeds, so a drop
+ * while sorted-by-priority is active still lands at a coherent index; it's
+ * only the underlying `orderInState` that gets rewritten to match, which is
+ * expected — you just re-arranged the column by dropping into it.
+ */
+function sortForDisplay(list: readonly Task[], byPriority: boolean): Task[] {
+	if (!byPriority) return [...list];
+	return [...list].sort((a, b) => PRIORITY_RANK[a.priority] - PRIORITY_RANK[b.priority]);
 }
 
 function groupTasksByState(tasks: ReadonlyArray<Task>, states: ReadonlyArray<TaskState>): Record<string, Task[]> {

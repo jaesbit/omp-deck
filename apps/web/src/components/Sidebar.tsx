@@ -1,13 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
-import { FolderOpen, Plus, RefreshCw } from "lucide-react";
-import { DirBrowserModal } from "@/components/DirBrowserModal";
+import { Plus, RefreshCw } from "lucide-react";
+import { SessionLaunchModal, type SessionLaunchOpts } from "@/components/chat/SessionLaunchModal";
+import { launchSession } from "@/lib/first-prompt";
 import { useStore } from "@/lib/store";
 import { cn, shortPath } from "@/lib/utils";
-
-/** Sentinel `<select>` value that switches the workspace picker into
- * free-text mode for a path that isn't a known workspace yet. Mirrors
- * `SessionPicker`'s `CUSTOM_CWD_VALUE`. */
-const CUSTOM_CWD_VALUE = "__custom__";
 
 export function Sidebar() {
 	const workspaces = useStore((s) => s.workspaces);
@@ -18,21 +14,17 @@ export function Sidebar() {
 	const refreshSessions = useStore((s) => s.refreshSessions);
 	const refreshWorkspaces = useStore((s) => s.refreshWorkspaces);
 	const createSession = useStore((s) => s.createSession);
+	const setPendingDraft = useStore((s) => s.setPendingDraft);
 	const selectSession = useStore((s) => s.selectSession);
 	const sessionsChangeCounter = useStore((s) => s.sessionsChangeCounter);
 
-	const [selectedCwd, setSelectedCwd] = useState<string | "">("");
-	const [customCwd, setCustomCwd] = useState<string>("");
-	const [creating, setCreating] = useState(false);
-	const [browsing, setBrowsing] = useState(false);
-
-	const isCustomCwd = selectedCwd === CUSTOM_CWD_VALUE;
-	const cwdInUse = isCustomCwd ? customCwd.trim() : selectedCwd || defaultCwd;
+	const [selectedCwd, setSelectedCwd] = useState<string>("");
+	const [launchOpen, setLaunchOpen] = useState(false);
 
 	const filtered = useMemo(() => {
-		if (!selectedCwd || isCustomCwd) return sessions;
+		if (!selectedCwd) return sessions;
 		return sessions.filter((s) => s.cwd === selectedCwd);
-	}, [sessions, selectedCwd, isCustomCwd]);
+	}, [sessions, selectedCwd]);
 
 	// Live updates: another tab (or the REST API) renamed/repointed a session's
 	// model via `PATCH /sessions/:id`. Refetch so the sidebar reflects it
@@ -42,28 +34,17 @@ export function Sidebar() {
 		void refreshSessions(selectedCwd || undefined);
 	}, [sessionsChangeCounter, refreshSessions, selectedCwd]);
 
-	async function handleNew(): Promise<void> {
-		if (isCustomCwd && !cwdInUse) return;
-		setCreating(true);
-		try {
-			await createSession({ cwd: cwdInUse });
-		} catch (err) {
-			console.error(err);
-			alert(`Failed to create session: ${String(err)}`);
-		} finally {
-			setCreating(false);
-		}
+	async function launch(opts: SessionLaunchOpts): Promise<void> {
+		await launchSession(createSession, setPendingDraft, opts);
+		setLaunchOpen(false);
 	}
 
 	async function handleResume(p: string): Promise<void> {
-		setCreating(true);
 		try {
-			await createSession({ cwd: cwdInUse, resumeFromPath: p });
+			await createSession({ cwd: selectedCwd || defaultCwd, resumeFromPath: p });
 		} catch (err) {
 			console.error(err);
 			alert(`Failed to resume: ${String(err)}`);
-		} finally {
-			setCreating(false);
 		}
 	}
 
@@ -90,48 +71,24 @@ export function Sidebar() {
 					onChange={(e) => {
 						const value = e.target.value;
 						setSelectedCwd(value);
-						if (value !== CUSTOM_CWD_VALUE) void refreshSessions(value || undefined);
+						void refreshSessions(value || undefined);
 					}}
 					className="field h-7 w-full px-2 font-mono text-xs"
 				>
 					<option value="">(all workspaces)</option>
-					<option value={CUSTOM_CWD_VALUE}>+ New path…</option>
 					{workspaces.map((w) => (
 						<option key={w.cwd} value={w.cwd}>
 							{w.label} · {w.sessionCount}
 						</option>
 					))}
 				</select>
-				{isCustomCwd ? (
-					<div className="flex gap-1.5">
-						<input
-							type="text"
-							autoFocus
-							value={customCwd}
-							onChange={(e) => setCustomCwd(e.target.value)}
-							placeholder="/absolute/path/to/project"
-							spellCheck={false}
-							className="field h-7 flex-1 px-2 font-mono text-xs"
-						/>
-						<button
-							type="button"
-							onClick={() => setBrowsing(true)}
-							className="h-7 shrink-0 rounded border border-line bg-paper-2 px-1.5 text-ink-2 hover:bg-paper-3/60"
-							title="Browse for a folder"
-						>
-							<FolderOpen className="h-3.5 w-3.5" />
-						</button>
-					</div>
-				) : (
-					<div className="truncate font-mono text-2xs text-ink-3" title={cwdInUse}>
-						{cwdInUse}
-					</div>
-				)}
+				<div className="truncate font-mono text-2xs text-ink-3" title={selectedCwd || defaultCwd}>
+					{selectedCwd || defaultCwd}
+				</div>
 				<button
 					type="button"
 					className="btn-primary h-8 w-full text-[13px]"
-					onClick={() => void handleNew()}
-					disabled={creating || (isCustomCwd && !cwdInUse)}
+					onClick={() => setLaunchOpen(true)}
 				>
 					<Plus className="h-3.5 w-3.5" />
 					New session
@@ -159,6 +116,7 @@ export function Sidebar() {
 						active={s.sessionId === activeId}
 						live
 						planMode={s.planMode?.enabled === true}
+						goalStatus={s.goalMode?.status}
 						onClick={() => selectSession(s.sessionId)}
 					/>
 				))}
@@ -183,14 +141,11 @@ export function Sidebar() {
 					</div>
 				) : null}
 			</div>
-			<DirBrowserModal
-				open={browsing}
-				initialPath={customCwd || defaultCwd}
-				onClose={() => setBrowsing(false)}
-				onSelect={(path) => {
-					setCustomCwd(path);
-					setBrowsing(false);
-				}}
+			<SessionLaunchModal
+				open={launchOpen}
+				initialCwd={selectedCwd || defaultCwd}
+				onCancel={() => setLaunchOpen(false)}
+				onConfirm={launch}
 			/>
 		</div>
 	);
@@ -203,6 +158,7 @@ function SessionRow({
 	active,
 	live,
 	planMode,
+	goalStatus,
 	onClick,
 }: {
 	title: string;
@@ -211,6 +167,9 @@ function SessionRow({
 	active?: boolean;
 	live?: boolean;
 	planMode?: boolean;
+	/** Goal Mode status, when this session has an active/paused objective. Mutually
+	 * exclusive with `planMode` (a session is never in both at once). */
+	goalStatus?: "active" | "paused" | "budget-limited" | "complete" | "dropped";
 	onClick: () => void;
 }) {
 	return (
@@ -235,6 +194,13 @@ function SessionRow({
 						title="Plan mode active"
 					>
 						plan
+					</span>
+				) : goalStatus ? (
+					<span
+						className="ml-auto shrink-0 rounded border border-accent/40 bg-accent/10 px-1 py-px font-mono text-[10px] uppercase tracking-meta text-accent"
+						title={`Goal mode — ${goalStatus}`}
+					>
+						goal{goalStatus !== "active" ? `:${goalStatus}` : ""}
 					</span>
 				) : null}
 			</div>

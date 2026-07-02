@@ -4,8 +4,11 @@ import type {
 	CreateSessionResponse,
 	ListModelsResponse,
 	ListSessionsResponse,
+	ListWorkspacePreferencesResponse,
 	ListWorkspacesResponse,
+	ModelRef,
 	RestartServerResponse,
+	SetWorkspacePreferenceRequest,
 	WorkspaceEntry,
 } from "@omp-deck/protocol";
 
@@ -15,6 +18,7 @@ import { broadcastBus } from "./broadcast-bus.ts";
 import { getBuildInfo, getUptimeSecs } from "./build-info.ts";
 import { getUpdateCheck } from "./update-check.ts";
 import type { AgentBridge } from "./bridge/types.ts";
+import { getWorkspacePreference, listWorkspacePreferences, setWorkspacePreference } from "./db/workspace-preferences.ts";
 
 const log = logger("routes");
 
@@ -84,12 +88,19 @@ export function buildRouter(
 		const known = new Set<string>([config.defaultCwd, ...config.extraWorkspaces]);
 		for (const cwd of counts.keys()) known.add(cwd);
 
+		const preferenceByCwd = new Map(listWorkspacePreferences().map((p) => [p.cwd, p.model]));
+
 		const workspaces: WorkspaceEntry[] = Array.from(known)
-			.map((cwd) => ({
-				cwd,
-				label: deriveLabel(cwd),
-				sessionCount: counts.get(cwd) ?? 0,
-			}))
+			.map((cwd) => {
+				const entry: WorkspaceEntry = {
+					cwd,
+					label: deriveLabel(cwd),
+					sessionCount: counts.get(cwd) ?? 0,
+				};
+				const defaultModel = preferenceByCwd.get(cwd);
+				if (defaultModel) entry.defaultModel = defaultModel;
+				return entry;
+			})
 			.sort((a, b) => b.sessionCount - a.sessionCount || a.label.localeCompare(b.label));
 
 		const body: ListWorkspacesResponse = {
@@ -97,6 +108,41 @@ export function buildRouter(
 			defaultCwd: config.defaultCwd,
 		};
 		return c.json(body);
+	});
+
+	// ─── Workspace preferences (T-42: per-cwd default model override) ──────
+
+	app.get("/workspace-preferences", (c) => {
+		const body: ListWorkspacePreferencesResponse = { preferences: listWorkspacePreferences() };
+		return c.json(body);
+	});
+
+	app.put("/workspace-preferences", async (c) => {
+		const cwd = c.req.query("cwd")?.trim();
+		if (!cwd) return c.json({ error: "cwd query param is required" }, 400);
+		if (!isCwdAllowed(cwd)) {
+			return c.json(
+				{ error: `cwd does not exist, isn't a directory, or is outside the home directory: ${cwd}` },
+				400,
+			);
+		}
+		let body: SetWorkspacePreferenceRequest;
+		try {
+			body = (await c.req.json()) as SetWorkspacePreferenceRequest;
+		} catch {
+			return c.json({ error: "invalid json body" }, 400);
+		}
+		if (body.model !== null) {
+			const invalid = await validateModelRef(bridge, body.model);
+			if (invalid) return c.json({ error: invalid }, 400);
+		}
+		try {
+			const preference = setWorkspacePreference(cwd, body.model);
+			return c.json(preference);
+		} catch (err) {
+			log.error(`setWorkspacePreference failed`, err);
+			return c.json({ error: String(err) }, 500);
+		}
 	});
 
 	app.get("/sessions", async (c) => {
@@ -131,12 +177,36 @@ export function buildRouter(
 			);
 		}
 
+		// Model + Plan Mode are creation-time-only options (T-39): a resumed
+		// session keeps its persisted state instead of taking a fresh default,
+		// so combining them with `resumeFromPath` is rejected rather than
+		// silently ignored.
+		if (body.resumeFromPath && (body.model || body.planMode)) {
+			return c.json(
+				{ error: "model and planMode cannot be combined with resumeFromPath" },
+				400,
+			);
+		}
+
+		// Resolve the model to apply: explicit request > per-workspace default
+		// (T-42) > undefined (SDK/OMP_MODEL picks its own default). Only when
+		// creating fresh — resume never takes a model.
+		let resolvedModel: ModelRef | undefined;
+		if (!body.resumeFromPath) {
+			resolvedModel = body.model ?? getWorkspacePreference(cwd)?.model;
+			if (resolvedModel) {
+				const invalid = await validateModelRef(bridge, resolvedModel);
+				if (invalid) return c.json({ error: invalid }, 400);
+			}
+		}
+
 		try {
 			const handle = body.resumeFromPath
 				? await bridge.resumeSession({ sessionPath: body.resumeFromPath })
 				: await bridge.createSession({
 						cwd,
-						...(body.model ? { model: body.model } : {}),
+						...(resolvedModel ? { model: resolvedModel } : {}),
+						...(body.planMode ? { planMode: true } : {}),
 						...(body.suppressAutoStart ? { suppressAutoStart: true } : {}),
 					});
 			const resp: CreateSessionResponse = {
@@ -267,6 +337,21 @@ export function buildRouter(
 	app.route("/onboarding", buildOnboardingRouter());
 
 	return app;
+}
+
+/**
+ * Validate a `ModelRef` against the bridge's live model catalog. Returns an
+ * error message when the model is unknown or lacks configured auth; returns
+ * `undefined` when it is safe to use. Used by both `POST /sessions` and
+ * `PUT /workspace-preferences` so an unauthenticated/unknown model never gets
+ * silently swapped for the SDK default — the caller gets a 400 instead.
+ */
+async function validateModelRef(bridge: AgentBridge, ref: ModelRef): Promise<string | undefined> {
+	const models = await bridge.listModels();
+	const match = models.find((m) => m.provider === ref.provider && m.id === ref.id);
+	if (!match) return `unknown model: ${ref.provider}/${ref.id}`;
+	if (!match.isAvailable) return `no auth configured for ${ref.provider}/${ref.id}`;
+	return undefined;
 }
 
 function deriveLabel(cwd: string): string {

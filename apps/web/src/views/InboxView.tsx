@@ -15,6 +15,8 @@ import type { InboxItem, InboxKind } from "@omp-deck/protocol";
 
 import { Layout } from "@/components/Layout";
 import { MarkdownEdit } from "@/components/MarkdownEdit";
+import { SessionLaunchModal, type SessionLaunchOpts } from "@/components/chat/SessionLaunchModal";
+import { combineWithAutoStart, SESSION_INITIALISATION_COMMAND } from "@/lib/first-prompt";
 import { inboxApi } from "@/lib/inbox-api";
 import { useStore } from "@/lib/store";
 import { cn } from "@/lib/utils";
@@ -65,6 +67,7 @@ export function InboxView() {
 	const [filter, setFilter] = useState<Filter>("all");
 	const [includeProcessed, setIncludeProcessed] = useState(false);
 	const [reader, setReader] = useState<ReaderState>({ mode: "empty" });
+	const [launchTarget, setLaunchTarget] = useState<InboxItem | undefined>();
 
 	// Hide the global inspector — the reader IS the second pane now.
 	useEffect(() => {
@@ -140,13 +143,22 @@ export function InboxView() {
 		}
 	}
 
-	async function openInChat(it: InboxItem): Promise<void> {
-		const cwd = defaultCwd;
-		try {
-			await createSession({ cwd });
-		} catch (e) {
-			console.warn("createSession failed; using draft only", e);
-		}
+	function openInChat(it: InboxItem): void {
+		// T-41: require an explicit (visible) workspace choice instead of
+		// silently defaulting — the launch modal always shows the chosen cwd
+		// and lets the user change it before confirming.
+		setLaunchTarget(it);
+	}
+
+	async function confirmLaunch(opts: SessionLaunchOpts): Promise<void> {
+		if (!launchTarget) return;
+		const it = launchTarget;
+		const sessionId = await createSession({
+			cwd: opts.cwd,
+			model: opts.model,
+			planMode: opts.planMode,
+			suppressAutoStart: true,
+		});
 		const stamp = new Date(it.createdAt).toLocaleString();
 		const draft = [
 			`Inbox · ${it.kind} · captured ${stamp}`,
@@ -160,7 +172,12 @@ export function InboxView() {
 			`if it's a decision needing input, frame the choice; if it should become a`,
 			`task, POST /api/tasks and report the new task id.`,
 		].join("\n");
-		setPendingDraft({ text: draft });
+		setPendingDraft({
+			text: combineWithAutoStart(SESSION_INITIALISATION_COMMAND, draft),
+			sessionId,
+			autoSend: true,
+		});
+		setLaunchTarget(undefined);
 		navigate("/");
 	}
 
@@ -184,6 +201,7 @@ export function InboxView() {
 	}
 
 	return (
+		<>
 		<Layout
 			sidebar={
 				<InboxSidebar
@@ -265,7 +283,7 @@ export function InboxView() {
 						) : (
 							<ReaderPane
 								item={reader.item}
-								onOpenInChat={() => void openInChat(reader.item)}
+								onOpenInChat={() => openInChat(reader.item)}
 								onPromote={() => void promoteToTask(reader.item)}
 								onProcess={() => void toggleProcessed(reader.item)}
 								onDelete={() => void removeItem(reader.item)}
@@ -279,6 +297,16 @@ export function InboxView() {
 			inspector={null}
 			topBar={null}
 		/>
+		<SessionLaunchModal
+			open={launchTarget !== undefined}
+			title="Open in chat"
+			confirmLabel="Open chat"
+			initialCwd={defaultCwd}
+			showInitialPrompt={false}
+			onCancel={() => setLaunchTarget(undefined)}
+			onConfirm={confirmLaunch}
+		/>
+		</>
 	);
 }
 

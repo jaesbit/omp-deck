@@ -1,26 +1,32 @@
 import { useEffect, useState } from "react";
-import { Archive, MessageSquarePlus, RotateCcw, Trash2, X } from "lucide-react";
-import type { Task, TaskState } from "@omp-deck/protocol";
+import { Archive, Bot, MessageSquarePlus, RotateCcw, Trash2, X } from "lucide-react";
+import type { Task, TaskPriority, TaskState } from "@omp-deck/protocol";
 
 import { MarkdownEdit } from "@/components/MarkdownEdit";
 import { Modal } from "@/components/ui/Modal";
 import { cn } from "@/lib/utils";
 
+const PRIORITIES: TaskPriority[] = ["P0", "P1", "P2", "P3", "P4", "P5"];
+
 interface Props {
 	task: Task | null;
 	states: TaskState[];
 	onClose: () => void;
-	onSave: (patch: { title?: string; body?: string; stateId?: string; cwd?: string }) => void;
+	onSave: (patch: { title?: string; body?: string; stateId?: string; cwd?: string; priority?: TaskPriority }) => void;
 	onDelete: () => void;
 	onArchive: () => void;
 	onOpenInChat: () => void;
+	/** Same-flavor launch as `onOpenInChat` but with a short `T-<id>` reference
+	 * draft instead of the full title+body (T-44) — the agent re-reads the
+	 * task itself via `GET /api/tasks` instead of paying for the body twice. */
+	onSendToAgent: () => void;
 }
 
 /**
  * Centered modal for full task detail / edit. Title is a large inline-editable
  * input; body uses MarkdownEdit (rendered by default, click to edit). The
  * action bar mirrors the inbox reader for consistency: state-change on the
- * left, archive / delete / Open-in-chat / close on the right.
+ * left, archive / delete / Send-to-agent / Open-in-chat / close on the right.
  */
 export function TaskModal({
 	task,
@@ -30,6 +36,7 @@ export function TaskModal({
 	onDelete,
 	onArchive,
 	onOpenInChat,
+	onSendToAgent,
 }: Props) {
 	const open = task !== null;
 
@@ -57,6 +64,10 @@ export function TaskModal({
 		if (!task || next === task.stateId) return;
 		onSave({ stateId: next });
 	}
+	function commitPriority(next: TaskPriority): void {
+		if (!task || next === task.priority) return;
+		onSave({ priority: next });
+	}
 	function commitCwd(): void {
 		if (!task) return;
 		const next = cwd.trim() || undefined;
@@ -68,6 +79,12 @@ export function TaskModal({
 	return (
 		<Modal open={open} onClose={onClose} widthClass="max-w-3xl">
 			<header className="flex h-14 shrink-0 items-center gap-2 border-b border-line px-4">
+				<span
+					className="flex h-8 shrink-0 items-center rounded-md border border-line bg-paper-2 px-2.5 font-mono text-sm font-semibold uppercase tracking-meta text-ink-2"
+					title={task.id}
+				>
+					T-{task.displayId}
+				</span>
 				<select
 					value={stateId}
 					onChange={(e) => commitState(e.target.value)}
@@ -86,6 +103,18 @@ export function TaskModal({
 							states.find((s) => s.id === stateId)?.color ?? "var(--ink-3, #6e6a62)",
 					}}
 				/>
+				<select
+					value={task.priority}
+					onChange={(e) => commitPriority(e.target.value as TaskPriority)}
+					title="Priority — P0 highest, P5 lowest"
+					className="field h-8 px-2 font-mono text-2xs uppercase tracking-meta"
+				>
+					{PRIORITIES.map((p) => (
+						<option key={p} value={p}>
+							{p}
+						</option>
+					))}
+				</select>
 				<div className="ml-auto flex shrink-0 items-center gap-1">
 					<IconAction
 						label={isArchived ? "Unarchive" : "Archive"}
@@ -93,6 +122,15 @@ export function TaskModal({
 						onClick={onArchive}
 					/>
 					<IconAction label="Delete" icon={Trash2} tone="danger" onClick={onDelete} />
+					<button
+						type="button"
+						onClick={onSendToAgent}
+						className="btn-ghost h-8 shrink-0 gap-1.5 whitespace-nowrap px-2.5 text-sm"
+						title="Assign a short T-N reference as the first prompt — the agent reads the full task itself"
+					>
+						<Bot className="h-4 w-4 shrink-0" />
+						<span>Assign to agent</span>
+					</button>
 					<button
 						type="button"
 						onClick={onOpenInChat}

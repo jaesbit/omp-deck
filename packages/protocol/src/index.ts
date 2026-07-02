@@ -39,12 +39,18 @@ export interface WorkspaceEntry {
 	cwd: string;
 	label: string;
 	sessionCount: number;
+	/** Per-workspace default model override (T-42), when one is configured. */
+	defaultModel?: ModelRef;
 }
 
 export interface CreateSessionRequest {
 	cwd: string;
 	resumeFromPath?: string;
 	model?: ModelRef;
+	/** Initial Plan Mode state, applied before the auto-start prompt (if any)
+	 *  fires. Rejected together with `resumeFromPath` — a resumed session
+	 *  keeps its persisted mode instead of taking a creation-time default. */
+	planMode?: boolean;
 	/** Do not fire the configured auto-start prompt when this creates a fresh session. */
 	suppressAutoStart?: boolean;
 }
@@ -66,6 +72,25 @@ export interface ListSessionsResponse {
 export interface ListWorkspacesResponse {
 	workspaces: WorkspaceEntry[];
 	defaultCwd: string;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Workspace preferences (per-cwd model default, T-42)
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface WorkspacePreference {
+	cwd: string;
+	model?: ModelRef;
+	updatedAt: string;
+}
+
+/** `model: null` clears the override for that cwd. */
+export interface SetWorkspacePreferenceRequest {
+	model: ModelRef | null;
+}
+
+export interface ListWorkspacePreferencesResponse {
+	preferences: WorkspacePreference[];
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1144,6 +1169,10 @@ export type KnownTool = (typeof KNOWN_TOOLS)[number];
 // Tasks (kanban)
 // ─────────────────────────────────────────────────────────────────────────────
 
+/** P0 is highest priority, P5 lowest. Cards without an explicit priority are
+ * treated as P5 (see migration 005). */
+export type TaskPriority = "P0" | "P1" | "P2" | "P3" | "P4" | "P5";
+
 export interface TaskState {
 	id: string;
 	name: string;
@@ -1160,6 +1189,7 @@ export interface Task {
 	body: string;
 	stateId: string;
 	orderInState: number;
+	priority: TaskPriority;
 	cwd?: string;
 	createdAt: string;
 	updatedAt: string;
@@ -1180,6 +1210,7 @@ export interface CreateTaskRequest {
 	body?: string;
 	stateId?: string;
 	cwd?: string;
+	priority?: TaskPriority;
 }
 
 export interface UpdateTaskRequest {
@@ -1189,6 +1220,7 @@ export interface UpdateTaskRequest {
 	orderInState?: number;
 	cwd?: string;
 	archived?: boolean;
+	priority?: TaskPriority;
 }
 
 export interface ListTasksResponse {

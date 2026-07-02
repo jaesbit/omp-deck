@@ -6,8 +6,10 @@ import type {
 	ListModelsResponse,
 	ListSessionsResponse,
 	ListSlashCommandsResponse,
+	ListWorkspacePreferencesResponse,
 	ListWorkspacesResponse,
 	ModelRef,
+	WorkspacePreference,
 } from "@omp-deck/protocol";
 
 const BASE = "/api";
@@ -89,5 +91,14 @@ export const api = {
 	browseDir(path?: string): Promise<ListDirResponse> {
 		const q = path ? `?path=${encodeURIComponent(path)}` : "";
 		return request<ListDirResponse>(`/fs/browse${q}`);
+	},
+	listWorkspacePreferences(): Promise<ListWorkspacePreferencesResponse> {
+		return request<ListWorkspacePreferencesResponse>("/workspace-preferences");
+	},
+	setWorkspacePreference(cwd: string, model: ModelRef | null): Promise<WorkspacePreference> {
+		return request<WorkspacePreference>(`/workspace-preferences?cwd=${encodeURIComponent(cwd)}`, {
+			method: "PUT",
+			body: JSON.stringify({ model }),
+		});
 	},
 };
