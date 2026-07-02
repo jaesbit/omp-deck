@@ -1,8 +1,9 @@
 import { Hono } from "hono";
 import { existsSync, readdirSync, statSync } from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 
-import type { FilePathMatch, ListFilePathsResponse } from "@omp-deck/protocol";
+import type { FilePathMatch, ListDirResponse, ListFilePathsResponse } from "@omp-deck/protocol";
 
 import { logger } from "./log.ts";
 
@@ -54,6 +55,38 @@ export function buildFsRouter(): Hono {
 			matches: matches.map((e) => ({ path: e.path, name: e.name, isDir: e.isDir })),
 			cached: fromCache,
 		};
+		return c.json(body);
+	});
+
+	// `GET /fs/browse?path=<absolute>` lists the immediate subdirectories of
+	// `path` (default: $HOME) for the workspace-picker's "Browse…" folder
+	// dialog. Sandboxed by the same `isCwdAllowed` home-boundary check as
+	// `/fs/complete` — this walks raw directories, not a git-aware inventory,
+	// so it must never be pointed outside $HOME. Hidden directories (leading
+	// `.`) are omitted; they're noise for picking a project root.
+	app.get("/fs/browse", (c) => {
+		const raw = c.req.query("path")?.trim();
+		const requested = raw ? path.resolve(raw) : path.resolve(resolveHome());
+
+		if (!isCwdAllowed(requested)) {
+			return c.json({ error: "path is not under an allowed root" }, 403);
+		}
+
+		let dirs: string[];
+		try {
+			dirs = readdirSync(requested, { withFileTypes: true })
+				.filter((d) => d.isDirectory() && !d.name.startsWith("."))
+				.map((d) => d.name)
+				.sort((a, b) => a.localeCompare(b));
+		} catch (err) {
+			log.warn(`browse: readdir failed at ${requested}: ${String(err)}`);
+			return c.json({ error: "failed to read directory" }, 500);
+		}
+
+		const homeResolved = path.resolve(resolveHome());
+		const parent = requested === homeResolved ? null : path.dirname(requested);
+
+		const body: ListDirResponse = { path: requested, parent, dirs };
 		return c.json(body);
 	});
 
@@ -235,10 +268,18 @@ function score(entries: InventoryEntry[], rawQ: string, limit: number): Inventor
 
 // ─── Sandboxing ────────────────────────────────────────────────────────────
 
-function isCwdAllowed(cwd: string): boolean {
+/** `$HOME`/`%USERPROFILE%`, resolved once so `isCwdAllowed` and the default
+ * `/fs/browse` root always agree — `os.homedir()` falls back to the passwd
+ * database and can silently diverge from `$HOME` (notably: it ignores
+ * runtime env overrides, which trips up tests that stub `$HOME`). */
+function resolveHome(): string {
+	return process.env.HOME ?? process.env.USERPROFILE ?? os.homedir();
+}
+
+export function isCwdAllowed(cwd: string): boolean {
 	// Only allow cwds under the user's home directory. The deck is loopback-
 	// only, but a buggy client shouldn't be able to probe `C:\Windows\System32`.
-	const home = process.env.HOME ?? process.env.USERPROFILE ?? "";
+	const home = resolveHome();
 	if (!home) return false;
 	try {
 		const resolved = path.resolve(cwd);
