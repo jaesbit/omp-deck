@@ -80,7 +80,7 @@ export function TaskModal({
 		<Modal open={open} onClose={onClose} widthClass="max-w-3xl">
 			<header className="flex h-14 shrink-0 items-center gap-2 border-b border-line px-4">
 				<span
-					className="shrink-0 font-mono text-2xs uppercase tracking-meta text-ink-3"
+					className="flex h-8 shrink-0 items-center rounded-md border border-line bg-paper-2 px-2.5 font-mono text-sm font-semibold uppercase tracking-meta text-ink-2"
 					title={task.id}
 				>
 					T-{task.displayId}
@@ -126,10 +126,10 @@ export function TaskModal({
 						type="button"
 						onClick={onSendToAgent}
 						className="btn-ghost h-8 shrink-0 gap-1.5 whitespace-nowrap px-2.5 text-sm"
-						title="Send a short T-N reference as the first prompt — the agent reads the full task itself"
+						title="Assign a short T-N reference as the first prompt — the agent reads the full task itself"
 					>
 						<Bot className="h-4 w-4 shrink-0" />
-						<span>Send to agent</span>
+						<span>Assign to agent</span>
 					</button>
 					<button
 						type="button"

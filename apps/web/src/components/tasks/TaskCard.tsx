@@ -10,9 +10,9 @@ const PRIORITY_TONE: Record<TaskPriority, string> = {
 	P0: "bg-danger/15 text-danger",
 	P1: "bg-warn/15 text-warn",
 	P2: "bg-accent-soft text-accent",
-	P3: "bg-paper-3 text-ink-2",
-	P4: "text-ink-3",
-	P5: "text-ink-4",
+	P3: "bg-thinking/15 text-thinking",
+	P4: "bg-success/15 text-success",
+	P5: "bg-paper-3 text-ink-3",
 };
 
 interface Props {
