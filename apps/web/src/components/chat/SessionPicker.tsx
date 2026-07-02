@@ -1,26 +1,21 @@
 import { useEffect, useMemo, useState } from "react";
-import { ArrowRight, Clock, ClipboardList, FolderOpen, MessagesSquare, Plus } from "lucide-react";
+import { ArrowRight, Clock, ClipboardList, MessagesSquare, Plus } from "lucide-react";
 import type { SessionSummary } from "@omp-deck/protocol";
 
-import { DirBrowserModal } from "@/components/DirBrowserModal";
+import { SessionLaunchModal, type SessionLaunchOpts } from "@/components/chat/SessionLaunchModal";
 import { selectActiveSession, useStore } from "@/lib/store";
-import { cn, shortPath } from "@/lib/utils";
+import { shortPath } from "@/lib/utils";
 
 /**
  * Rendered as the chat main pane when there is no active session selected.
  * Replaces the previous "Pick a session from the sidebar" dead-end with a
  * primary "New session" CTA and an inline list of recent persisted sessions,
- * so the user never has to open the sidebar just to start working.
+ * so the user never has to open the sidebar just to start working. Session
+ * launch (workspace/model/Plan Mode) is delegated to `SessionLaunchModal`
+ * (T-40) so every "New session" entry point shares one config panel.
  */
-/** Sentinel `<select>` value that switches the workspace picker into
- * free-text mode for a path that isn't a known workspace yet. Kept out of
- * band from real cwds (which are always absolute paths) so it can never
- * collide with one. */
-const CUSTOM_CWD_VALUE = "__custom__";
-
 export function SessionPicker() {
 	const session = useStore(selectActiveSession);
-	const workspaces = useStore((s) => s.workspaces);
 	const defaultCwd = useStore((s) => s.defaultCwd);
 	const sessions = useStore((s) => s.sessions);
 	const sessionsById = useStore((s) => s.sessionsById);
@@ -29,12 +24,8 @@ export function SessionPicker() {
 	const refreshSessions = useStore((s) => s.refreshSessions);
 	const sessionsChangeCounter = useStore((s) => s.sessionsChangeCounter);
 
-	const [selectedCwd, setSelectedCwd] = useState<string>("");
-	const [customCwd, setCustomCwd] = useState<string>("");
 	const [busy, setBusy] = useState(false);
-	const [browsing, setBrowsing] = useState(false);
-	const isCustomCwd = selectedCwd === CUSTOM_CWD_VALUE;
-	const cwdInUse = isCustomCwd ? customCwd.trim() : selectedCwd || defaultCwd;
+	const [launchOpen, setLaunchOpen] = useState(false);
 
 	const recent = useMemo(() => {
 		const live = Object.values(sessionsById);
@@ -51,26 +42,18 @@ export function SessionPicker() {
 	// reflect it without a manual refresh. Same pattern as `tasksChangeCounter`.
 	useEffect(() => {
 		if (sessionsChangeCounter === 0) return;
-		void refreshSessions(selectedCwd || undefined);
-	}, [sessionsChangeCounter, refreshSessions, selectedCwd]);
+		void refreshSessions();
+	}, [sessionsChangeCounter, refreshSessions]);
 
-	async function startFresh(): Promise<void> {
-		if (isCustomCwd && !cwdInUse) return;
-		setBusy(true);
-		try {
-			await createSession({ cwd: cwdInUse });
-		} catch (err) {
-			console.error(err);
-			alert(`Failed to create session: ${String(err)}`);
-		} finally {
-			setBusy(false);
-		}
+	async function launch(opts: SessionLaunchOpts): Promise<void> {
+		await createSession({ cwd: opts.cwd, model: opts.model, planMode: opts.planMode });
+		setLaunchOpen(false);
 	}
 
 	async function resume(s: SessionSummary): Promise<void> {
 		setBusy(true);
 		try {
-			await createSession({ cwd: cwdInUse, resumeFromPath: s.path });
+			await createSession({ cwd: defaultCwd, resumeFromPath: s.path });
 		} catch (err) {
 			console.error(err);
 			alert(`Failed to resume: ${String(err)}`);
@@ -92,63 +75,14 @@ export function SessionPicker() {
 					<h1 className="text-lg font-semibold text-ink">Start a session</h1>
 				</div>
 
-				{/* Primary action — workspace picker + new session */}
-				<div className="rounded-lg border border-line bg-paper-2 p-4 shadow-[0_1px_2px_rgba(26,24,20,0.04)]">
-					<div className="meta mb-1.5">Workspace</div>
-					<select
-						value={selectedCwd}
-						onChange={(e) => {
-							const value = e.target.value;
-							setSelectedCwd(value);
-							if (value !== CUSTOM_CWD_VALUE) void refreshSessions(value || undefined);
-						}}
-						className="field h-8 w-full px-2 font-mono text-xs"
-					>
-						<option value="">{`(default) ${defaultCwd}`}</option>
-						<option value={CUSTOM_CWD_VALUE}>+ New path…</option>
-						{workspaces
-							.filter((w) => w.cwd !== defaultCwd)
-							.map((w) => (
-								<option key={w.cwd} value={w.cwd}>
-									{w.label} · {w.cwd}
-								</option>
-							))}
-					</select>
-					{isCustomCwd ? (
-						<div className="mt-2 flex gap-1.5">
-							<input
-								type="text"
-								autoFocus
-								value={customCwd}
-								onChange={(e) => setCustomCwd(e.target.value)}
-								placeholder="/absolute/path/to/project"
-								spellCheck={false}
-								className="field h-8 flex-1 px-2 font-mono text-xs"
-							/>
-							<button
-								type="button"
-								onClick={() => setBrowsing(true)}
-								className="h-8 shrink-0 rounded border border-line bg-paper-2 px-2 text-ink-2 hover:bg-paper-3/60"
-								title="Browse for a folder"
-							>
-								<FolderOpen className="h-3.5 w-3.5" />
-							</button>
-						</div>
-					) : (
-						<div className="mt-2 truncate font-mono text-2xs text-ink-3" title={cwdInUse}>
-							{shortPath(cwdInUse, 80)}
-						</div>
-					)}
-					<button
-						type="button"
-						onClick={() => void startFresh()}
-						disabled={busy || (isCustomCwd && !cwdInUse)}
-						className="btn-primary mt-3 h-9 w-full text-sm"
-					>
-						<Plus className="h-4 w-4" />
-						New session
-					</button>
-				</div>
+				<button
+					type="button"
+					onClick={() => setLaunchOpen(true)}
+					className="btn-primary h-10 w-full text-sm"
+				>
+					<Plus className="h-4 w-4" />
+					New session
+				</button>
 
 				{/* Live sessions in this server process — usually empty on a fresh load. */}
 				{recent.live.length > 0 ? (
@@ -190,10 +124,7 @@ export function SessionPicker() {
 										type="button"
 										onClick={() => void resume(s)}
 										disabled={busy}
-										className={cn(
-											"group flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-sm",
-											"hover:bg-paper-3/60 disabled:opacity-60",
-										)}
+										className="group flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-sm hover:bg-paper-3/60 disabled:opacity-60"
 									>
 										<Clock className="h-3.5 w-3.5 shrink-0 text-ink-4" />
 										<span className="flex-1 truncate text-ink">
@@ -216,14 +147,11 @@ export function SessionPicker() {
 					</div>
 				) : null}
 			</div>
-			<DirBrowserModal
-				open={browsing}
-				initialPath={customCwd || defaultCwd}
-				onClose={() => setBrowsing(false)}
-				onSelect={(path) => {
-					setCustomCwd(path);
-					setBrowsing(false);
-				}}
+			<SessionLaunchModal
+				open={launchOpen}
+				initialCwd={defaultCwd}
+				onCancel={() => setLaunchOpen(false)}
+				onConfirm={launch}
 			/>
 		</div>
 	);

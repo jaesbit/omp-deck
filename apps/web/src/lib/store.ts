@@ -189,7 +189,13 @@ interface StoreState {
 	disconnect(): void;
 	refreshWorkspaces(): Promise<void>;
 	refreshSessions(cwd?: string): Promise<void>;
-	createSession(opts: { cwd: string; resumeFromPath?: string }): Promise<string>;
+	createSession(opts: {
+		cwd: string;
+		resumeFromPath?: string;
+		model?: import("@omp-deck/protocol").ModelRef;
+		planMode?: boolean;
+		suppressAutoStart?: boolean;
+	}): Promise<string>;
 	selectSession(id: string): void;
 	sendPrompt(text: string, images?: import("@omp-deck/protocol").ImageAttachment[]): void;
 	abort(): void;
@@ -319,6 +325,9 @@ export const useStore = create<StoreState>()(
 			const created = await api.createSession({
 				cwd: opts.cwd,
 				...(opts.resumeFromPath ? { resumeFromPath: opts.resumeFromPath } : {}),
+				...(opts.model ? { model: opts.model } : {}),
+				...(opts.planMode ? { planMode: true } : {}),
+				...(opts.suppressAutoStart ? { suppressAutoStart: true } : {}),
 			});
 			// Subscribe immediately; reducer will hydrate from the `subscribed` snapshot.
 			get().ws?.send({ type: "subscribe", sessionId: created.sessionId });
