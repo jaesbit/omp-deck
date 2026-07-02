@@ -14,6 +14,7 @@ export type BroadcastFrame = Extract<
 	| { type: "tasks_changed" }
 	| { type: "skills_changed" }
 	| { type: "kb_changed" }
+	| { type: "sessions_changed" }
 	| { type: "oauth_consent" }
 	| { type: "oauth_progress" }
 	| { type: "oauth_prompt" }

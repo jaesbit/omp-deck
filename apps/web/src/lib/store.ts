@@ -141,6 +141,15 @@ interface StoreState {
 	kbChangeCounter: number;
 
 	/**
+	 * Counter for `sessions_changed` broadcasts (a session's name or model was
+	 * patched, e.g. `PATCH /api/sessions/:id`). Sidebar and SessionPicker
+	 * watch it and refetch the persisted session list so a rename made from
+	 * another tab or the REST API shows up without a manual refresh. Same
+	 * pattern as `tasksChangeCounter` / `skillsChangeCounter`.
+	 */
+	sessionsChangeCounter: number;
+
+	/**
 	 * Per-session open extension-UI dialog (currently used by the SDK `ask`
 	 * tool, but the channel is shape-typed to cover any extension dialog).
 	 * At most one dialog per session is open at a time because the SDK awaits
@@ -242,6 +251,7 @@ export const useStore = create<StoreState>()(
 		tasksChangeCounter: 0,
 		skillsChangeCounter: 0,
 		kbChangeCounter: 0,
+		sessionsChangeCounter: 0,
 		pendingDialogs: {},
 		heartbeat: null,
 		notifications: [],
@@ -283,7 +293,23 @@ export const useStore = create<StoreState>()(
 		async refreshSessions(cwd?: string) {
 			try {
 				const resp: ListSessionsResponse = await api.listSessions(cwd);
-				set({ sessions: resp.sessions });
+				set((s) => {
+					// Keep the currently-open session(s)' live cache (`sessionsById`,
+					// which feeds ChatHeader's title) in sync with the persisted list.
+					// `sessionsById.sessionName` otherwise only updates on this tab's
+					// own `renameSession()` call or on (re)subscribe — a rename from
+					// another tab, a routine, or the REST API would bump
+					// `sessionsChangeCounter` and refresh the sidebar/picker list but
+					// leave an already-open chat header showing the stale name.
+					const byId = { ...s.sessionsById };
+					for (const row of resp.sessions) {
+						const existing = byId[row.id];
+						if (existing && row.title !== undefined && existing.sessionName !== row.title) {
+							byId[row.id] = { ...existing, sessionName: row.title };
+						}
+					}
+					return { sessions: resp.sessions, sessionsById: byId };
+				});
 			} catch (err) {
 				console.warn("listSessions failed", err);
 			}
@@ -557,6 +583,10 @@ function handleFrame(
 
 		case "kb_changed":
 			set((s) => ({ kbChangeCounter: s.kbChangeCounter + 1 }));
+			return;
+
+		case "sessions_changed":
+			set((s) => ({ sessionsChangeCounter: s.sessionsChangeCounter + 1 }));
 			return;
 
 		case "ext_ui_dialog_open":

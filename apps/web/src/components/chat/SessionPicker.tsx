@@ -27,6 +27,7 @@ export function SessionPicker() {
 	const createSession = useStore((s) => s.createSession);
 	const selectSession = useStore((s) => s.selectSession);
 	const refreshSessions = useStore((s) => s.refreshSessions);
+	const sessionsChangeCounter = useStore((s) => s.sessionsChangeCounter);
 
 	const [selectedCwd, setSelectedCwd] = useState<string>("");
 	const [customCwd, setCustomCwd] = useState<string>("");
@@ -44,6 +45,14 @@ export function SessionPicker() {
 			.slice(0, 6);
 		return { live, persisted };
 	}, [sessions, sessionsById]);
+
+	// Live updates: another tab (or the REST API) renamed/repointed a session's
+	// model via `PATCH /sessions/:id`. Refetch so persisted rows shown here
+	// reflect it without a manual refresh. Same pattern as `tasksChangeCounter`.
+	useEffect(() => {
+		if (sessionsChangeCounter === 0) return;
+		void refreshSessions(selectedCwd || undefined);
+	}, [sessionsChangeCounter, refreshSessions, selectedCwd]);
 
 	async function startFresh(): Promise<void> {
 		if (isCustomCwd && !cwdInUse) return;
