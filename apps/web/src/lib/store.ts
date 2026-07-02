@@ -141,6 +141,15 @@ interface StoreState {
 	kbChangeCounter: number;
 
 	/**
+	 * Counter for `sessions_changed` broadcasts (a session's name or model was
+	 * patched, e.g. `PATCH /api/sessions/:id`). Sidebar and SessionPicker
+	 * watch it and refetch the persisted session list so a rename made from
+	 * another tab or the REST API shows up without a manual refresh. Same
+	 * pattern as `tasksChangeCounter` / `skillsChangeCounter`.
+	 */
+	sessionsChangeCounter: number;
+
+	/**
 	 * Per-session open extension-UI dialog (currently used by the SDK `ask`
 	 * tool, but the channel is shape-typed to cover any extension dialog).
 	 * At most one dialog per session is open at a time because the SDK awaits
@@ -242,6 +251,7 @@ export const useStore = create<StoreState>()(
 		tasksChangeCounter: 0,
 		skillsChangeCounter: 0,
 		kbChangeCounter: 0,
+		sessionsChangeCounter: 0,
 		pendingDialogs: {},
 		heartbeat: null,
 		notifications: [],
@@ -557,6 +567,10 @@ function handleFrame(
 
 		case "kb_changed":
 			set((s) => ({ kbChangeCounter: s.kbChangeCounter + 1 }));
+			return;
+
+		case "sessions_changed":
+			set((s) => ({ sessionsChangeCounter: s.sessionsChangeCounter + 1 }));
 			return;
 
 		case "ext_ui_dialog_open":

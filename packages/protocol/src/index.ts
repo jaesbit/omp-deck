@@ -913,6 +913,8 @@ export type ServerFrame =
 	| { type: "skills_changed" }
 	/** Broadcast frame: any KB file under the watched root mutated. Clients refetch. */
 	| { type: "kb_changed" }
+	/** Broadcast frame: a session's name/model was changed via PATCH. Clients refetch. */
+	| { type: "sessions_changed" }
 	/** OAuth: SDK has produced the consent URL; client opens it in a new tab. */
 	| {
 			type: "oauth_consent";

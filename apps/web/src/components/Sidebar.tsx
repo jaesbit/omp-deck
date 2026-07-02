@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { FolderOpen, Plus, RefreshCw } from "lucide-react";
 import { DirBrowserModal } from "@/components/DirBrowserModal";
 import { useStore } from "@/lib/store";
@@ -19,6 +19,7 @@ export function Sidebar() {
 	const refreshWorkspaces = useStore((s) => s.refreshWorkspaces);
 	const createSession = useStore((s) => s.createSession);
 	const selectSession = useStore((s) => s.selectSession);
+	const sessionsChangeCounter = useStore((s) => s.sessionsChangeCounter);
 
 	const [selectedCwd, setSelectedCwd] = useState<string | "">("");
 	const [customCwd, setCustomCwd] = useState<string>("");
@@ -32,6 +33,14 @@ export function Sidebar() {
 		if (!selectedCwd || isCustomCwd) return sessions;
 		return sessions.filter((s) => s.cwd === selectedCwd);
 	}, [sessions, selectedCwd, isCustomCwd]);
+
+	// Live updates: another tab (or the REST API) renamed/repointed a session's
+	// model via `PATCH /sessions/:id`. Refetch so the sidebar reflects it
+	// without a manual refresh. Same pattern as `tasksChangeCounter`.
+	useEffect(() => {
+		if (sessionsChangeCounter === 0) return;
+		void refreshSessions(selectedCwd || undefined);
+	}, [sessionsChangeCounter, refreshSessions, selectedCwd]);
 
 	async function handleNew(): Promise<void> {
 		if (isCustomCwd && !cwdInUse) return;

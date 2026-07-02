@@ -11,6 +11,7 @@ import type {
 
 import type { Config } from "./config.ts";
 import { logger } from "./log.ts";
+import { broadcastBus } from "./broadcast-bus.ts";
 import { getBuildInfo, getUptimeSecs } from "./build-info.ts";
 import { getUpdateCheck } from "./update-check.ts";
 import type { AgentBridge } from "./bridge/types.ts";
@@ -195,8 +196,10 @@ export function buildRouter(
 			return c.json({ error: "invalid json" }, 400);
 		}
 		try {
+			let changed = false;
 			if (typeof body.name === "string") {
 				await handle.setName(body.name.trim());
+				changed = true;
 			}
 			if (body.model && typeof body.model === "object") {
 				const provider = typeof body.model.provider === "string" ? body.model.provider : "";
@@ -205,7 +208,9 @@ export function buildRouter(
 					return c.json({ error: "model requires provider and id strings" }, 400);
 				}
 				await handle.setModel({ provider, id: modelId });
+				changed = true;
 			}
+			if (changed) broadcastBus.broadcast({ type: "sessions_changed" });
 			return c.json({ ok: true, sessionId: id });
 		} catch (err) {
 			log.error(`patch session failed`, err);
