@@ -327,17 +327,28 @@ export function Composer() {
 		[autoresize, dispatchVirtualCommand],
 	);
 
-	// Pull a pending draft (set by Tasks "Open in chat") into the composer
-	// exactly once. Defer to allow autoresize to settle.
+	// Pull a pending draft from a session-launch flow exactly once. The target
+	// session guard is crucial: `createSession()` marks the id active before
+	// its WS `subscribed` snapshot hydrates `sessionsById`; without waiting for
+	// that exact snapshot, an auto-send could be dropped or land in a session
+	// the user switched to in the meantime.
 	useEffect(() => {
 		if (!pendingDraft) return;
-		setDraft(pendingDraft.text);
+		if (pendingDraft.sessionId && session?.sessionId !== pendingDraft.sessionId) return;
+
 		setPendingDraft(undefined);
+		if (pendingDraft.autoSend) {
+			sendPrompt(pendingDraft.text);
+			history.push(pendingDraft.text);
+			return;
+		}
+
+		setDraft(pendingDraft.text);
 		queueMicrotask(() => {
 			autoresize();
 			taRef.current?.focus();
 		});
-	}, [pendingDraft, setPendingDraft, autoresize]);
+	}, [pendingDraft, session?.sessionId, setPendingDraft, sendPrompt, history, autoresize]);
 
 	const insertAtCursor = useCallback(
 		(insert: string): void => {

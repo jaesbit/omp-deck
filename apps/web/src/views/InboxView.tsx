@@ -153,7 +153,12 @@ export function InboxView() {
 	async function confirmLaunch(opts: SessionLaunchOpts): Promise<void> {
 		if (!launchTarget) return;
 		const it = launchTarget;
-		await createSession({ cwd: opts.cwd, model: opts.model, planMode: opts.planMode, suppressAutoStart: true });
+		const sessionId = await createSession({
+			cwd: opts.cwd,
+			model: opts.model,
+			planMode: opts.planMode,
+			suppressAutoStart: true,
+		});
 		const stamp = new Date(it.createdAt).toLocaleString();
 		const draft = [
 			`Inbox · ${it.kind} · captured ${stamp}`,
@@ -168,7 +173,11 @@ export function InboxView() {
 			`task, POST /api/tasks and report the new task id.`,
 		].join("\n");
 		const autoStart = await getAutoStartCommand();
-		setPendingDraft({ text: combineWithAutoStart(autoStart, draft) });
+		setPendingDraft({
+			text: combineWithAutoStart(autoStart, draft),
+			sessionId,
+			autoSend: true,
+		});
 		setLaunchTarget(undefined);
 		navigate("/");
 	}

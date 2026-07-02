@@ -99,8 +99,9 @@ interface StoreState {
 		perCard: Record<string, boolean>;
 	};
 
-	/** Composer pre-fill used by `Open in chat` from the Tasks view. */
-	pendingDraft?: { text: string };
+	/** Composer pre-fill used by session-launch flows. `autoSend` is reserved
+	 * for an intentional initial prompt, never a user-typed composer draft. */
+	pendingDraft?: { text: string; sessionId?: string; autoSend?: boolean };
 
 	/** Shared chrome state — each view can open/close the inspector and sidebar. */
 	sidebarOpen: boolean;
@@ -212,7 +213,7 @@ interface StoreState {
 	renameSession(id: string, name: string): Promise<void>;
 	toggleAllToolCards(): void;
 	setToolCardOpen(id: string, open: boolean): void;
-	setPendingDraft(draft: { text: string } | undefined): void;
+	setPendingDraft(draft: { text: string; sessionId?: string; autoSend?: boolean } | undefined): void;
 	setSidebarOpen(open: boolean): void;
 	setInspectorOpen(open: boolean): void;
 	setAbortShortcutKey(key: string): void;

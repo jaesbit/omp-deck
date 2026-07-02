@@ -293,13 +293,22 @@ export function TasksView() {
 		// task/draft/dialog intact so the user can retry (T-41) — do NOT
 		// swallow the error into a draft-only fallback like the old direct-create
 		// path used to.
-		await createSession({ cwd: opts.cwd, model: opts.model, planMode: opts.planMode, suppressAutoStart: true });
+		const sessionId = await createSession({
+			cwd: opts.cwd,
+			model: opts.model,
+			planMode: opts.planMode,
+			suppressAutoStart: true,
+		});
 		const message =
 			draft === "full"
 				? `# ${task.title}\n\n${task.body}`.trim()
 				: `Trabaja en T-${task.displayId}: ${task.title}`;
 		const autoStart = await getAutoStartCommand();
-		setPendingDraft({ text: combineWithAutoStart(autoStart, message) });
+		setPendingDraft({
+			text: combineWithAutoStart(autoStart, message),
+			sessionId,
+			autoSend: true,
+		});
 		setLaunchTarget(undefined);
 		navigate("/");
 	}

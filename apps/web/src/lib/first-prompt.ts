@@ -61,7 +61,7 @@ export async function launchSession(
 		planMode?: boolean;
 		suppressAutoStart?: boolean;
 	}) => Promise<string>,
-	setPendingDraft: (draft: { text: string } | undefined) => void,
+	setPendingDraft: (draft: { text: string; sessionId?: string; autoSend?: boolean } | undefined) => void,
 	opts: { cwd: string; model?: ModelRef; planMode: boolean; initialPrompt?: string },
 ): Promise<string> {
 	const suppressAutoStart = Boolean(opts.initialPrompt);
@@ -73,7 +73,11 @@ export async function launchSession(
 	});
 	if (opts.initialPrompt) {
 		const autoStart = await getAutoStartCommand();
-		setPendingDraft({ text: combineWithAutoStart(autoStart, opts.initialPrompt) });
+		setPendingDraft({
+			text: combineWithAutoStart(autoStart, opts.initialPrompt),
+			sessionId,
+			autoSend: true,
+		});
 	}
 	return sessionId;
 }
