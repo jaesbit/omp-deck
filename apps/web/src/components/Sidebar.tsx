@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Plus, RefreshCw } from "lucide-react";
 import { SessionLaunchModal, type SessionLaunchOpts } from "@/components/chat/SessionLaunchModal";
+import { launchSession } from "@/lib/first-prompt";
 import { useStore } from "@/lib/store";
 import { cn, shortPath } from "@/lib/utils";
 
@@ -13,6 +14,7 @@ export function Sidebar() {
 	const refreshSessions = useStore((s) => s.refreshSessions);
 	const refreshWorkspaces = useStore((s) => s.refreshWorkspaces);
 	const createSession = useStore((s) => s.createSession);
+	const setPendingDraft = useStore((s) => s.setPendingDraft);
 	const selectSession = useStore((s) => s.selectSession);
 	const sessionsChangeCounter = useStore((s) => s.sessionsChangeCounter);
 
@@ -33,7 +35,7 @@ export function Sidebar() {
 	}, [sessionsChangeCounter, refreshSessions, selectedCwd]);
 
 	async function launch(opts: SessionLaunchOpts): Promise<void> {
-		await createSession({ cwd: opts.cwd, model: opts.model, planMode: opts.planMode });
+		await launchSession(createSession, setPendingDraft, opts);
 		setLaunchOpen(false);
 	}
 
@@ -114,6 +116,7 @@ export function Sidebar() {
 						active={s.sessionId === activeId}
 						live
 						planMode={s.planMode?.enabled === true}
+						goalStatus={s.goalMode?.status}
 						onClick={() => selectSession(s.sessionId)}
 					/>
 				))}
@@ -155,6 +158,7 @@ function SessionRow({
 	active,
 	live,
 	planMode,
+	goalStatus,
 	onClick,
 }: {
 	title: string;
@@ -163,6 +167,9 @@ function SessionRow({
 	active?: boolean;
 	live?: boolean;
 	planMode?: boolean;
+	/** Goal Mode status, when this session has an active/paused objective. Mutually
+	 * exclusive with `planMode` (a session is never in both at once). */
+	goalStatus?: "active" | "paused" | "budget-limited" | "complete" | "dropped";
 	onClick: () => void;
 }) {
 	return (
@@ -187,6 +194,13 @@ function SessionRow({
 						title="Plan mode active"
 					>
 						plan
+					</span>
+				) : goalStatus ? (
+					<span
+						className="ml-auto shrink-0 rounded border border-accent/40 bg-accent/10 px-1 py-px font-mono text-[10px] uppercase tracking-meta text-accent"
+						title={`Goal mode — ${goalStatus}`}
+					>
+						goal{goalStatus !== "active" ? `:${goalStatus}` : ""}
 					</span>
 				) : null}
 			</div>

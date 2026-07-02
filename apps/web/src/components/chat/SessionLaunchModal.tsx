@@ -13,6 +13,8 @@ export interface SessionLaunchOpts {
 	cwd: string;
 	model?: ModelRef;
 	planMode: boolean;
+	/** Trimmed, non-empty initial prompt, or `undefined` when left blank. */
+	initialPrompt?: string;
 }
 
 /** Sentinel `<select>` value that switches the workspace picker into
@@ -35,6 +37,15 @@ interface Props {
 	 * the user can retry without re-entering anything (T-41).
 	 */
 	onConfirm: (opts: SessionLaunchOpts) => Promise<void>;
+	/**
+	 * Show the optional "Initial prompt" textarea. Off for Tasks/Inbox launches
+	 * (T-41/T-44), which already build their own contextual draft from the
+	 * task/inbox item — showing a second free-form field there would be
+	 * redundant and confusing. On (default) for plain "New session" entry
+	 * points, where it lets the user hand the agent an instruction up front
+	 * without needing Plan Mode just to avoid an empty first turn.
+	 */
+	showInitialPrompt?: boolean;
 }
 
 /**
@@ -52,6 +63,7 @@ export function SessionLaunchModal({
 	allowWorkspaceChange = true,
 	onCancel,
 	onConfirm,
+	showInitialPrompt = true,
 }: Props) {
 	const workspaces = useStore((s) => s.workspaces);
 	const defaultCwd = useStore((s) => s.defaultCwd);
@@ -62,6 +74,7 @@ export function SessionLaunchModal({
 	const [planMode, setPlanMode] = useState(false);
 	const [model, setModel] = useState<ModelRef | undefined>(undefined);
 	const [modelTouched, setModelTouched] = useState(false);
+	const [initialPrompt, setInitialPrompt] = useState("");
 	const [busy, setBusy] = useState(false);
 	const [error, setError] = useState<string | undefined>();
 
@@ -77,6 +90,7 @@ export function SessionLaunchModal({
 		setPlanMode(false);
 		setModel(undefined);
 		setModelTouched(false);
+		setInitialPrompt("");
 		setError(undefined);
 		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, [open]);
@@ -107,7 +121,8 @@ export function SessionLaunchModal({
 		setBusy(true);
 		setError(undefined);
 		try {
-			await onConfirm({ cwd, model, planMode });
+			const trimmedPrompt = initialPrompt.trim();
+			await onConfirm({ cwd, model, planMode, initialPrompt: trimmedPrompt || undefined });
 		} catch (err) {
 			setError(err instanceof Error ? err.message : String(err));
 		} finally {
@@ -263,6 +278,19 @@ export function SessionLaunchModal({
 					/>
 					Start in Plan Mode
 				</label>
+
+				{showInitialPrompt ? (
+					<div className="mt-3">
+						<div className="meta mb-1.5">Initial prompt (optional)</div>
+						<textarea
+							value={initialPrompt}
+							onChange={(e) => setInitialPrompt(e.target.value)}
+							rows={3}
+							placeholder="Give the agent an instruction to start with — combined with /start (if configured) into one turn, not sent automatically."
+							className="field w-full resize-none px-2 py-1.5 text-sm"
+						/>
+					</div>
+				) : null}
 
 				{error ? (
 					<div className="mt-3 rounded-md border border-danger/30 bg-danger/10 px-3 py-2 font-mono text-xs text-danger">

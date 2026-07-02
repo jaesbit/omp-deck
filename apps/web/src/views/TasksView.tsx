@@ -22,6 +22,7 @@ import { Column } from "@/components/tasks/Column";
 import { TaskCardBody } from "@/components/tasks/TaskCard";
 import { TaskModal } from "@/components/tasks/TaskModal";
 import { SessionLaunchModal, type SessionLaunchOpts } from "@/components/chat/SessionLaunchModal";
+import { combineWithAutoStart, getAutoStartCommand } from "@/lib/first-prompt";
 import { StateConfig } from "@/components/tasks/StateConfig";
 import { projectColorForCwd, useProjectColors } from "@/lib/project-colors";
 import {
@@ -292,13 +293,13 @@ export function TasksView() {
 		// task/draft/dialog intact so the user can retry (T-41) — do NOT
 		// swallow the error into a draft-only fallback like the old direct-create
 		// path used to.
-		await createSession({ cwd: opts.cwd, model: opts.model, planMode: opts.planMode });
-		setPendingDraft({
-			text:
-				draft === "full"
-					? `# ${task.title}\n\n${task.body}`.trim()
-					: `Trabaja en T-${task.displayId}: ${task.title}`,
-		});
+		await createSession({ cwd: opts.cwd, model: opts.model, planMode: opts.planMode, suppressAutoStart: true });
+		const message =
+			draft === "full"
+				? `# ${task.title}\n\n${task.body}`.trim()
+				: `Trabaja en T-${task.displayId}: ${task.title}`;
+		const autoStart = await getAutoStartCommand();
+		setPendingDraft({ text: combineWithAutoStart(autoStart, message) });
 		setLaunchTarget(undefined);
 		navigate("/");
 	}
@@ -355,8 +356,11 @@ export function TasksView() {
 							<button
 								type="button"
 								onClick={() => {
-									setShowStateConfig((v) => !v);
-									setInspectorOpen(true);
+									setShowStateConfig((v) => {
+										const next = !v;
+										setInspectorOpen(next);
+										return next;
+									});
 								}}
 								className="btn-ghost h-7 px-2 text-xs"
 								title="Configure board"
@@ -457,7 +461,10 @@ export function TasksView() {
 							tasks={tasks}
 							projectColors={projectColors}
 							onProjectColorChange={setProjectColor}
-							onClose={() => setShowStateConfig(false)}
+							onClose={() => {
+								setShowStateConfig(false);
+								setInspectorOpen(false);
+							}}
 							onChanged={refresh}
 						/>
 					) : (
@@ -478,9 +485,10 @@ export function TasksView() {
 			/>
 			<SessionLaunchModal
 				open={launchTarget !== undefined}
-				title={launchTarget?.draft === "short" ? `Send to agent — T-${launchTarget.task.displayId}` : "Open in chat"}
+				title={launchTarget?.draft === "short" ? `Assign to agent — T-${launchTarget.task.displayId}` : "Open in chat"}
 				confirmLabel="Open chat"
 				initialCwd={launchTarget?.task.cwd || defaultCwd}
+				showInitialPrompt={false}
 				onCancel={() => setLaunchTarget(undefined)}
 				onConfirm={confirmLaunch}
 			/>

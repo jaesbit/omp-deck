@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { ChevronDown, Plus } from "lucide-react";
 import type { SessionUi } from "@/lib/types";
 import { selectActiveSession, useStore } from "@/lib/store";
+import { launchSession } from "@/lib/first-prompt";
 import { cn, shortPath } from "@/lib/utils";
 import { ContextIndicator } from "./ContextIndicator";
 import { ModelPickerModal } from "./ModelPickerModal";
@@ -24,6 +25,7 @@ export function ChatHeader() {
 function Inner({ session }: { session: SessionUi }) {
 	const renameSession = useStore((s) => s.renameSession);
 	const createSession = useStore((s) => s.createSession);
+	const setPendingDraft = useStore((s) => s.setPendingDraft);
 	const selectSession = useStore((s) => s.selectSession);
 	const defaultCwd = useStore((s) => s.defaultCwd);
 	const sessionsById = useStore((s) => s.sessionsById);
@@ -282,7 +284,7 @@ function Inner({ session }: { session: SessionUi }) {
 				initialCwd={defaultCwd}
 				onCancel={() => setLaunchOpen(false)}
 				onConfirm={async (opts: SessionLaunchOpts) => {
-					await createSession({ cwd: opts.cwd, model: opts.model, planMode: opts.planMode });
+					await launchSession(createSession, setPendingDraft, opts);
 					setLaunchOpen(false);
 				}}
 			/>

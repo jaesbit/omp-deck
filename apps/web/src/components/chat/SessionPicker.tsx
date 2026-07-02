@@ -3,6 +3,7 @@ import { ArrowRight, Clock, ClipboardList, MessagesSquare, Plus } from "lucide-r
 import type { SessionSummary } from "@omp-deck/protocol";
 
 import { SessionLaunchModal, type SessionLaunchOpts } from "@/components/chat/SessionLaunchModal";
+import { launchSession } from "@/lib/first-prompt";
 import { selectActiveSession, useStore } from "@/lib/store";
 import { shortPath } from "@/lib/utils";
 
@@ -20,6 +21,7 @@ export function SessionPicker() {
 	const sessions = useStore((s) => s.sessions);
 	const sessionsById = useStore((s) => s.sessionsById);
 	const createSession = useStore((s) => s.createSession);
+	const setPendingDraft = useStore((s) => s.setPendingDraft);
 	const selectSession = useStore((s) => s.selectSession);
 	const refreshSessions = useStore((s) => s.refreshSessions);
 	const sessionsChangeCounter = useStore((s) => s.sessionsChangeCounter);
@@ -46,7 +48,7 @@ export function SessionPicker() {
 	}, [sessionsChangeCounter, refreshSessions]);
 
 	async function launch(opts: SessionLaunchOpts): Promise<void> {
-		await createSession({ cwd: opts.cwd, model: opts.model, planMode: opts.planMode });
+		await launchSession(createSession, setPendingDraft, opts);
 		setLaunchOpen(false);
 	}
 

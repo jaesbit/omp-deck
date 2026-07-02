@@ -16,6 +16,7 @@ import type { InboxItem, InboxKind } from "@omp-deck/protocol";
 import { Layout } from "@/components/Layout";
 import { MarkdownEdit } from "@/components/MarkdownEdit";
 import { SessionLaunchModal, type SessionLaunchOpts } from "@/components/chat/SessionLaunchModal";
+import { combineWithAutoStart, getAutoStartCommand } from "@/lib/first-prompt";
 import { inboxApi } from "@/lib/inbox-api";
 import { useStore } from "@/lib/store";
 import { cn } from "@/lib/utils";
@@ -152,7 +153,7 @@ export function InboxView() {
 	async function confirmLaunch(opts: SessionLaunchOpts): Promise<void> {
 		if (!launchTarget) return;
 		const it = launchTarget;
-		await createSession({ cwd: opts.cwd, model: opts.model, planMode: opts.planMode });
+		await createSession({ cwd: opts.cwd, model: opts.model, planMode: opts.planMode, suppressAutoStart: true });
 		const stamp = new Date(it.createdAt).toLocaleString();
 		const draft = [
 			`Inbox · ${it.kind} · captured ${stamp}`,
@@ -166,7 +167,8 @@ export function InboxView() {
 			`if it's a decision needing input, frame the choice; if it should become a`,
 			`task, POST /api/tasks and report the new task id.`,
 		].join("\n");
-		setPendingDraft({ text: draft });
+		const autoStart = await getAutoStartCommand();
+		setPendingDraft({ text: combineWithAutoStart(autoStart, draft) });
 		setLaunchTarget(undefined);
 		navigate("/");
 	}
@@ -292,6 +294,7 @@ export function InboxView() {
 			title="Open in chat"
 			confirmLabel="Open chat"
 			initialCwd={defaultCwd}
+			showInitialPrompt={false}
 			onCancel={() => setLaunchTarget(undefined)}
 			onConfirm={confirmLaunch}
 		/>
