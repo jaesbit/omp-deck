@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -7,9 +7,10 @@ import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls";
 
 import { KbProtocolHandler } from "./kb-protocol.ts";
 
-const ENV_KEYS = ["OMP_DECK_KB_ROOT", "HOME", "USERPROFILE"];
+const ENV_KEYS = ["OMP_DECK_KB_ROOT"];
 
 let saved: Record<string, string | undefined>;
+let homedirSpy: ReturnType<typeof spyOn<typeof os, "homedir">>;
 let kbRoot: string;
 let router: InternalUrlRouter;
 
@@ -18,9 +19,10 @@ beforeEach(() => {
 	kbRoot = mkdtempSync(path.join(os.tmpdir(), "omp-deck-kb-proto-"));
 	process.env.OMP_DECK_KB_ROOT = kbRoot;
 	// Wall off homedir as a safety net even though OMP_DECK_KB_ROOT wins.
+	// Bun's os.homedir() ignores process.env.HOME/USERPROFILE reassignment at
+	// runtime, so stub the function directly (see orientation-store.test.ts).
 	const tmpHome = mkdtempSync(path.join(os.tmpdir(), "omp-deck-kb-home-"));
-	process.env.HOME = tmpHome;
-	process.env.USERPROFILE = tmpHome;
+	homedirSpy = spyOn(os, "homedir").mockReturnValue(tmpHome);
 
 	// Seed a small wiki.
 	mkdirSync(path.join(kbRoot, "system"), { recursive: true });
@@ -44,6 +46,7 @@ beforeEach(() => {
 
 afterEach(() => {
 	InternalUrlRouter.resetForTests();
+	homedirSpy.mockRestore();
 	for (const k of ENV_KEYS) {
 		if (saved[k] === undefined) delete process.env[k];
 		else process.env[k] = saved[k];
