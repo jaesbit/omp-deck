@@ -302,7 +302,7 @@ export function TasksView() {
 		const message =
 			draft === "full"
 				? `# ${task.title}\n\n${task.body}`.trim()
-				: `Trabaja en T-${task.displayId}: ${task.title}`;
+				: `Work on T-${task.displayId}: ${task.title}`;
 		setPendingDraft({
 			text: combineWithAutoStart(SESSION_INITIALISATION_COMMAND, message),
 			sessionId,
