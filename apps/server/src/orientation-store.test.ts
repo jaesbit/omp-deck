@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -22,11 +22,10 @@ const ENV_KEYS = [
 	"OMP_MAINTENANCE_GATE_MIN_RELEASE_AGE_MS",
 	"OMP_MAINTENANCE_GATE_FIRE_FLOOR_MS",
 	"OMP_DECK_ORG_ROOT",
-	"HOME",
-	"USERPROFILE",
 ];
 
 let saved: Record<string, string | undefined>;
+let homedirSpy: ReturnType<typeof spyOn<typeof os, "homedir">>;
 let tmpDataDir: string;
 let tmpHomeDir: string;
 
@@ -35,23 +34,22 @@ beforeEach(() => {
 	tmpDataDir = mkdtempSync(path.join(os.tmpdir(), "omp-deck-orient-data-"));
 	tmpHomeDir = mkdtempSync(path.join(os.tmpdir(), "omp-deck-orient-home-"));
 	process.env.OMP_DECK_DATA_DIR = tmpDataDir;
-	// os.homedir() honors USERPROFILE on Windows and HOME on POSIX. Override
-	// both so the test never writes to the real user home no matter which
-	// platform Bun picks up.
-	process.env.HOME = tmpHomeDir;
-	process.env.USERPROFILE = tmpHomeDir;
+	// Bun's os.homedir() reads the real OS user record and ignores a JS-side
+	// process.env.HOME/USERPROFILE reassignment at runtime (confirmed against
+	// Bun 1.3.14) — unlike Node, which re-checks the env var on every call.
+	// Relying on the env-var override here silently no-ops and lets
+	// getStartCommandPath() fall through to the real `~/.omp/agent/commands/
+	// start.md`, clobbering the user's actual file with test fixtures. Stub
+	// the function itself instead so every orientation-store call under test
+	// resolves against the sandboxed tmp dir regardless of runtime env quirks.
+	homedirSpy = spyOn(os, "homedir").mockReturnValue(tmpHomeDir);
 	for (const k of ENV_KEYS) {
-		if (
-			k !== "OMP_DECK_DATA_DIR" &&
-			k !== "HOME" &&
-			k !== "USERPROFILE"
-		) {
-			delete process.env[k];
-		}
+		if (k !== "OMP_DECK_DATA_DIR") delete process.env[k];
 	}
 });
 
 afterEach(() => {
+	homedirSpy.mockRestore();
 	for (const k of ENV_KEYS) {
 		if (saved[k] === undefined) delete process.env[k];
 		else process.env[k] = saved[k];
