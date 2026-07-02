@@ -293,7 +293,23 @@ export const useStore = create<StoreState>()(
 		async refreshSessions(cwd?: string) {
 			try {
 				const resp: ListSessionsResponse = await api.listSessions(cwd);
-				set({ sessions: resp.sessions });
+				set((s) => {
+					// Keep the currently-open session(s)' live cache (`sessionsById`,
+					// which feeds ChatHeader's title) in sync with the persisted list.
+					// `sessionsById.sessionName` otherwise only updates on this tab's
+					// own `renameSession()` call or on (re)subscribe — a rename from
+					// another tab, a routine, or the REST API would bump
+					// `sessionsChangeCounter` and refresh the sidebar/picker list but
+					// leave an already-open chat header showing the stale name.
+					const byId = { ...s.sessionsById };
+					for (const row of resp.sessions) {
+						const existing = byId[row.id];
+						if (existing && row.title !== undefined && existing.sessionName !== row.title) {
+							byId[row.id] = { ...existing, sessionName: row.title };
+						}
+					}
+					return { sessions: resp.sessions, sessionsById: byId };
+				});
 			} catch (err) {
 				console.warn("listSessions failed", err);
 			}
