@@ -84,6 +84,9 @@ export interface RuntimeEnvUpdate {
 export interface CreateSessionOpts {
 	cwd: string;
 	model?: ModelRef;
+	/** Enter Plan Mode immediately after the SDK session is attached, before
+	 *  any auto-start prompt is queued. */
+	planMode?: boolean;
 	suppressAutoStart?: boolean;
 }
 

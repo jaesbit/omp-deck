@@ -142,6 +142,9 @@ export class InProcessAgentBridge implements AgentBridge {
 		}
 		await this.wireExtensionRunner(session);
 		const handle = await this.attach(session, opts.cwd, sessionManager, result.setToolUIContext);
+		if (opts.planMode) {
+			await handle.setPlanMode(true);
+		}
 		if (!opts.suppressAutoStart && this.autoStartCommand) {
 			this.pendingAutoPrompts.set(handle.sessionId, this.autoStartCommand);
 		}
