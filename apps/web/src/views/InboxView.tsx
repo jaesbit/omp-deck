@@ -16,7 +16,7 @@ import type { InboxItem, InboxKind } from "@omp-deck/protocol";
 import { Layout } from "@/components/Layout";
 import { MarkdownEdit } from "@/components/MarkdownEdit";
 import { SessionLaunchModal, type SessionLaunchOpts } from "@/components/chat/SessionLaunchModal";
-import { combineWithAutoStart, getAutoStartCommand } from "@/lib/first-prompt";
+import { combineWithAutoStart, SESSION_INITIALISATION_COMMAND } from "@/lib/first-prompt";
 import { inboxApi } from "@/lib/inbox-api";
 import { useStore } from "@/lib/store";
 import { cn } from "@/lib/utils";
@@ -172,9 +172,8 @@ export function InboxView() {
 			`if it's a decision needing input, frame the choice; if it should become a`,
 			`task, POST /api/tasks and report the new task id.`,
 		].join("\n");
-		const autoStart = await getAutoStartCommand();
 		setPendingDraft({
-			text: combineWithAutoStart(autoStart, draft),
+			text: combineWithAutoStart(SESSION_INITIALISATION_COMMAND, draft),
 			sessionId,
 			autoSend: true,
 		});

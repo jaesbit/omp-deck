@@ -1,28 +1,13 @@
 import type { ModelRef } from "@omp-deck/protocol";
-import { settingsApi } from "./settings-api";
 
 /**
- * Reads the deck's currently configured auto-start slash command
- * (`OMP_DECK_AUTO_START`, e.g. `/start`). Returns `null` when unset/disabled
- * — auto-start is opt-in and off by default on a fresh install.
- *
- * Fetched fresh on every call (settings changes are rare and this only runs
- * at session-launch time, not a hot path) rather than cached, so a mid-session
- * env change in another tab is picked up immediately.
+ * Explicit session-initialisation command for a launch that also carries a
+ * user/context prompt. This is deliberately not coupled to
+ * `OMP_DECK_AUTO_START`: a user may leave the global automatic start disabled
+ * yet still expect an intentional Task/Inbox/initial-prompt launch to run the
+ * canonical `/start` orientation exactly once.
  */
-export async function getAutoStartCommand(): Promise<string | null> {
-	try {
-		const resp = await settingsApi.listEnv();
-		const entry = resp.entries.find((e) => e.key === "OMP_DECK_AUTO_START");
-		if (!entry || !entry.isSet) return null;
-		const trimmed = entry.masked.trim();
-		return trimmed.length > 0 ? trimmed : null;
-	} catch {
-		// Best-effort — a settings-fetch hiccup should degrade to "no autostart"
-		// (message sent as-is) rather than block session launch entirely.
-		return null;
-	}
-}
+export const SESSION_INITIALISATION_COMMAND = "/start";
 
 /**
  * Combine the deck's auto-start command with a follow-up message into ONE
@@ -51,8 +36,8 @@ export function combineWithAutoStart(autoStart: string | null, message: string):
  * Shared "create session, optionally seed an initial prompt" flow used by
  * every plain "New session" launch site (SessionPicker, Sidebar, ChatHeader).
  * When `opts.initialPrompt` is set, the server's own auto-start is suppressed
- * and the composer is pre-filled with the autostart command combined with
- * the prompt instead (see `combineWithAutoStart`) — never sent automatically.
+ * and the initialisation command plus prompt are auto-sent as one turn (see
+ * `combineWithAutoStart`). The user does not need to press Send a second time.
  */
 export async function launchSession(
 	createSession: (opts: {
@@ -72,9 +57,8 @@ export async function launchSession(
 		suppressAutoStart,
 	});
 	if (opts.initialPrompt) {
-		const autoStart = await getAutoStartCommand();
 		setPendingDraft({
-			text: combineWithAutoStart(autoStart, opts.initialPrompt),
+			text: combineWithAutoStart(SESSION_INITIALISATION_COMMAND, opts.initialPrompt),
 			sessionId,
 			autoSend: true,
 		});

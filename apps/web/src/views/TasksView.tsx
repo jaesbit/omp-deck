@@ -22,7 +22,7 @@ import { Column } from "@/components/tasks/Column";
 import { TaskCardBody } from "@/components/tasks/TaskCard";
 import { TaskModal } from "@/components/tasks/TaskModal";
 import { SessionLaunchModal, type SessionLaunchOpts } from "@/components/chat/SessionLaunchModal";
-import { combineWithAutoStart, getAutoStartCommand } from "@/lib/first-prompt";
+import { combineWithAutoStart, SESSION_INITIALISATION_COMMAND } from "@/lib/first-prompt";
 import { StateConfig } from "@/components/tasks/StateConfig";
 import { projectColorForCwd, useProjectColors } from "@/lib/project-colors";
 import {
@@ -303,9 +303,8 @@ export function TasksView() {
 			draft === "full"
 				? `# ${task.title}\n\n${task.body}`.trim()
 				: `Trabaja en T-${task.displayId}: ${task.title}`;
-		const autoStart = await getAutoStartCommand();
 		setPendingDraft({
-			text: combineWithAutoStart(autoStart, message),
+			text: combineWithAutoStart(SESSION_INITIALISATION_COMMAND, message),
 			sessionId,
 			autoSend: true,
 		});
