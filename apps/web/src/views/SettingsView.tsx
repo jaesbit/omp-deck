@@ -25,7 +25,7 @@ import { orientationApi } from "@/lib/orientation-api";
 import { authApi } from "@/lib/auth-api";
 import { playNotificationTone } from "@/lib/audio";
 import { useNotificationPermission } from "@/lib/notifications";
-import { useStore, type NotificationItem } from "@/lib/store";
+import { DEFAULT_ABORT_SHORTCUT_KEY, useStore, type NotificationItem } from "@/lib/store";
 import { THEMES, useTheme } from "@/lib/theme";
 import { cn } from "@/lib/utils";
 
@@ -705,6 +705,72 @@ function AppearanceSection() {
 						</div>
 					</div>
 				</div>
+			</div>
+
+			<div className="overflow-hidden rounded-md border border-line bg-paper">
+				<div className="border-b border-line bg-paper-2 px-3 py-2">
+					<div className="meta">Keyboard shortcuts</div>
+					<div className="mt-0.5 text-xs text-ink-3">
+						Stored in this browser, same as your theme choice.
+					</div>
+				</div>
+				<div className="p-4">
+					<AbortShortcutEditor />
+				</div>
+			</div>
+		</div>
+	);
+}
+
+/**
+ * Lets the user rebind the "stop streaming" shortcut (Ctrl/Cmd + key). Exists
+ * because the shipped default (`/`) or the previous default (`.`, ChatGPT/VS
+ * Code's "stop generating" convention) can collide with IME bindings —
+ * fcitx5's emoji picker grabs `Ctrl+.` before the browser ever sees it, and
+ * there's no way to enumerate every IME's defaults in advance. Click
+ * "Change", then press any single key (no modifiers) to rebind.
+ */
+function AbortShortcutEditor() {
+	const shortcutKey = useStore((s) => s.abortShortcutKey);
+	const setShortcutKey = useStore((s) => s.setAbortShortcutKey);
+	const [listening, setListening] = useState(false);
+
+	useEffect(() => {
+		if (!listening) return;
+		function onKey(e: KeyboardEvent): void {
+			e.preventDefault();
+			e.stopPropagation();
+			if (e.key === "Escape") {
+				setListening(false);
+				return;
+			}
+			// Skip bare modifier keydowns — wait for the actual key that will
+			// pair with Ctrl/Cmd.
+			if (["Control", "Meta", "Shift", "Alt"].includes(e.key)) return;
+			setShortcutKey(e.key);
+			setListening(false);
+		}
+		window.addEventListener("keydown", onKey, true);
+		return () => window.removeEventListener("keydown", onKey, true);
+	}, [listening, setShortcutKey]);
+
+	return (
+		<div className="flex flex-wrap items-center justify-between gap-3">
+			<div className="min-w-0">
+				<div className="meta">Stop streaming</div>
+				<div className="mt-0.5 font-mono text-sm text-ink">
+					{listening ? "Press a key…" : `Ctrl / Cmd + ${shortcutKey}`}
+				</div>
+			</div>
+			<div className="flex items-center gap-2">
+				{shortcutKey !== DEFAULT_ABORT_SHORTCUT_KEY ? (
+					<Button variant="outline" size="sm" onClick={() => setShortcutKey(DEFAULT_ABORT_SHORTCUT_KEY)}>
+						Reset to default
+					</Button>
+				) : null}
+				<Button variant="outline" size="sm" onClick={() => setListening((v) => !v)}>
+					{listening ? "Cancel" : "Change"}
+				</Button>
 			</div>
 		</div>
 	);

@@ -41,6 +41,7 @@ export function Composer() {
 	const sendPrompt = useStore((s) => s.sendPrompt);
 	const abort = useStore((s) => s.abort);
 	const clearQueue = useStore((s) => s.clearQueue);
+	const abortShortcutKey = useStore((s) => s.abortShortcutKey);
 	const setPlanMode = useStore((s) => s.setPlanMode);
 	const planModeEnabled = session?.planMode?.enabled ?? false;
 	const pendingDraft = useStore((s) => s.pendingDraft);
@@ -683,8 +684,8 @@ export function Composer() {
 							type="button"
 							className="btn-danger h-7 gap-1 self-end px-2 text-xs"
 							onClick={() => abort()}
-							aria-label="Stop streaming (Ctrl+.)"
-							title="Stop streaming (Ctrl+.)"
+							aria-label={`Stop streaming (Ctrl+${abortShortcutKey})`}
+							title={`Stop streaming (Ctrl+${abortShortcutKey})`}
 						>
 							<Square className="h-3 w-3" fill="currentColor" />
 							<span className="font-mono uppercase tracking-meta text-2xs">stop</span>

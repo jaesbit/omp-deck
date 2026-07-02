@@ -24,11 +24,17 @@ export function App() {
 }
 
 /**
- * Window-level `Ctrl+.` (Cmd+. on macOS) → abort the active session if it's
- * mid-turn. Bound at the App level so the shortcut works from any view
+ * Window-level Ctrl/Cmd + a configurable key → abort the active session if
+ * it's mid-turn. Bound at the App level so the shortcut works from any view
  * (composer, kanban, KB) without the user having to focus the Stop button
- * the composer renders. Matches ChatGPT / VS Code's "stop generating"
- * convention so it's discoverable.
+ * the composer renders.
+ *
+ * The key defaults to `/` (see `DEFAULT_ABORT_SHORTCUT_KEY`) but is
+ * user-configurable in Settings → Appearance — the original `.` (ChatGPT /
+ * VS Code's "stop generating" convention) collides with fcitx5's built-in
+ * emoji-picker trigger on some setups, which intercepts the key before the
+ * browser ever sees it, and there's no way to know every IME's bindings in
+ * advance.
  *
  * Ignored while the user is composing text in a contenteditable surface
  * EXCEPT when the active session is actually busy — pressing it during a
@@ -39,9 +45,14 @@ export function App() {
 function useGlobalAbortShortcut(): void {
 	const abort = useStore((s) => s.abort);
 	const status = useStore((s) => selectActiveSession(s)?.status);
+	const shortcutKey = useStore((s) => s.abortShortcutKey);
 	useEffect(() => {
 		function onKey(e: KeyboardEvent): void {
-			const isStop = (e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key === ".";
+			const isStop =
+				(e.ctrlKey || e.metaKey) &&
+				!e.shiftKey &&
+				!e.altKey &&
+				e.key.toLowerCase() === shortcutKey.toLowerCase();
 			if (!isStop) return;
 			if (status !== "streaming" && status !== "retrying") return;
 			e.preventDefault();
@@ -49,5 +60,5 @@ function useGlobalAbortShortcut(): void {
 		}
 		window.addEventListener("keydown", onKey);
 		return () => window.removeEventListener("keydown", onKey);
-	}, [abort, status]);
+	}, [abort, status, shortcutKey]);
 }
