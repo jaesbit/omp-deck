@@ -47,6 +47,17 @@ function readBool(key: string, fallback: boolean): boolean {
 	return raw === "1";
 }
 
+function readString(key: string, fallback: string): string {
+	if (typeof localStorage === "undefined") return fallback;
+	return localStorage.getItem(key) || fallback;
+}
+
+/** Ctrl/Cmd+`/` — was `Ctrl+.` (ChatGPT/VS Code's "stop generating" convention)
+ * until it collided with fcitx5's built-in emoji-picker binding on one
+ * setup. Configurable per-browser in Settings → Appearance; this is only the
+ * fallback for anyone who hasn't picked their own. */
+export const DEFAULT_ABORT_SHORTCUT_KEY = "/";
+
 /** Matches the Tailwind `lg` breakpoint (1024px) used by `Layout`. Below this
  * width the sidebar and inspector behave as overlay drawers, so persisting
  * "open" state would auto-open them on every mobile load and bury the main
@@ -94,6 +105,16 @@ interface StoreState {
 	/** Shared chrome state — each view can open/close the inspector and sidebar. */
 	sidebarOpen: boolean;
 	inspectorOpen: boolean;
+
+	/**
+	 * Key (as reported by `KeyboardEvent.key`, e.g. `"/"`, `"."`, `"Escape"`)
+	 * that, combined with Ctrl/Cmd, aborts the active session's in-flight turn
+	 * (see `useGlobalAbortShortcut` in App.tsx). Configurable in
+	 * Settings → Appearance because the default collides with some IME
+	 * emoji-picker bindings (fcitx5's `Ctrl+.`, notably). Per-browser, like
+	 * theme and chrome panel state.
+	 */
+	abortShortcutKey: string;
 
 	/**
 	 * Monotonic counter bumped every time the server broadcasts a `tasks_changed`
@@ -179,6 +200,7 @@ interface StoreState {
 	setPendingDraft(draft: { text: string } | undefined): void;
 	setSidebarOpen(open: boolean): void;
 	setInspectorOpen(open: boolean): void;
+	setAbortShortcutKey(key: string): void;
 	/** Send a dialog response over the WS and clear it locally. */
 	respondToExtUiDialog(sessionId: string, dialogId: string, response: ExtUiDialogResponse): void;
 	/**
@@ -226,6 +248,7 @@ export const useStore = create<StoreState>()(
 		// panels are overlay drawers and always start closed.
 		sidebarOpen: readChromeOpen("omp-deck:sidebar-open", true),
 		inspectorOpen: readChromeOpen("omp-deck:inspector-open", false),
+		abortShortcutKey: readString("omp-deck:abort-shortcut-key", DEFAULT_ABORT_SHORTCUT_KEY),
 
 		async bootstrap() {
 			get().connect();
@@ -394,6 +417,13 @@ export const useStore = create<StoreState>()(
 				} catch {}
 			}
 			set({ inspectorOpen: open });
+		},
+
+		setAbortShortcutKey(key) {
+			try {
+				localStorage.setItem("omp-deck:abort-shortcut-key", key);
+			} catch {}
+			set({ abortShortcutKey: key });
 		},
 
 		respondToExtUiDialog(sessionId, dialogId, response) {
