@@ -22,8 +22,15 @@ import { Column } from "@/components/tasks/Column";
 import { TaskCardBody } from "@/components/tasks/TaskCard";
 import { TaskModal } from "@/components/tasks/TaskModal";
 import { StateConfig } from "@/components/tasks/StateConfig";
+import { projectColorForCwd, useProjectColors } from "@/lib/project-colors";
+import {
+	filterTasksByWorkspace,
+	taskWorkspaces,
+	useTaskWorkspaceFilter,
+} from "@/lib/task-workspace-filter";
 import { tasksApi } from "@/lib/tasks-api";
 import { useStore } from "@/lib/store";
+import { shortPath } from "@/lib/utils";
 
 export function TasksView() {
 	const navigate = useNavigate();
@@ -40,6 +47,7 @@ export function TasksView() {
 
 	const [openTask, setOpenTask] = useState<Task | undefined>();
 	const [showStateConfig, setShowStateConfig] = useState(false);
+	const { colors: projectColors, setColor: setProjectColor } = useProjectColors();
 
 	const sensors = useSensors(
 		useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
@@ -89,19 +97,26 @@ export function TasksView() {
 		}
 	}, [searchParams, setSearchParams, tasks]);
 
-	const tasksByState = useMemo(() => {
-		const map: Record<string, Task[]> = {};
-		for (const s of states) map[s.id] = [];
-		for (const t of tasks) {
-			if (!map[t.stateId]) map[t.stateId] = [];
-			map[t.stateId]!.push(t);
-		}
-		return map;
-	}, [tasks, states]);
+	const workspaces = useMemo(() => taskWorkspaces(tasks), [tasks]);
+	const [selectedWorkspace, setSelectedWorkspace] = useTaskWorkspaceFilter(workspaces, !loading);
+	const visibleTasks = useMemo(
+		() => filterTasksByWorkspace(tasks, selectedWorkspace),
+		[tasks, selectedWorkspace],
+	);
+
+	const allTasksByState = useMemo(() => groupTasksByState(tasks, states), [tasks, states]);
+	const tasksByState = useMemo(
+		() => groupTasksByState(visibleTasks, states),
+		[visibleTasks, states],
+	);
 
 	async function onCreate(stateId: string, title: string): Promise<void> {
 		try {
-			const created = await tasksApi.create({ title, stateId });
+			const created = await tasksApi.create({
+				title,
+				stateId,
+				...(selectedWorkspace ? { cwd: selectedWorkspace } : {}),
+			});
 			setTasks((prev) => [...prev, created]);
 		} catch (e) {
 			setError(String(e));
@@ -170,7 +185,7 @@ export function TasksView() {
 		if (overColumn) {
 			// Dropped on a column (header or empty area) — append to end.
 			targetStateId = overColumn.id;
-			const peers = (tasksByState[overColumn.id] ?? []).filter((t) => t.id !== taskId);
+			const peers = (allTasksByState[overColumn.id] ?? []).filter((t) => t.id !== taskId);
 			targetIndex = peers.length;
 		} else {
 			const overTask = tasks.find((t) => t.id === overId);
@@ -179,9 +194,9 @@ export function TasksView() {
 				return;
 			}
 			targetStateId = overTask.stateId;
-			// Compute insertion index based on the original list (with the dragged
-			// task removed) so a same-column reorder lands at the correct slot.
-			const peers = (tasksByState[overTask.stateId] ?? []).filter((t) => t.id !== taskId);
+			// Target placement uses all column peers, not only visible ones, because
+			// the move API indexes the complete state list.
+			const peers = (allTasksByState[overTask.stateId] ?? []).filter((t) => t.id !== taskId);
 			const overIdx = peers.findIndex((t) => t.id === overTask.id);
 			targetIndex = overIdx < 0 ? peers.length : overIdx;
 		}
@@ -269,25 +284,39 @@ export function TasksView() {
 	return (
 		<>
 			<Layout
-				sidebar={<TasksSidebar tasks={tasks} states={states} />}
+				sidebar={<TasksSidebar tasks={visibleTasks} states={states} />}
 				main={
 					<div className="flex h-full min-h-0 flex-col">
 						<div className="flex h-10 shrink-0 items-center gap-2 border-b border-line bg-paper px-3">
 							<div className="meta">Kanban</div>
 							<div className="text-xs text-ink-3">
-								{tasks.length} task{tasks.length === 1 ? "" : "s"} · {states.length} columns
+								{visibleTasks.length} task{visibleTasks.length === 1 ? "" : "s"} · {states.length} columns
 							</div>
+							<label className="ml-auto flex items-center gap-2 text-xs text-ink-3">
+								<span className="font-mono text-2xs uppercase tracking-meta">Workspace</span>
+								<select
+									value={selectedWorkspace}
+									onChange={(event) => setSelectedWorkspace(event.target.value)}
+									className="field h-7 w-56 px-2 font-mono text-2xs"
+									aria-label="Filter tasks by workspace"
+								>
+									<option value="">All workspaces</option>
+									{workspaces.map((cwd) => (
+										<option key={cwd} value={cwd} title={cwd}>{shortPath(cwd, 24)}</option>
+									))}
+								</select>
+							</label>
 							<button
 								type="button"
 								onClick={() => {
 									setShowStateConfig((v) => !v);
 									setInspectorOpen(true);
 								}}
-								className="btn-ghost ml-auto h-7 px-2 text-xs"
-								title="Edit columns"
+								className="btn-ghost h-7 px-2 text-xs"
+								title="Configure board"
 							>
 								<Settings2 className="h-3.5 w-3.5" />
-								Columns
+								Board
 							</button>
 						</div>
 
@@ -318,6 +347,7 @@ export function TasksView() {
 												key={s.id}
 												state={s}
 												tasks={tasksByState[s.id] ?? []}
+												projectColors={projectColors}
 												onCreate={(stateId, title) => void onCreate(stateId, title)}
 												onOpen={(t) => setOpenTask(t)}
 												onRenameRequest={() => {
@@ -342,7 +372,11 @@ export function TasksView() {
 								>
 									{draggingTask ? (
 										<div className="w-72 px-2">
-											<TaskCardBody task={draggingTask} lifted />
+											<TaskCardBody
+												task={draggingTask}
+												lifted
+												projectColor={projectColorForCwd(draggingTask.cwd, projectColors)}
+											/>
 										</div>
 									) : null}
 									{draggingColumnId ? (() => {
@@ -372,7 +406,14 @@ export function TasksView() {
 				}
 				inspector={
 					showStateConfig ? (
-						<StateConfig states={states} onClose={() => setShowStateConfig(false)} onChanged={refresh} />
+						<StateConfig
+							states={states}
+							tasks={tasks}
+							projectColors={projectColors}
+							onProjectColorChange={setProjectColor}
+							onClose={() => setShowStateConfig(false)}
+							onChanged={refresh}
+						/>
 					) : (
 						<EmptyInspector />
 					)
@@ -431,6 +472,16 @@ function TasksSidebar({ tasks, states }: { tasks: Task[]; states: TaskState[] })
 			</div>
 		</div>
 	);
+}
+
+function groupTasksByState(tasks: ReadonlyArray<Task>, states: ReadonlyArray<TaskState>): Record<string, Task[]> {
+	const map: Record<string, Task[]> = {};
+	for (const state of states) map[state.id] = [];
+	for (const task of tasks) {
+		if (!map[task.stateId]) map[task.stateId] = [];
+		map[task.stateId]!.push(task);
+	}
+	return map;
 }
 
 /**

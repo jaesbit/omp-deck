@@ -7,6 +7,7 @@ import { cn, truncate } from "@/lib/utils";
 interface Props {
 	task: Task;
 	onOpen: (task: Task) => void;
+	projectColor?: string;
 }
 
 /**
@@ -15,7 +16,7 @@ interface Props {
  * will land; the lifted card itself is rendered by the DragOverlay in
  * TasksView. The two modes share `<TaskCardBody>` so the visual is identical.
  */
-export function TaskCard({ task, onOpen }: Props) {
+export function TaskCard({ task, onOpen, projectColor }: Props) {
 	const {
 		attributes,
 		listeners,
@@ -67,7 +68,7 @@ export function TaskCard({ task, onOpen }: Props) {
 			tabIndex={0}
 			className="group"
 		>
-			<TaskCardBody task={task} lifted={false} />
+			<TaskCardBody task={task} lifted={false} projectColor={projectColor} />
 		</div>
 	);
 }
@@ -76,7 +77,15 @@ export function TaskCard({ task, onOpen }: Props) {
  * Visual body of the card. Reused by the DragOverlay so the lifted version is
  * identical in shape; only the chrome differs (shadow, scale, rotation).
  */
-export function TaskCardBody({ task, lifted }: { task: Task; lifted: boolean }) {
+export function TaskCardBody({
+	task,
+	lifted,
+	projectColor,
+}: {
+	task: Task;
+	lifted: boolean;
+	projectColor?: string;
+}) {
 	// Surface the most recent activity timestamp — body edits bump updatedAt
 	// without disturbing the per-column sort, which is exactly the signal a
 	// glance at the card should reveal.
@@ -92,6 +101,14 @@ export function TaskCardBody({ task, lifted }: { task: Task; lifted: boolean }) 
 			)}
 		>
 			<div className="flex items-baseline gap-2 font-mono text-[10px] uppercase tracking-meta text-ink-3">
+				{projectColor ? (
+					<span
+						className="h-2 w-2 shrink-0 rounded-full ring-1 ring-ink/20"
+						style={{ backgroundColor: projectColor }}
+						role="img"
+						aria-label={`Project color for ${task.cwd}`}
+					/>
+				) : null}
 				<span>T-{task.displayId}</span>
 				{brief ? (
 					<time
