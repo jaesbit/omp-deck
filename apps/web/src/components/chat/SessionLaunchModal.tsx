@@ -286,7 +286,7 @@ export function SessionLaunchModal({
 							value={initialPrompt}
 							onChange={(e) => setInitialPrompt(e.target.value)}
 							rows={3}
-							placeholder="Give the agent an instruction to start with — combined with /start (if configured) into one turn, not sent automatically."
+							placeholder="Give the agent an instruction to start with — combined with /start (if configured) and sent as the first turn."
 							className="field w-full resize-none px-2 py-1.5 text-sm"
 						/>
 					</div>
