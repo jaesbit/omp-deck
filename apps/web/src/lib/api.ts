@@ -1,6 +1,7 @@
 import type {
 	CreateSessionRequest,
 	CreateSessionResponse,
+	ListDirResponse,
 	ListFilePathsResponse,
 	ListModelsResponse,
 	ListSessionsResponse,
@@ -20,13 +21,14 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 		},
 	});
 	if (!res.ok) {
-		let body: string;
+		const text = await res.text().catch(() => "(unreadable body)");
+		let parsedError: string | undefined;
 		try {
-			body = await res.text();
+			parsedError = (JSON.parse(text) as { error?: string }).error;
 		} catch {
-			body = "(unreadable body)";
+			// Body wasn't JSON — fall through to the raw-text error below.
 		}
-		throw new Error(`HTTP ${res.status} ${path}: ${body}`);
+		throw new Error(parsedError ?? `HTTP ${res.status} ${path}: ${text}`);
 	}
 	return (await res.json()) as T;
 }
@@ -83,5 +85,9 @@ export const api = {
 	completeFilePath(cwd: string, q: string, limit = 20): Promise<ListFilePathsResponse> {
 		const params = new URLSearchParams({ cwd, q, limit: String(limit) });
 		return request<ListFilePathsResponse>(`/fs/complete?${params.toString()}`);
+	},
+	browseDir(path?: string): Promise<ListDirResponse> {
+		const q = path ? `?path=${encodeURIComponent(path)}` : "";
+		return request<ListDirResponse>(`/fs/browse${q}`);
 	},
 };

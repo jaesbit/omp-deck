@@ -1681,6 +1681,18 @@ export interface ListFilePathsResponse {
 	cached: boolean;
 }
 
+/**
+ * Response from `GET /fs/browse?path=<absolute>` — the immediate
+ * subdirectories of `path`, used by the workspace-picker's folder-browse
+ * dialog. `parent` is `null` once `path` reaches the sandboxed root ($HOME),
+ * signalling the dialog to disable "Up".
+ */
+export interface ListDirResponse {
+	path: string;
+	parent: string | null;
+	dirs: string[];
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Auth providers / OAuth login flow (driven from Settings → Providers)
 // ─────────────────────────────────────────────────────────────────────────────

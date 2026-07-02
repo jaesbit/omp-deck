@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
-import { ArrowRight, Clock, ClipboardList, MessagesSquare, Plus } from "lucide-react";
+import { ArrowRight, Clock, ClipboardList, FolderOpen, MessagesSquare, Plus } from "lucide-react";
 import type { SessionSummary } from "@omp-deck/protocol";
 
+import { DirBrowserModal } from "@/components/DirBrowserModal";
 import { selectActiveSession, useStore } from "@/lib/store";
 import { cn, shortPath } from "@/lib/utils";
 
@@ -11,6 +12,12 @@ import { cn, shortPath } from "@/lib/utils";
  * primary "New session" CTA and an inline list of recent persisted sessions,
  * so the user never has to open the sidebar just to start working.
  */
+/** Sentinel `<select>` value that switches the workspace picker into
+ * free-text mode for a path that isn't a known workspace yet. Kept out of
+ * band from real cwds (which are always absolute paths) so it can never
+ * collide with one. */
+const CUSTOM_CWD_VALUE = "__custom__";
+
 export function SessionPicker() {
 	const session = useStore(selectActiveSession);
 	const workspaces = useStore((s) => s.workspaces);
@@ -22,8 +29,11 @@ export function SessionPicker() {
 	const refreshSessions = useStore((s) => s.refreshSessions);
 
 	const [selectedCwd, setSelectedCwd] = useState<string>("");
+	const [customCwd, setCustomCwd] = useState<string>("");
 	const [busy, setBusy] = useState(false);
-	const cwdInUse = selectedCwd || defaultCwd;
+	const [browsing, setBrowsing] = useState(false);
+	const isCustomCwd = selectedCwd === CUSTOM_CWD_VALUE;
+	const cwdInUse = isCustomCwd ? customCwd.trim() : selectedCwd || defaultCwd;
 
 	const recent = useMemo(() => {
 		const live = Object.values(sessionsById);
@@ -36,6 +46,7 @@ export function SessionPicker() {
 	}, [sessions, sessionsById]);
 
 	async function startFresh(): Promise<void> {
+		if (isCustomCwd && !cwdInUse) return;
 		setBusy(true);
 		try {
 			await createSession({ cwd: cwdInUse });
@@ -78,12 +89,14 @@ export function SessionPicker() {
 					<select
 						value={selectedCwd}
 						onChange={(e) => {
-							setSelectedCwd(e.target.value);
-							void refreshSessions(e.target.value || undefined);
+							const value = e.target.value;
+							setSelectedCwd(value);
+							if (value !== CUSTOM_CWD_VALUE) void refreshSessions(value || undefined);
 						}}
 						className="field h-8 w-full px-2 font-mono text-xs"
 					>
 						<option value="">{`(default) ${defaultCwd}`}</option>
+						<option value={CUSTOM_CWD_VALUE}>+ New path…</option>
 						{workspaces
 							.filter((w) => w.cwd !== defaultCwd)
 							.map((w) => (
@@ -92,13 +105,35 @@ export function SessionPicker() {
 								</option>
 							))}
 					</select>
-					<div className="mt-2 truncate font-mono text-2xs text-ink-3" title={cwdInUse}>
-						{shortPath(cwdInUse, 80)}
-					</div>
+					{isCustomCwd ? (
+						<div className="mt-2 flex gap-1.5">
+							<input
+								type="text"
+								autoFocus
+								value={customCwd}
+								onChange={(e) => setCustomCwd(e.target.value)}
+								placeholder="/absolute/path/to/project"
+								spellCheck={false}
+								className="field h-8 flex-1 px-2 font-mono text-xs"
+							/>
+							<button
+								type="button"
+								onClick={() => setBrowsing(true)}
+								className="h-8 shrink-0 rounded border border-line bg-paper-2 px-2 text-ink-2 hover:bg-paper-3/60"
+								title="Browse for a folder"
+							>
+								<FolderOpen className="h-3.5 w-3.5" />
+							</button>
+						</div>
+					) : (
+						<div className="mt-2 truncate font-mono text-2xs text-ink-3" title={cwdInUse}>
+							{shortPath(cwdInUse, 80)}
+						</div>
+					)}
 					<button
 						type="button"
 						onClick={() => void startFresh()}
-						disabled={busy}
+						disabled={busy || (isCustomCwd && !cwdInUse)}
 						className="btn-primary mt-3 h-9 w-full text-sm"
 					>
 						<Plus className="h-4 w-4" />
@@ -172,6 +207,15 @@ export function SessionPicker() {
 					</div>
 				) : null}
 			</div>
+			<DirBrowserModal
+				open={browsing}
+				initialPath={customCwd || defaultCwd}
+				onClose={() => setBrowsing(false)}
+				onSelect={(path) => {
+					setCustomCwd(path);
+					setBrowsing(false);
+				}}
+			/>
 		</div>
 	);
 }
