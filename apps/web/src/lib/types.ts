@@ -6,7 +6,7 @@
  * raw SDK events.
  */
 
-import type { ModelRef, PendingPlanApprovalWire, PlanModeContextWire } from "@omp-deck/protocol";
+import type { GoalModeContextWire, ModelRef, PendingPlanApprovalWire, PlanModeContextWire } from "@omp-deck/protocol";
 
 // ─── Content blocks ────────────────────────────────────────────────────────
 
@@ -248,4 +248,6 @@ export interface SessionUi {
 	 */
 	planMode?: PlanModeContextWire;
 	pendingPlanApproval?: PendingPlanApprovalWire;
+	/** Goal Mode state, present for active and paused autonomous objectives. */
+	goalMode?: GoalModeContextWire;
 }

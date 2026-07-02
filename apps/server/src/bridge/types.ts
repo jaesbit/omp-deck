@@ -6,6 +6,7 @@ import type {
 	ImageAttachment,
 	ModelInfo,
 	ModelRef,
+	GoalModeContextWire,
 	PendingPlanApprovalWire,
 	PlanModeContextWire,
 	ServerFrame,
@@ -182,6 +183,10 @@ export interface SessionHandle {
 		proposalId: string,
 		response: PlanApprovalResponse,
 	): Promise<"settled" | "unknown">;
+	/** Execute a Goal Mode lifecycle action for this session. */
+	actOnGoal(action: import("./goal-mode-bridge.ts").GoalAction): Promise<void>;
+	/** Read Goal Mode state for snapshot replay. */
+	getGoalModeContext(): GoalModeContextWire | undefined;
 }
 
 export type SlashDispatchResult =

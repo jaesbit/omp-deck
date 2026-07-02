@@ -208,6 +208,8 @@ interface StoreState {
 	 * server emits `plan_mode_changed` which the reducer mirrors back.
 	 */
 	setPlanMode(enabled: boolean): void;
+	/** Execute a Goal Mode lifecycle action on the active session. */
+	actOnGoal(action: "create" | "pause" | "resume" | "cancel" | "set_budget", options?: { objective?: string; tokenBudget?: number }): void;
 	/**
 	 * Reply to a `plan_proposed` card. Optimistically clears
 	 * `pendingPlanApproval` so the UI hides immediately; the server emits
@@ -448,6 +450,11 @@ export const useStore = create<StoreState>()(
 			const id = get().activeId;
 			if (!id) return;
 			get().ws?.send({ type: "set_plan_mode", sessionId: id, enabled });
+		},
+		actOnGoal(action, options) {
+			const sessionId = get().activeId;
+			if (!sessionId) return;
+			get().ws?.send({ type: "goal_action", sessionId, action, ...options });
 		},
 
 		respondToPlanApproval({ sessionId, proposalId, approved, finalPath, editedContent }) {

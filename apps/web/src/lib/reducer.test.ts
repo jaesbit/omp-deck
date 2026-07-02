@@ -223,3 +223,32 @@ describe("reducer queuedPrompts snapshot hydration", () => {
 		expect(s.queuedPrompts[1]?.behavior).toBe("steer");
 	});
 });
+
+describe("reducer Goal Mode lifecycle", () => {
+	test("hydrates goal progress and clears it after cancellation", () => {
+		const active = applyEvent(fresh(), {
+			type: "goal_updated",
+			goal: {
+				objective: "Ship safely",
+				status: "active",
+				tokenBudget: 100,
+				tokensUsed: 25,
+				timeUsedSeconds: 9,
+			},
+			state: { enabled: true },
+		} as never);
+		expect(active.goalMode).toEqual({
+			enabled: true,
+			objective: "Ship safely",
+			status: "active",
+			tokenBudget: 100,
+			tokensUsed: 25,
+			timeUsedSeconds: 9,
+			reason: undefined,
+		});
+
+		const cancelled = applyEvent(active, { type: "goal_updated", goal: null } as never);
+		expect(cancelled.goalMode).toBeUndefined();
+		expect(cancelled.goal).toBeNull();
+	});
+});

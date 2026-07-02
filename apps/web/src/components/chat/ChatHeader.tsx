@@ -26,6 +26,7 @@ function Inner({ session }: { session: SessionUi }) {
 	const selectSession = useStore((s) => s.selectSession);
 	const defaultCwd = useStore((s) => s.defaultCwd);
 	const sessionsById = useStore((s) => s.sessionsById);
+	const actOnGoal = useStore((s) => s.actOnGoal);
 
 	const [editing, setEditing] = useState(false);
 	const [draft, setDraft] = useState(session.sessionName ?? "");
@@ -85,6 +86,14 @@ function Inner({ session }: { session: SessionUi }) {
 					title="Plan mode — agent reads + proposes only (Shift+Tab to exit)"
 				>
 					Plan
+				</span>
+			) : null}
+			{session.goalMode ? (
+				<span
+					className="inline-flex shrink-0 items-center gap-1 rounded border border-accent/40 bg-accent/10 px-1.5 py-0.5 text-2xs uppercase tracking-meta text-accent"
+					title={`${session.goalMode.status}: ${session.goalMode.objective}`}
+				>
+					Goal {session.goalMode.status}
 				</span>
 			) : null}
 			{editing ? (
@@ -174,6 +183,28 @@ function Inner({ session }: { session: SessionUi }) {
 				>
 					Plan
 				</span>
+			) : null}
+			{session.goalMode ? (
+				<div className="hidden shrink-0 items-center gap-1 sm:flex">
+					<span
+						className="max-w-48 truncate font-mono text-2xs text-ink-3"
+						title={`${session.goalMode.objective} · ${session.goalMode.tokensUsed}${session.goalMode.tokenBudget !== undefined ? ` / ${session.goalMode.tokenBudget}` : " tokens"}`}
+					>
+						Goal: {session.goalMode.objective}
+					</span>
+					{session.goalMode.enabled ? (
+						<button type="button" className="btn-ghost h-6 px-1.5 text-2xs" onClick={() => actOnGoal("pause")}>
+							Pause
+						</button>
+					) : session.goalMode.status === "paused" ? (
+						<button type="button" className="btn-ghost h-6 px-1.5 text-2xs" onClick={() => actOnGoal("resume")}>
+							Resume
+						</button>
+					) : null}
+					<button type="button" className="btn-ghost h-6 px-1.5 text-2xs text-danger" onClick={() => actOnGoal("cancel")}>
+						Cancel
+					</button>
+				</div>
 			) : null}
 
 			{/* Context-window indicator — clickable popover with manual /compact. */}
