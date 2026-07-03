@@ -3,6 +3,7 @@ import { ArrowDown } from "lucide-react";
 import { useStore, selectActiveSession } from "@/lib/store";
 import { ChatHeader } from "./chat/ChatHeader";
 import { SessionPicker } from "./chat/SessionPicker";
+import { TodoPanel } from "./todos/TodoPanel";
 import { UserMessage } from "./messages/UserMessage";
 import { AssistantMessage } from "./messages/AssistantMessage";
 import { Notice } from "./messages/Notice";
@@ -21,6 +22,8 @@ export function Chat() {
 	const messages = session?.messages ?? [];
 	const toolCalls = session?.toolCalls ?? {};
 	const queuedPrompts = session?.queuedPrompts ?? [];
+	const todoPanelOpen = useStore((s) => s.todoPanelOpen);
+	const todoPhases = session?.todoPhases ?? [];
 
 	useEffect(() => {
 		const el = scrollRef.current;
@@ -56,6 +59,11 @@ export function Chat() {
 	return (
 		<div className="flex h-full min-h-0 flex-col">
 			<ChatHeader />
+			{todoPanelOpen && todoPhases.length > 0 ? (
+				<div className="max-h-[40vh] shrink-0 overflow-y-auto">
+					<TodoPanel phases={todoPhases} />
+				</div>
+			) : null}
 			<div className="relative min-h-0 flex-1">
 				<div ref={scrollRef} onScroll={handleScroll} className="h-full overflow-y-auto">
 					<div className="mx-auto flex max-w-[760px] flex-col gap-7 px-6 py-10">

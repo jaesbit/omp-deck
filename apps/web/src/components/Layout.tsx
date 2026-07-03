@@ -1,6 +1,6 @@
 import { useEffect, type ReactNode } from "react";
 import { NavRail } from "./NavRail";
-import { FoldVertical, Menu, PanelRight, UnfoldVertical, X } from "lucide-react";
+import { FoldVertical, ListTodo, Menu, PanelRight, UnfoldVertical, X } from "lucide-react";
 import { useStore } from "@/lib/store";
 import { cn } from "@/lib/utils";
 import { ConnectionIndicator } from "./ConnectionIndicator";
@@ -53,6 +53,7 @@ export function Layout({ sidebar, main, inspector, topBar }: Props) {
 					<div className="hidden min-w-0 truncate sm:block">{topBar}</div>
 					<ConnectionIndicator />
 					<ToolCardsToggle />
+					<TodoPanelToggle />
 					<button
 						type="button"
 						className={cn("btn-ghost h-7 w-7 p-0", inspectorOpen && "lg:bg-paper-3")}
@@ -156,6 +157,22 @@ function ToolCardsToggle() {
 			title={allCollapsed ? "Expand all tool cards" : "Collapse all tool cards"}
 		>
 			<Icon className="h-4 w-4" />
+		</button>
+	);
+}
+
+function TodoPanelToggle() {
+	const open = useStore((s) => s.todoPanelOpen);
+	const toggle = useStore((s) => s.toggleTodoPanel);
+	return (
+		<button
+			type="button"
+			className={cn("btn-ghost h-7 w-7 p-0", open && "lg:bg-paper-3")}
+			onClick={toggle}
+			aria-label={open ? "Hide todos panel" : "Show todos panel"}
+			title={open ? "Hide todos panel" : "Show todos panel"}
+		>
+			<ListTodo className="h-4 w-4" />
 		</button>
 	);
 }

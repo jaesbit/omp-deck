@@ -99,6 +99,11 @@ interface StoreState {
 		perCard: Record<string, boolean>;
 	};
 
+	/** Pinned todo panel in the conversation, toggled next to `ToolCardsToggle`
+	 * in Layout.tsx. Off by default — no panel, not even a "no todos" stub,
+	 * until the user turns it on (T-46). Session-only, not persisted. */
+	todoPanelOpen: boolean;
+
 	/** Composer pre-fill used by session-launch flows. `autoSend` is reserved
 	 * for an intentional initial prompt, never a user-typed composer draft. */
 	pendingDraft?: { text: string; sessionId?: string; autoSend?: boolean };
@@ -213,6 +218,7 @@ interface StoreState {
 	renameSession(id: string, name: string): Promise<void>;
 	toggleAllToolCards(): void;
 	setToolCardOpen(id: string, open: boolean): void;
+	toggleTodoPanel(): void;
 	setPendingDraft(draft: { text: string; sessionId?: string; autoSend?: boolean } | undefined): void;
 	setSidebarOpen(open: boolean): void;
 	setInspectorOpen(open: boolean): void;
@@ -255,6 +261,7 @@ export const useStore = create<StoreState>()(
 		sessionsById: {},
 		subscribed: new Set<string>(),
 		toolView: { allCollapsed: false, perCard: {} },
+		todoPanelOpen: false,
 		tasksChangeCounter: 0,
 		skillsChangeCounter: 0,
 		kbChangeCounter: 0,
@@ -430,6 +437,10 @@ export const useStore = create<StoreState>()(
 					perCard: { ...s.toolView.perCard, [id]: open },
 				},
 			}));
+		},
+
+		toggleTodoPanel() {
+			set((s) => ({ todoPanelOpen: !s.todoPanelOpen }));
 		},
 
 		setPendingDraft(draft) {
