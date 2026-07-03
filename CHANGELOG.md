@@ -5,6 +5,69 @@ All notable changes to omp-deck. The format is loosely based on
 
 ## [Unreleased]
 
+Twelve small-to-medium PRs landed since v0.6.1, focused on session-start ergonomics (model + Plan Mode chosen atomically, per-workspace defaults, task priority), autonomous Goal Mode, and multi-tab/multi-browser session continuity.
+
+### Session launch bundle — atomic model + Plan Mode (T-38/39/40/41/42/44)
+
+Every "New session" entry point now opens one shared launch dialog instead of firing `createSession({cwd})` blind.
+
+- **`SessionLaunchModal`** (new) — workspace picker (reuses the T-19 custom-path/browse flow below), model picker (reuses the catalog/filter/group logic extracted into `useModelCatalog()`, preselecting the workspace's default model when one is set), and a Plan Mode checkbox. One atomic `POST /sessions` call carries all three. Wired into `SessionPicker`, `Sidebar`, and `ChatHeader`'s session switcher, replacing their previous direct `createSession({cwd})` calls.
+- **`POST /sessions` accepts `model` + `planMode` atomically.** `planMode` is applied (`handle.setPlanMode(true)`) right after attach, before the auto-start prompt is queued, so the very first snapshot a client sees already reflects Plan Mode — no race between session creation and a separate `set_plan_mode` frame. An explicit `model` is validated against `bridge.listModels()` (new `validateModelRef()` helper); an unknown or unauthenticated model is a 400, never a silent SDK-default fallback. Combining `model`/`planMode` with `resumeFromPath` is rejected (400) — a resumed session keeps its persisted state, no creation-time defaults leak in.
+- **Settings → Workspaces** is a real section now: a new `workspace_preferences` SQLite table (migration `005`) holds one optional `{provider, id}` model override per exact `cwd`. `GET/PUT /workspace-preferences` (`PUT` takes `cwd` as a `?cwd=` query param, not a path segment, since cwds are full of slashes). `GET /workspaces` embeds it as `WorkspaceEntry.defaultModel`. Session-creation precedence: explicit request `model` > workspace override > undefined (SDK/`OMP_MODEL` picks its own default).
+- **Tasks and Inbox "Open in chat"** now open `SessionLaunchModal` too — pre-filled with `task.cwd` for Tasks; Inbox has no task cwd so it starts from the default workspace but stays visible/changeable before confirming. On a failed `createSession` the modal stays open with the draft/dialog state intact so the user can retry without re-entering anything.
+- **"Send to agent"** — new button next to "Open in chat" on task cards. Same launch flow, but the first message is a short `Work on T-<displayId>: <title>` instead of the full `# title\n\nbody` — the agent re-reads the task itself via `GET /api/tasks` per the convention in `kb://integrations/tasks.md`, so the launch prompt doesn't burn tokens re-stating what the agent can already fetch.
+- **Native task priority.** `tasks.priority` column (migration `006`, values `P0`–`P5`, default `P5`, P0 highest). Migration backfills the legacy `"[PN] title"` prefix convention some cards had accumulated into the new column, then strips the now-redundant prefix from the title. `TaskModal` gained a priority `<select>`; `TaskCard` shows a colored priority badge (loud red at P0, fading to muted at P5); the kanban header gained a priority filter plus an optional "Priority sort" toggle that's a pure display-order transform — it never mutates `orderInState`, so turning it off always recovers manual column order.
+- New protocol types: `CreateSessionRequest.planMode`, `WorkspaceEntry.defaultModel`, `WorkspacePreference` / `SetWorkspacePreferenceRequest` / `ListWorkspacePreferencesResponse`, `TaskPriority`.
+
+### Goal Mode — autonomous session lifecycle (T-27)
+
+The deck can now create, pause, resume, and cancel autonomous multi-turn goals through the SDK's `goalRuntime`, not just react to manual prompts turn by turn.
+
+- **`/goal <objective>`** starts an autonomous goal on the active session; **`/goal pause|resume|cancel`** controls it. New per-session `GoalModeBridge` (`apps/server/src/bridge/goal-mode-bridge.ts`) wraps the SDK runtime: create / pause / resume / cancel, plus persistence hydration on resume.
+- **Header status + progress** display live goal state, with pause/resume/cancel controls next to it.
+- **Mutually exclusive with Plan Mode.** Enabling Plan Mode pauses (not drops) a live goal; creating or resuming a goal exits Plan Mode first; Cancel aborts a streaming goal before dropping it, then restores the previous tool set.
+- **Resume restores paused, not running.** On session resume, a previously-active persisted goal comes back paused via `goalRuntime.onThreadResumed()` — it never silently resumes autonomous execution behind your back.
+- `goal-start` and `goal-continuation` are hidden synthetic messages, so autonomous turns never render as if you'd typed them manually in the composer.
+- New protocol: `GoalModeContextWire` on the session snapshot, plus WS action transport for create/pause/resume/cancel.
+
+### Kanban workspace presentation (T-17/T-18)
+
+- **Workspace color markers.** Board inspector lets you assign an explicit hex color per workspace `cwd`; task cards (including the drag overlay) show a colored dot for any workspace you've mapped. Deliberately no default/hash color — an unmapped workspace stays visually unmarked. Mapping is a browser-local preference (`omp-deck:project-colors` in `localStorage`), synced live across tabs via the `storage` event.
+- **Kanban header workspace filter.** Selector lists every distinct task `cwd`, filters cards and sidebar counts to it, and scopes new cards to the selected workspace. Selection lives in `sessionStorage` (`omp-deck:tasks:workspace-filter`) — per browser session, not persisted across restarts. Fixed-width selector truncates long paths from the front (via `shortPath`) so the column never resizes; full path stays available as a tooltip.
+
+### Multi-tab / multi-browser session continuity (T-45, T-52)
+
+- **`/c/:sessionId` deep-link routing.** The active session is now addressable by URL instead of living only in in-memory client state. Reloading the tab, restoring a closed tab, or pasting the URL into a second browser all reconnect to the same session and pick up its live event stream — the server already fanned out one session to multiple WS subscribers, the gap was purely client-side addressing. A bare `/` restores the last-active session from a `localStorage`-backed key.
+- **Transparent resume-on-reconnect.** If a `subscribe` attempt comes back "session not active" (idle-reaped, or the server restarted) for a session that still exists on disk, the client resumes it transparently via `resumeFromPath` instead of leaving the tab stuck — this is what makes "the agent keeps running in the background even after you close the tab" actually true from the UI, on top of the idle-reap grace that already made it true server-side.
+- **Live rename/model sync across tabs.** `PATCH /sessions/:id` now broadcasts a new `sessions_changed` ServerFrame after a successful rename or model change. Sidebar and `SessionPicker` refetch on the frame (same pattern as `tasks_changed` / `skills_changed` / `kb_changed`); an already-open `ChatHeader` in another tab also picks up the new name instead of showing a stale one.
+
+### Chat polish (T-46, T-49)
+
+- **Pinned todos panel.** New "Todos" toggle in the chat header (next to the tool-cards collapse toggle) pins the session's live todo state between the header and the scroll area. Off by default; shows nothing at all — not even a "no todos" placeholder — until toggled AND the session actually has todo phases.
+- **Scroll-to-bottom button.** A floating down-arrow appears over the chat scroll area whenever you've scrolled more than 100px up from the bottom. Click jumps back to the bottom and re-arms the existing sticky auto-scroll behavior; new messages while you're scrolled up never yank you back down.
+
+### Workspace picker — arbitrary path + folder browse (T-19)
+
+- **`+ New path…`** option in the workspace `<select>` (Sidebar + SessionPicker, placed right after the default option) swaps the dropdown for a free-text absolute-path input, with a **Browse…** folder dialog (`DirBrowserModal`, backed by new `GET /fs/browse?path=`) as an alternative to typing it blind. Listing is immediate-subdirectories-only, dotdirs hidden, sandboxed to `$HOME` with "Up" disabled at the root.
+- **Server-side validation.** `POST /sessions` rejects (400) a caller-supplied `cwd` that fails `isCwdAllowed` (must exist, be a directory, resolve under `$HOME`) — only for explicitly-supplied cwds, never the trusted default or resume flow. The picker's `alert()` now surfaces the server's real `{ error }` message instead of a raw HTTP body.
+- New workspaces show up in `/api/workspaces` automatically once a session exists there — no separate "known workspaces" store to maintain.
+
+### Settings
+
+- **Configurable stop-streaming shortcut.** The "stop streaming" keybinding was hardcoded to Ctrl+/ (itself a fix for an earlier Ctrl+. collision with fcitx5's emoji picker). Since IME bindings can't be enumerated in advance, the key is now user-configurable instead: Settings → Appearance → Keyboard shortcuts, click Change, press any single key (Esc cancels), with a "Reset to default" once you've diverged from `/`. Persisted per-browser in `localStorage`.
+
+### Fixed
+
+- **Orphaned session handle on resume/create collision.** A resume/create call for a `sessionId` already tracked in the bridge's active map silently overwrote that map entry, orphaning the previous handle — its subscriptions and any in-flight turn kept running forever with no way to reach or abort it. The superseded instance is now disposed before being replaced, so at most one in-process handle ever drives a given session file.
+
+### Docs
+
+- `README.md` — "What you get" gains Goal Mode and multi-tab session continuity; feature comparison table unchanged (still deck-vs-competitor scope, not a full feature log).
+- `docs/tui-parity.md` — Goal Mode added to "What omp-deck adds on top of the TUI"; multi-session sidebar note updated with deep-link reconnect; kanban bullet updated with workspace color markers + filter.
+- `docs/architecture.md` — `sessions_changed` added to the broadcast-frame list; `workspace_preferences` and `tasks.priority` documented in the database table inventory.
+- `docs/slash-commands.md` — new `/goal` section alongside `/plan`.
+- `docs/configuration.md` — no new env vars this round (workspace model defaults and the abort shortcut are both UI-configured, not env-driven); new "Browser-local settings" table cross-references both instead of duplicating env-var-shaped docs for non-env settings.
+
 ## [0.6.1] — 2026-05-29 — In-app update notification
 
 Small follow-up to v0.6.0. Adds a passive update-check pill in the StatusBar so future releases (this one and onward) become discoverable from inside the deck instead of requiring users to run `npm outdated -g`.

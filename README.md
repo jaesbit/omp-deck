@@ -42,6 +42,8 @@ omp-deck is the cockpit that holds all of that. The chat surface stays at parity
 
 **Plan mode** — Shift+Tab in the composer (or `/plan`) flips the active session into read-only-with-resolve mode. The agent investigates, drafts a plan, and surfaces it for your approval. Edit before approving, reject if it's wrong, or hit Approve and watch it execute with full tools restored. Borrowed verbatim from the TUI; brought to where the rest of your workflow lives.
 
+**Goal Mode** — `/goal <objective>` hands a session an autonomous multi-turn objective instead of one prompt at a time. Pause, resume, or cancel from the header; mutually exclusive with Plan Mode (enabling one pauses the other). Resuming a session always restores a goal paused, never silently running.
+
 **An inbox you can dump into.** Scratch ideas, bug reports, decisions to revisit. One-click promote to task when the dust settles. No mental context-switch from current work.
 
 **A knowledge base over your own markdown.** Point `/kb` at a `~/kb` directory you already keep (or accept the default), and the deck gives you a tree, viewer, editor, Obsidian-style force-directed graph, full-text search, `[[wikilink]]` resolution + create-on-click. Long-term memory that's plaintext-portable and outlives any agent session.
@@ -50,7 +52,7 @@ omp-deck is the cockpit that holds all of that. The chat surface stays at parity
 
 **A messaging bridge to your phone.** Telegram now (Slack / Discord / Matrix on the roadmap). DM the agent from anywhere; replies stream live via `editMessageText`. Allowlist-gated so only you (and whoever you invite) can drive it.
 
-**Multi-session.** The chat sidebar lists every session you have open, plus the persisted ones you can resume. Each gets its own kanban scope, its own model, its own queued prompts. Switch between them without losing place.
+**Multi-session.** The chat sidebar lists every session you have open, plus the persisted ones you can resume. Each gets its own kanban scope, its own model, its own queued prompts. Switch between them without losing place. Every session is addressable by URL (`/c/:sessionId`) — reload the tab, reopen a closed one, or paste the link into a second browser and it reconnects to the same live session instead of stranding you at the picker.
 
 **A marketplace.** Browse, install, and uninstall skills/plugins/MCPs over the SDK's plugin format. Empty state seeds with `anthropics/claude-plugins-official` so you're never staring at an empty page.
 
