@@ -267,7 +267,7 @@ describe("PlanModeBridge", () => {
 		await expect(handler({ action: "apply", reason: "ready" })).rejects.toThrow(/Plan file not found/i);
 	});
 
-	it("approve happy path: broadcasts proposal, renames, restores tools, queues followUp", async () => {
+	it("approve happy path: broadcasts proposal, keeps plan path, restores tools, queues followUp", async () => {
 		await harness.bridge.enter();
 		await fs.writeFile(harness.planFile, "# My feature\n\nDo a thing.\n");
 
@@ -299,12 +299,11 @@ describe("PlanModeBridge", () => {
 		const result = await resultPromise;
 		expect(result.details.action).toBe("apply");
 		expect(result.details.sourceToolName).toBe("plan_approval");
-		expect(result.details.sourceResultDetails?.finalPlanFilePath).toBe("local://My-feature.md");
+		expect(result.details.sourceResultDetails?.planFilePath).toBe("local://PLAN.md");
 		expect(result.details.sourceResultDetails?.planExists).toBe(true);
 
-		// File renamed on disk.
-		await expect(fs.access(path.join(harness.dir, "local", "My-feature.md"))).resolves.toBeNull();
-		await expect(fs.access(harness.planFile)).rejects.toThrow();
+		// Plan file stays at original path — the SDK no longer renames on approval.
+		await expect(fs.access(harness.planFile)).resolves.toBeNull();
 
 		// Tools restored.
 		const lastSet = harness.session.setActiveToolsCalls.at(-1);
@@ -321,7 +320,7 @@ describe("PlanModeBridge", () => {
 		expect(harness.session.promptCalls.length).toBe(1);
 		const queued = harness.session.promptCalls[0]!;
 		expect(queued.text).toMatch(/Plan approved\. You MUST execute it now\./);
-		expect(queued.text).toMatch(/local:\/\/My-feature\.md/);
+		expect(queued.text).toMatch(/local:\/\/PLAN\.md/);
 		expect(queued.options?.streamingBehavior).toBe("followUp");
 
 		// Marker for the SDK that the post-approval reference has been emitted.
@@ -342,7 +341,7 @@ describe("PlanModeBridge", () => {
 		expect(harness.frames.length).toBeGreaterThan(initialFrameCount);
 	});
 
-	it("approve with edited content writes back before rename", async () => {
+	it("approve with edited content writes back to plan file", async () => {
 		await harness.bridge.enter();
 		await fs.writeFile(harness.planFile, "# Orig\n");
 
@@ -358,12 +357,13 @@ describe("PlanModeBridge", () => {
 		});
 		await resultPromise;
 
-		const renamed = await fs.readFile(path.join(harness.dir, "local", "Edited-plan.md"), "utf-8");
-		expect(renamed).toBe("# Replaced\n\nNew body.\n");
+		// Plan file stays at original path — the SDK no longer renames on approval.
+		const updated = await fs.readFile(harness.planFile, "utf-8");
+		expect(updated).toBe("# Replaced\n\nNew body.\n");
 		expect(harness.session.promptCalls[0]!.text).toMatch(/New body\./);
 	});
 
-	it("approve honors a sanitized client-supplied finalPath", async () => {
+	it("approve ignores client-supplied finalPath (SDK no longer renames)", async () => {
 		await harness.bridge.enter();
 		await fs.writeFile(harness.planFile, "# Whatever\n");
 
@@ -376,11 +376,12 @@ describe("PlanModeBridge", () => {
 			finalPath: "local://custom_name.md",
 		});
 		const result = await resultPromise;
-		expect(result.details.sourceResultDetails?.finalPlanFilePath).toBe("local://custom_name.md");
-		await expect(fs.access(path.join(harness.dir, "local", "custom_name.md"))).resolves.toBeNull();
+		// Plan file stays at original path; finalPath is no longer honored.
+		expect(result.details.sourceResultDetails?.planFilePath).toBe("local://PLAN.md");
+		await expect(fs.access(harness.planFile)).resolves.toBeNull();
 	});
 
-	it("approve falls back to suggested path when finalPath fails sanitization", async () => {
+	it("approve ignores malicious finalPath (SDK no longer renames)", async () => {
 		await harness.bridge.enter();
 		await fs.writeFile(harness.planFile, "# Yo\n");
 
@@ -388,13 +389,13 @@ describe("PlanModeBridge", () => {
 		const proposed = harness.frames.find(
 			(f): f is Extract<PlanModeFrame, { type: "plan_proposed" }> => f.type === "plan_proposed",
 		)!;
-		// `..` path-escape attempt; bridge must reject it and use the suggested path.
+		// `..` path-escape attempt; bridge ignores finalPath, file stays at original path.
 		harness.bridge.respond(proposed.proposalId, {
 			approved: true,
 			finalPath: "local://../escape.md",
 		});
 		const result = await resultPromise;
-		expect(result.details.sourceResultDetails?.finalPlanFilePath).toBe("local://fallback-case.md");
+		expect(result.details.sourceResultDetails?.planFilePath).toBe("local://PLAN.md");
 	});
 
 	it("reject path exits plan mode, broadcasts rejected resolution, and surfaces a rejection result", async () => {
