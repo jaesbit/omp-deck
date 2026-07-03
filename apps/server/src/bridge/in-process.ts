@@ -5,6 +5,7 @@ import {
 	settings as ompSettings,
 	type AgentSession,
 } from "@oh-my-pi/pi-coding-agent";
+import { getLatestTodoPhasesFromEntries } from "@oh-my-pi/pi-coding-agent/tools/todo-write";
 import { getEnvApiKey } from "@oh-my-pi/pi-ai";
 import { runExtensionCompact, runExtensionSetModel } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/compact-handler";
 import { getSessionSlashCommands } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/get-commands-handler";
@@ -769,7 +770,9 @@ export class InProcessSessionHandle implements SessionHandle {
 			thinkingLevel: typeof s.thinkingLevel === "string" ? s.thinkingLevel : undefined,
 			isStreaming: Boolean(s.isStreaming),
 			messages: Array.isArray(s.messages) ? (s.messages as AgentMessageJson[]) : [],
-			todoPhases: typeof s.getTodoPhases === "function" ? s.getTodoPhases() : [],
+			// The SDK's live todo cache auto-clears completed tasks, while the session
+			// entries retain the latest list for reconnects and snapshots.
+			todoPhases: getLatestTodoPhasesFromEntries(this.sessionManager.getBranch()) as unknown as Array<Record<string, unknown>>,
 		};
 		if (usage) snap.contextUsage = usage;
 		const planMode = this.planBridge.getPlanModeContext();

@@ -190,7 +190,10 @@ export function applyEvent(state: SessionUi, event: AgentSessionEventJson): Sess
 			return { ...state, todoPhases: normalizeTodoPhases(phases) };
 		}
 		case "todo_auto_clear":
-			return { ...state, todoPhases: [] };
+			// The SDK clears completed tasks from its live cache after a delay, but
+			// the deck should keep the last rendered list until a new todo_write
+			// explicitly replaces it.
+			return state;
 
 		// ─── Compaction / retry / TTSR ────────────────────────────────────
 		case "auto_compaction_start":

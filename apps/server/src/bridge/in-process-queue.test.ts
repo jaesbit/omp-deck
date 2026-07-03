@@ -78,12 +78,12 @@ class StubSession {
 	async dispose(): Promise<void> {}
 }
 
-function makeHandle(): { handle: InProcessSessionHandle; session: StubSession; emitted: unknown[] } {
+function makeHandle(branch: unknown[] = []): { handle: InProcessSessionHandle; session: StubSession; emitted: unknown[] } {
 	const session = new StubSession();
 	const emitted: unknown[] = [];
 	const handle = new InProcessSessionHandle({
 		session: session as unknown as never,
-		sessionManager: {} as never,
+		sessionManager: { getBranch: () => branch } as never,
 		cwd: "/tmp/stub",
 		sessionId: "stub-1",
 		getModelRegistry: async () => ({}) as never,
@@ -215,5 +215,25 @@ describe("InProcessSessionHandle queue shadow", () => {
 		const snap = handle.snapshot();
 		expect(snap.queuedPrompts).toHaveLength(1);
 		expect(snap.queuedPrompts?.[0]).toMatchObject({ text: "queued-once", behavior: "followUp" });
+	});
+
+	test("snapshot keeps the latest completed todo list from session entries", () => {
+		const { handle } = makeHandle([
+			{
+				type: "message",
+				message: {
+					role: "toolResult",
+					toolName: "todo_write",
+					isError: false,
+					details: {
+						phases: [{ name: "Done", tasks: [{ content: "Ship it", status: "completed" }] }],
+					},
+				},
+			},
+		]);
+
+		expect(handle.snapshot().todoPhases).toEqual([
+			{ name: "Done", tasks: [{ content: "Ship it", status: "completed" }] },
+		]);
 	});
 });
