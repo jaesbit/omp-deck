@@ -133,6 +133,20 @@ describe("reducer todo_phases_set (T-106)", () => {
 		expect(s.todoPhases).toEqual([]);
 	});
 
+	test("preserves the last todo list when SDK auto-clear fires", () => {
+		let s = fresh();
+		s = applyEvent(s, {
+			type: "todo_phases_set",
+			todoPhases: [{ name: "Done", tasks: [{ content: "Ship it", status: "completed" }] }],
+		} as never);
+
+		s = applyEvent(s, { type: "todo_auto_clear" } as never);
+
+		expect(s.todoPhases).toEqual([
+			{ name: "Done", tasks: [{ content: "Ship it", status: "completed" }] },
+		]);
+	});
+
 	test("missing todoPhases payload is treated as empty (defensive)", () => {
 		let s = fresh();
 		s = applyEvent(s, { type: "todo_phases_set" } as never);
