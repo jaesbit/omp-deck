@@ -1047,7 +1047,7 @@ export class InProcessSessionHandle implements SessionHandle {
 		}
 		// Kick off re-enqueues synchronously so each `session.prompt` sync
 		// prelude sees `isStreaming = true`. Collect promises; await later.
-		const promises: Promise<void>[] = [];
+		const promises: Promise<boolean>[] = [];
 		for (const entry of survivors) {
 			const opts: Record<string, unknown> = { streamingBehavior: entry.behavior };
 			if (entry.images && entry.images.length > 0) opts.images = entry.images;

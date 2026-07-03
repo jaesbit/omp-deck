@@ -50,7 +50,6 @@ import type { AgentToolResult } from "@oh-my-pi/pi-coding-agent/extensibility/ex
 import { resolveLocalUrlToPath } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import {
 	type PlanApprovalDetails,
-	renameApprovedPlanFile,
 	resolvePlanTitle,
 } from "@oh-my-pi/pi-coding-agent/plan-mode/approved-plan";
 import { type ResolveToolDetails, runResolveInvocation } from "@oh-my-pi/pi-coding-agent/tools/resolve";
@@ -97,7 +96,7 @@ const PLAN_APPROVED_PROMPT_TEMPLATE = `<critical>
 Plan approved. You MUST execute it now.
 </critical>
 
-Finalized plan artifact: \`{{finalPlanFilePath}}\`
+Finalized plan artifact: \`{{planFilePath}}\`
 Context preserved. Use conversation history when useful; the finalized plan is the source of truth if it conflicts with earlier exploration.
 
 ## Plan
@@ -105,7 +104,7 @@ Context preserved. Use conversation history when useful; the finalized plan is t
 {{planContent}}
 
 <instruction>
-You MUST execute this plan step by step from \`{{finalPlanFilePath}}\`. You have full tool access.
+You MUST execute this plan step by step from \`{{planFilePath}}\`. You have full tool access.
 You MUST verify each step before proceeding to the next.
 Before execution, initialize todo tracking with \`todo_write\`.
 After each completed step, immediately update \`todo_write\`.
@@ -452,30 +451,21 @@ export class PlanModeBridge {
 						],
 						details: {
 							planFilePath: planFilePathAtApproval,
-							finalPlanFilePath: suggestedFinalPath,
 							title: normalized.title,
 							planExists: true,
 						} satisfies PlanApprovalDetails,
 					};
 				}
 
-				// Approve path: optionally write edited content, rename
-				// PLAN.md → final, exit plan mode, queue the synthetic
-				// approved-prompt for the next turn.
+				// Approve path: optionally write edited content, exit plan
+				// mode, queue the synthetic approved-prompt for the next turn.
+				// The SDK no longer renames plan files on approval —
+				// planFilePath is stable throughout the session.
 				let finalContent = planContent;
 				if (typeof userResponse.editedContent === "string") {
 					await this.#writePlanFile(planFilePathAtApproval, userResponse.editedContent);
 					finalContent = userResponse.editedContent;
 				}
-
-				const finalPlanFilePath = sanitizeFinalPath(userResponse.finalPath) ?? suggestedFinalPath;
-
-				await renameApprovedPlanFile({
-					planFilePath: planFilePathAtApproval,
-					finalPlanFilePath,
-					getArtifactsDir: this.getArtifactsDir,
-					getSessionId: this.getSessionId,
-				});
 
 				this.#broadcast({
 					type: "plan_proposal_resolved",
@@ -489,7 +479,7 @@ export class PlanModeBridge {
 				this.session.markPlanReferenceSent();
 				const approvedPrompt = renderApprovedPrompt({
 					planContent: finalContent,
-					finalPlanFilePath,
+					planFilePath: planFilePathAtApproval,
 				});
 
 				// Fire-and-forget: the resolve tool is still streaming at
@@ -510,13 +500,12 @@ export class PlanModeBridge {
 					content: [
 						{
 							type: "text" as const,
-							text: `Plan approved. Executing from ${finalPlanFilePath}.`,
+							text: `Plan approved. Executing from ${planFilePathAtApproval}.`,
 						},
 					],
 					details: {
 						planFilePath: planFilePathAtApproval,
-						finalPlanFilePath,
-						title: stripMdExtension(extractFileName(finalPlanFilePath)),
+						title: stripMdExtension(extractFileName(planFilePathAtApproval)),
 						planExists: true,
 					} satisfies PlanApprovalDetails,
 				};
@@ -552,11 +541,11 @@ export class PlanModeBridge {
 	}
 }
 
-function renderApprovedPrompt(args: { planContent: string; finalPlanFilePath: string }): string {
+function renderApprovedPrompt(args: { planContent: string; planFilePath: string }): string {
 	return PLAN_APPROVED_PROMPT_TEMPLATE.replaceAll(
 		"{{planContent}}",
 		args.planContent,
-	).replaceAll("{{finalPlanFilePath}}", args.finalPlanFilePath);
+	).replaceAll("{{planFilePath}}", args.planFilePath);
 }
 
 /**
