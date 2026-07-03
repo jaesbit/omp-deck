@@ -1691,7 +1691,7 @@ export interface ListRoutineRunsResponse {
 // Slash commands (discovered from ~/.omp/agent/commands/ + project overrides)
 // ─────────────────────────────────────────────────────────────────────────────
 
-export type SlashCommandScope = "user" | "project" | "builtin" | "deck";
+export type SlashCommandScope = "user" | "project" | "builtin" | "deck" | "skill";
 
 export interface SlashSubcommand {
 	name: string;

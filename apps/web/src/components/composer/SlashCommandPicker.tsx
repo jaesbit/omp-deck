@@ -23,6 +23,11 @@ const SCOPE_STYLE: Record<SlashCommandScope, { className: string; label: string;
 		label: "user",
 		title: "User-global command",
 	},
+	skill: {
+		className: "bg-thinking/15 text-thinking",
+		label: "skill",
+		title: "Skill invocation — injects the skill's SKILL.md body as your message (T-21)",
+	},
 };
 
 interface Props {

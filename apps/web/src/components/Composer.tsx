@@ -11,6 +11,8 @@ import {
 import type { FilePathMatch, SlashCommand } from "@omp-deck/protocol";
 
 import { api } from "@/lib/api";
+import { skillsApi } from "@/lib/skills-api";
+import { mapSkillsToSlashCommands } from "@/lib/skill-commands";
 import { FilePathPicker } from "@/components/composer/FilePathPicker";
 import { SlashCommandPicker } from "@/components/composer/SlashCommandPicker";
 import { Paperclip, ArrowUp, Square, X } from "lucide-react";
@@ -29,10 +31,15 @@ const MAX_PENDING_IMAGES = 8;
 const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
 
 /**
- * Per-cwd cache of discovered slash commands so re-mounting the composer
- * (route change between Chat / Tasks / etc., HMR) doesn't re-fetch. The
- * server response is cheap, but in dev the network panel filling up with
- * `/api/slash-commands` calls on every Vite reload is noise.
+ * Per-cwd cache of discovered slash commands (SDK builtins + user/project
+ * `.md` commands + skills projected to `skill:<name>` rows, T-21) so
+ * re-mounting the composer (route change between Chat / Tasks / etc., HMR)
+ * doesn't re-fetch. The server responses are cheap, but in dev the network
+ * panel filling up with `/api/slash-commands` + `/api/skills` calls on every
+ * Vite reload is noise. Deliberately not invalidated by `skillsChangeCounter`
+ * — a live skill edit while the composer is mounted just waits for the next
+ * cwd switch / remount to show up, same tradeoff the plain slash-command
+ * half of this cache already makes.
  */
 const slashCommandsCache = new Map<string, SlashCommand[]>();
 
@@ -87,15 +94,23 @@ export function Composer() {
 			return;
 		}
 		let cancelled = false;
-		void api
-			.listSlashCommands(sessionCwd)
-			.then((res) => {
+		// Skills fetch is best-effort: a `/api/skills` failure (e.g. a
+		// misconfigured provider dir) shouldn't blank the whole picker — it just
+		// means skill entries don't show up alongside the SDK/user/project
+		// commands that did load.
+		void Promise.allSettled([api.listSlashCommands(sessionCwd), skillsApi.list(sessionCwd)])
+			.then(([slashResult, skillsResult]) => {
 				if (cancelled) return;
-				slashCommandsCache.set(sessionCwd, res.commands);
-				setSlashCommands(res.commands);
-			})
-			.catch((err) => {
-				if (!cancelled) console.warn("listSlashCommands failed", err);
+				if (slashResult.status === "rejected") {
+					console.warn("listSlashCommands failed", slashResult.reason);
+					return;
+				}
+				const skillCommands =
+					skillsResult.status === "fulfilled" ? mapSkillsToSlashCommands(skillsResult.value.skills) : [];
+				if (skillsResult.status === "rejected") console.warn("skillsApi.list failed", skillsResult.reason);
+				const merged = [...slashResult.value.commands, ...skillCommands];
+				slashCommandsCache.set(sessionCwd, merged);
+				setSlashCommands(merged);
 			});
 		return () => {
 			cancelled = true;

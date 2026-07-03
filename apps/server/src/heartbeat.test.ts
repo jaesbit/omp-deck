@@ -19,6 +19,8 @@ import { HEARTBEAT_INTERVAL_MS, WsHub } from "./ws.ts";
 // Minimal AgentBridge stub — heartbeat path doesn't touch any bridge methods,
 // so an empty object satisfies the constructor's type bound at runtime.
 const stubBridge = {} as unknown as ConstructorParameters<typeof WsHub>[0];
+// Minimal SkillsService stub — heartbeat path never touches it either.
+const stubSkills = {} as unknown as ConstructorParameters<typeof WsHub>[1];
 
 describe("WsHub heartbeat", () => {
 	test("HEARTBEAT_INTERVAL_MS is a sensible value (5-30s)", () => {
@@ -32,7 +34,7 @@ describe("WsHub heartbeat", () => {
 			if (frame.type === "heartbeat") frames.push(frame);
 		});
 
-		const hub = new WsHub(stubBridge);
+		const hub = new WsHub(stubBridge, stubSkills);
 		try {
 			// Wait long enough for at least one tick of the real interval. Cap at
 			// 7s so the test fails fast if the timer isn't firing rather than
@@ -63,7 +65,7 @@ describe("WsHub heartbeat", () => {
 		const unsub = broadcastBus.subscribe((f) => {
 			if (f.type === "heartbeat") before.push(f);
 		});
-		const hub = new WsHub(stubBridge);
+		const hub = new WsHub(stubBridge, stubSkills);
 		hub.dispose();
 		// Give the loop a tick + a margin; no heartbeats expected.
 		await new Promise((r) => setTimeout(r, HEARTBEAT_INTERVAL_MS + 500));

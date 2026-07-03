@@ -137,6 +137,22 @@ export class SkillsService {
 	}
 
 	/**
+	 * Look up a skill by its slash-invocation name (frontmatter `name`, falls
+	 * back to dir name — same value the `/skill:<name>` composer picker and
+	 * the SDK's own `getSkillSlashCommandName` key off of). Used by the WS
+	 * layer's `/skill:` interception (`ws.ts`'s `handlePrompt`) to resolve the
+	 * skill body it injects. Exact match only — no fuzzy/partial lookup, so a
+	 * near-miss typo falls through to being sent as literal prompt text
+	 * instead of silently invoking the wrong skill.
+	 */
+	async getSkillDetailByName(name: string, cwd?: string): Promise<SkillDetailResponse | undefined> {
+		const list = await this.listSkills(cwd);
+		const summary = list.skills.find((s) => s.name === name);
+		if (!summary) return undefined;
+		return this.getSkillDetail(summary.id, cwd);
+	}
+
+	/**
 	 * Build a `{ installPath -> { id, name, marketplace } }` index so skills
 	 * whose source path lives under a marketplace install can be attributed
 	 * to their owning plugin. Reads through `MarketplaceService.listInstalled`
