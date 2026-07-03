@@ -52,6 +52,24 @@ function readString(key: string, fallback: string): string {
 	return localStorage.getItem(key) || fallback;
 }
 
+/** Last-active session id (T-52), keyed separately from the chrome-state
+ * booleans above so a brand-new tab pointed at the bare origin — not a
+ * specific `/c/:id` URL — still reconnects to whatever was last open, the
+ * same way browser tab-restore already does via the URL itself. Kept in
+ * sync with `activeId` by the `useStore.subscribe` call below, and read
+ * once here to seed the store's initial state. */
+const LAST_SESSION_STORAGE_KEY = "omp-deck:last-session-id";
+
+function readLastSessionId(): string | undefined {
+	if (typeof localStorage === "undefined") return undefined;
+	return localStorage.getItem(LAST_SESSION_STORAGE_KEY) || undefined;
+}
+
+/** Session ids `resumeIfKnown` has already attempted once this tab. Module
+ * state, not store state — it's a de-dupe guard, not something a view
+ * should ever render off of. */
+const resumeAttempted = new Set<string>();
+
 /** Ctrl/Cmd+`/` — was `Ctrl+.` (ChatGPT/VS Code's "stop generating" convention)
  * until it collided with fcitx5's built-in emoji-picker binding on one
  * setup. Configurable per-browser in Settings → Appearance; this is only the
@@ -215,6 +233,13 @@ interface StoreState {
 	/** Edit a queued prompt's text (and optionally images) in place. */
 	editQueued(queuedId: string, text: string, images?: import("@omp-deck/protocol").ImageAttachment[]): void;
 	disposeSession(id: string): Promise<void>;
+	/** Auto-resume a session a `subscribe` attempt found inactive (idle-
+	 *  reaped, or the server restarted) but that still exists on disk.
+	 *  No-op past the first attempt per id in this tab; clears `activeId`
+	 *  if it turns out the id doesn't exist at all. Called from the `error`
+	 *  frame handler below, not meant to be invoked directly by views. See
+	 *  T-52. */
+	resumeIfKnown(id: string): Promise<void>;
 	renameSession(id: string, name: string): Promise<void>;
 	toggleAllToolCards(): void;
 	setToolCardOpen(id: string, open: boolean): void;
@@ -259,6 +284,7 @@ export const useStore = create<StoreState>()(
 		defaultCwd: "",
 		sessions: [],
 		sessionsById: {},
+		activeId: readLastSessionId(),
 		subscribed: new Set<string>(),
 		toolView: { allCollapsed: false, perCard: {} },
 		todoPanelOpen: false,
@@ -405,6 +431,32 @@ export const useStore = create<StoreState>()(
 					activeId: s.activeId === id ? undefined : s.activeId,
 				};
 			});
+		},
+
+		async resumeIfKnown(id: string) {
+			if (resumeAttempted.has(id)) return;
+			resumeAttempted.add(id);
+			let persisted = get().sessions.find((row) => row.id === id);
+			if (!persisted) {
+				await get().refreshSessions();
+				persisted = get().sessions.find((row) => row.id === id);
+			}
+			if (!persisted) {
+				// Truly unknown or deleted — stop pointing the UI at a dead id
+				// instead of leaving the tab stuck on a blank screen.
+				set((s) => (s.activeId === id ? { activeId: undefined } : {}));
+				return;
+			}
+			// The failed subscribe already marked `id` as "subscribed" for this
+			// connection; clear that so the post-resume `createSession` call
+			// below can send a fresh `subscribe` once the new handle exists.
+			get().subscribed.delete(id);
+			try {
+				await get().createSession({ cwd: persisted.cwd, resumeFromPath: persisted.path });
+			} catch (err) {
+				console.warn(`auto-resume failed for ${id}`, err);
+				set((s) => (s.activeId === id ? { activeId: undefined } : {}));
+			}
 		},
 
 		async renameSession(id, name) {
@@ -557,6 +609,22 @@ export const useStore = create<StoreState>()(
 	})),
 );
 
+// Mirror `activeId` into localStorage (T-52) so a brand-new tab pointed at
+// the bare origin — not a specific `/c/:id` URL — reconnects to whatever
+// was last open, the same way browser tab-restore already does via the URL
+// itself (see `useSessionRoute`/`readLastSessionId`).
+useStore.subscribe(
+	(s) => s.activeId,
+	(activeId) => {
+		try {
+			if (activeId) localStorage.setItem(LAST_SESSION_STORAGE_KEY, activeId);
+			else localStorage.removeItem(LAST_SESSION_STORAGE_KEY);
+		} catch {
+			/* localStorage unavailable (private mode) — non-fatal */
+		}
+	},
+);
+
 function handleFrame(
 	frame: ServerFrame,
 	set: (partial: Partial<StoreState> | ((s: StoreState) => Partial<StoreState>)) => void,
@@ -694,20 +762,30 @@ function handleFrame(
 			});
 			return;
 
-		case "error":
-			set((s) => {
-				const id = frame.sessionId;
-				if (!id) return {};
-				const prev = s.sessionsById[id];
-				if (!prev) return {};
-				return {
+		case "error": {
+			const id = frame.sessionId;
+			if (!id) return;
+			const prev = get().sessionsById[id];
+			if (prev) {
+				set((s) => ({
 					sessionsById: {
 						...s.sessionsById,
 						[id]: { ...prev, lastError: frame.error },
 					},
-				};
-			});
+				}));
+				return;
+			}
+			// No local snapshot yet: this was a `subscribe` attempt against a
+			// session this server process doesn't currently have running
+			// (idle-reaped, or the server restarted since the tab last saw
+			// it). Transparently resume it from disk if it's a session we
+			// know about, instead of leaving the tab stuck on a blank state
+			// (T-52).
+			if (frame.error === "session not active") {
+				void get().resumeIfKnown(id);
+			}
 			return;
+		}
 
 		case "heartbeat":
 			set(() => ({

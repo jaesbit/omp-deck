@@ -46,6 +46,7 @@ const router = createBrowserRouter([
 		element: <OnboardingGate />,
 		children: [
 			{ path: "/", element: <ChatView /> },
+			{ path: "/c/:sessionId", element: <ChatView /> },
 			{ path: "/tasks", element: <TasksView /> },
 			{ path: "/routines", element: <RoutinesView /> },
 			{ path: "/routines/:id/runs/:runId", element: <RunDetailView /> },
