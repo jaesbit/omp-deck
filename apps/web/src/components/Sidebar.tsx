@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Plus, RefreshCw } from "lucide-react";
+import { Plus, RefreshCw, Trash2 } from "lucide-react";
 import { SessionLaunchModal, type SessionLaunchOpts } from "@/components/chat/SessionLaunchModal";
 import { launchSession } from "@/lib/first-prompt";
 import { useStore } from "@/lib/store";
@@ -17,6 +17,7 @@ export function Sidebar() {
 	const setPendingDraft = useStore((s) => s.setPendingDraft);
 	const selectSession = useStore((s) => s.selectSession);
 	const sessionsChangeCounter = useStore((s) => s.sessionsChangeCounter);
+	const deleteSession = useStore((s) => s.deleteSession);
 
 	const [selectedCwd, setSelectedCwd] = useState<string>("");
 	const [launchOpen, setLaunchOpen] = useState(false);
@@ -46,6 +47,14 @@ export function Sidebar() {
 			console.error(err);
 			alert(`Failed to resume: ${String(err)}`);
 		}
+	}
+
+	// Trash-icon action on each row (T-47). Destructive + irreversible — the
+	// server drops the `.jsonl` file, not just the in-memory handle — hence
+	// the confirm prompt, matching the resume-failure `alert()` pattern above.
+	function handleDelete(id: string): void {
+		if (!window.confirm("Delete this session? This permanently removes its history and cannot be undone.")) return;
+		void deleteSession(id);
 	}
 
 	const liveSessions = Object.values(sessionsById);
@@ -111,6 +120,7 @@ export function Sidebar() {
 				{liveSessions.map((s) => (
 					<SessionRow
 						key={s.sessionId}
+						id={s.sessionId}
 						title={s.sessionName || formatSessionId(s.sessionId)}
 						subtitle={shortPath(s.cwd, 30)}
 						active={s.sessionId === activeId}
@@ -118,6 +128,7 @@ export function Sidebar() {
 						planMode={s.planMode?.enabled === true}
 						goalStatus={s.goalMode?.status}
 						onClick={() => selectSession(s.sessionId)}
+						onDelete={handleDelete}
 					/>
 				))}
 
@@ -128,10 +139,12 @@ export function Sidebar() {
 				{persisted.map((s) => (
 					<SessionRow
 						key={s.id}
+						id={s.id}
 						title={s.title || formatSessionId(s.id)}
 						subtitle={`${shortPath(s.cwd, 26)} · ${s.messageCount}m`}
 						meta={formatRelative(s.updatedAt || s.createdAt)}
 						onClick={() => void handleResume(s.path)}
+						onDelete={handleDelete}
 					/>
 				))}
 
@@ -152,6 +165,7 @@ export function Sidebar() {
 }
 
 function SessionRow({
+	id,
 	title,
 	subtitle,
 	meta,
@@ -160,7 +174,9 @@ function SessionRow({
 	planMode,
 	goalStatus,
 	onClick,
+	onDelete,
 }: {
+	id: string;
 	title: string;
 	subtitle?: string;
 	meta?: string;
@@ -171,48 +187,67 @@ function SessionRow({
 	 * exclusive with `planMode` (a session is never in both at once). */
 	goalStatus?: "active" | "paused" | "budget-limited" | "complete" | "dropped";
 	onClick: () => void;
+	/** Delete this session (trash icon, hover-revealed). Confirms + deletes
+	 *  both live and persisted rows — see `Sidebar`'s `handleDelete`. */
+	onDelete: (id: string) => void;
 }) {
 	return (
-		<button
-			type="button"
-			onClick={onClick}
+		<div
 			className={cn(
-				"group block w-full rounded-md px-2 py-1.5 text-left text-[13px] transition-colors",
+				"group relative rounded-md transition-colors",
 				active ? "bg-paper-3 text-ink" : "text-ink-2 hover:bg-paper-3/60",
 			)}
 		>
-			<div className="flex items-center gap-1.5">
-				{live ? (
-					<span className="h-1.5 w-1.5 shrink-0 rounded-full bg-accent" aria-label="live" />
-				) : (
-					<span className="h-1.5 w-1.5 shrink-0 rounded-full bg-line-strong" />
-				)}
-				<span className="truncate">{title}</span>
-				{planMode ? (
-					<span
-						className="ml-auto shrink-0 rounded border border-thinking/40 bg-thinking/10 px-1 py-px font-mono text-[10px] uppercase tracking-meta text-thinking"
-						title="Plan mode active"
-					>
-						plan
-					</span>
-				) : goalStatus ? (
-					<span
-						className="ml-auto shrink-0 rounded border border-accent/40 bg-accent/10 px-1 py-px font-mono text-[10px] uppercase tracking-meta text-accent"
-						title={`Goal mode — ${goalStatus}`}
-					>
-						goal{goalStatus !== "active" ? `:${goalStatus}` : ""}
-					</span>
-				) : null}
-			</div>
-			{subtitle ? (
-				<div className="mt-0.5 truncate pl-3 font-mono text-2xs text-ink-3">
-					{subtitle}
+			<button
+				type="button"
+				onClick={onClick}
+				className="block w-full rounded-md py-1.5 pl-2 pr-7 text-left text-[13px]"
+			>
+				<div className="flex items-center gap-1.5">
+					{live ? (
+						<span className="h-1.5 w-1.5 shrink-0 rounded-full bg-accent" aria-label="live" />
+					) : (
+						<span className="h-1.5 w-1.5 shrink-0 rounded-full bg-line-strong" />
+					)}
+					<span className="truncate">{title}</span>
+					{planMode ? (
+						<span
+							className="ml-auto shrink-0 rounded border border-thinking/40 bg-thinking/10 px-1 py-px font-mono text-[10px] uppercase tracking-meta text-thinking"
+							title="Plan mode active"
+						>
+							plan
+						</span>
+					) : goalStatus ? (
+						<span
+							className="ml-auto shrink-0 rounded border border-accent/40 bg-accent/10 px-1 py-px font-mono text-[10px] uppercase tracking-meta text-accent"
+							title={`Goal mode — ${goalStatus}`}
+						>
+							goal{goalStatus !== "active" ? `:${goalStatus}` : ""}
+						</span>
+					) : null}
 				</div>
-			) : null}
-			{meta ? (
-				<div className="truncate pl-3 font-mono text-2xs text-ink-4">{meta}</div>
-			) : null}
-		</button>
+				{subtitle ? (
+					<div className="mt-0.5 truncate pl-3 font-mono text-2xs text-ink-3">
+						{subtitle}
+					</div>
+				) : null}
+				{meta ? (
+					<div className="truncate pl-3 font-mono text-2xs text-ink-4">{meta}</div>
+				) : null}
+			</button>
+			<button
+				type="button"
+				onClick={(e) => {
+					e.stopPropagation();
+					onDelete(id);
+				}}
+				className="absolute right-1 top-1.5 shrink-0 rounded p-0.5 text-ink-4 opacity-0 transition-opacity hover:text-danger group-hover:opacity-100"
+				aria-label="Delete session"
+				title="Delete session"
+			>
+				<Trash2 className="h-3.5 w-3.5" />
+			</button>
+		</div>
 	);
 }
 

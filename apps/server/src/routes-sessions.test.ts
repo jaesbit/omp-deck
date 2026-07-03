@@ -18,6 +18,7 @@ import type { Config } from "./config.ts";
 import { closeDb, openDb } from "./db/index.ts";
 import { buildRouter } from "./routes.ts";
 import type { AgentBridge, CreateSessionOpts } from "./bridge/types.ts";
+import { broadcastBus, type BroadcastFrame } from "./broadcast-bus.ts";
 import type { ModelInfo } from "@omp-deck/protocol";
 
 let dbDir: string | null = null;
@@ -42,6 +43,9 @@ function fakeBridge(models: ModelInfo[]): AgentBridge {
 		},
 		async listSessions() {
 			return [];
+		},
+		async deleteSession() {
+			return { deleted: false };
 		},
 		trackSubscriberAdded() {},
 		trackSubscriberRemoved() {},
@@ -265,5 +269,46 @@ describe("PUT /workspace-preferences — T-42", () => {
 		};
 		const entry = workspaces.find((w) => w.cwd === cwd);
 		expect(entry?.defaultModel).toEqual({ provider: "anthropic", id: "claude-good" });
+	});
+});
+
+describe("DELETE /sessions/:id — T-47", () => {
+	test("unknown id 404s without broadcasting", async () => {
+		const frames: BroadcastFrame[] = [];
+		const unsub = broadcastBus.subscribe((f) => frames.push(f));
+		try {
+			const bridge: AgentBridge = {
+				...fakeBridge([]),
+				async deleteSession() {
+					return { deleted: false };
+				},
+			};
+			const app = buildTestApp(bridge, process.cwd());
+			const res = await app.request("/sessions/does-not-exist", { method: "DELETE" });
+			expect(res.status).toBe(404);
+			expect(frames.some((f) => f.type === "sessions_changed")).toBe(false);
+		} finally {
+			unsub();
+		}
+	});
+
+	test("known id (live or persisted) succeeds and broadcasts sessions_changed", async () => {
+		const frames: BroadcastFrame[] = [];
+		const unsub = broadcastBus.subscribe((f) => frames.push(f));
+		try {
+			const bridge: AgentBridge = {
+				...fakeBridge([]),
+				async deleteSession(id: string) {
+					return { deleted: true, sessionPath: `/tmp/${id}.jsonl` };
+				},
+			};
+			const app = buildTestApp(bridge, process.cwd());
+			const res = await app.request("/sessions/sess-1", { method: "DELETE" });
+			expect(res.status).toBe(200);
+			expect(await res.json()).toEqual({ ok: true });
+			expect(frames.some((f) => f.type === "sessions_changed")).toBe(true);
+		} finally {
+			unsub();
+		}
 	});
 });

@@ -24,6 +24,13 @@ export interface AgentBridge {
 	resumeSession(opts: ResumeSessionOpts): Promise<SessionHandle>;
 	getSession(sessionId: string): SessionHandle | undefined;
 	listSessions(opts: { cwd?: string }): Promise<SessionSummary[]>;
+	/**
+	 * Permanently delete a session: dispose any live handle, then drop the
+	 * underlying `.jsonl` file + artifact dir from disk (idempotent — an
+	 * already-gone file is a success, not an error). `deleted: false` means
+	 * the id matched neither a live handle nor the persisted listing.
+	 */
+	deleteSession(sessionId: string): Promise<{ deleted: boolean; sessionPath?: string }>;
 	/** Pin a session against the idle reaper while a client is subscribed. */
 	trackSubscriberAdded(sessionId: string, connectionId: string): void;
 	/** Drop a subscriber; once subscribers hit zero and idle window elapses, the reaper claims it. */
