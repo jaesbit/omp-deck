@@ -5,8 +5,10 @@ import { Composer } from "@/components/Composer";
 import { Inspector } from "@/components/Inspector";
 import { StatusBar } from "@/components/chrome/StatusBar";
 import { ExtUiDialog } from "@/components/chat/ExtUiDialog";
+import { useSessionRoute } from "@/lib/use-session-route";
 
 export function ChatView() {
+	useSessionRoute();
 	return (
 		<>
 			<Layout
