@@ -10,6 +10,7 @@
  */
 
 import { useEffect, useRef, useState } from "react";
+import type { JSX } from "react";
 import { ChevronDown, Plus } from "lucide-react";
 
 import type { RoutineDeckAction, RoutineStep } from "@omp-deck/protocol";

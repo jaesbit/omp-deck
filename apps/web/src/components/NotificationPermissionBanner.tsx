@@ -15,6 +15,7 @@
  *   - Browser doesn't support `Notification` (degrade silently to toasts)
  */
 
+import type { JSX } from "react";
 import { useStore } from "../lib/store";
 import { useNotificationPermission } from "../lib/notifications";
 

@@ -111,7 +111,7 @@ function summarizeArgs(name: string, args: Record<string, unknown>, intent?: str
 			return String(args.agent ?? "");
 		case "generate_image":
 			return truncate(String(args.subject ?? ""), 60);
-		case "todo_write": {
+		case "todo": {
 			const ops = Array.isArray((args as { ops?: unknown[] }).ops)
 				? (args as { ops: { op?: string }[] }).ops
 				: [];
@@ -147,7 +147,7 @@ function renderTool(name: string, props: ToolRendererProps) {
 			return <WebSearchTool {...props} />;
 		case "eval":
 			return <EvalTool {...props} />;
-		case "todo_write":
+		case "todo":
 			return <TodoWriteTool {...props} />;
 		case "generate_image":
 			return <GenerateImageTool {...props} />;

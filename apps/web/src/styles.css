@@ -10,9 +10,8 @@
    below via `[data-theme="slate"] .hljs-…` blocks. */
 @import "highlight.js/styles/atom-one-light.css";
 
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@import "tailwindcss";
+@config "../tailwind.config.ts";
 
 /* ─── Themes ────────────────────────────────────────────────────────────────
    Tokens are space-separated R G B triplets so Tailwind's `<alpha-value>`
@@ -249,12 +248,19 @@
 			tracking-meta px-1.5 py-0.5;
 	}
 
-	/* Buttons — flat, single-accent. */
-	.btn {
-		@apply inline-flex items-center justify-center gap-1.5 rounded-md font-medium
-			transition-colors focus:outline-none focus-visible:ring-1
-			focus-visible:ring-ink/30 disabled:cursor-not-allowed disabled:opacity-50;
-	}
+}
+
+/* Buttons — flat, single-accent. `btn` must be a registered `@utility` (not a
+   plain `@layer components` class) so `btn-primary`/`btn-ghost`/`btn-danger`
+   below can `@apply btn` — Tailwind v4 only allows `@apply` to reference
+   canonical utilities, not arbitrary custom classes. */
+@utility btn {
+	@apply inline-flex items-center justify-center gap-1.5 rounded-md font-medium
+		transition-colors focus:outline-none focus-visible:ring-1
+		focus-visible:ring-ink/30 disabled:cursor-not-allowed disabled:opacity-50;
+}
+
+@layer components {
 	.btn-primary {
 		@apply btn bg-ink text-paper-2 hover:bg-ink-2;
 	}

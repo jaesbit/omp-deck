@@ -10,6 +10,7 @@
  */
 
 import { useEffect } from "react";
+import type { JSX } from "react";
 
 import { useStore, type NotificationItem } from "../lib/store";
 

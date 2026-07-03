@@ -10,6 +10,7 @@
 
 import { Handle, Position, type NodeProps } from "@xyflow/react";
 import { memo } from "react";
+import type { JSX } from "react";
 
 import type { RoutineStep, RoutineStepRun, RoutineStepStatus } from "@omp-deck/protocol";
 

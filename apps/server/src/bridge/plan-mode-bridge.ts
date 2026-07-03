@@ -84,7 +84,7 @@ const PLAN_WORKFLOW = "parallel" as const;
  * with the deck's fixed branches baked in:
  *   - `contextPreserved: true` (deck never compacts at the plan boundary;
  *     deferred to v1.1 — see design doc §"open questions" #2)
- *   - `tools` includes `todo_write` (deck's session tool set always has it)
+ *   - `tools` includes `todo` (deck's session tool set always has it)
  *
  * Inlined because the SDK's `exports` map doesn't expose `.md` assets, and
  * we want a stable contract that's visible alongside the lifecycle code
@@ -106,9 +106,9 @@ Context preserved. Use conversation history when useful; the finalized plan is t
 <instruction>
 You MUST execute this plan step by step from \`{{planFilePath}}\`. You have full tool access.
 You MUST verify each step before proceeding to the next.
-Before execution, initialize todo tracking with \`todo_write\`.
-After each completed step, immediately update \`todo_write\`.
-If \`todo_write\` fails, fix the payload and retry before continuing.
+Before execution, initialize todo tracking with \`todo\`.
+After each completed step, immediately update \`todo\`.
+If \`todo\` fails, fix the payload and retry before continuing.
 </instruction>
 
 <critical>

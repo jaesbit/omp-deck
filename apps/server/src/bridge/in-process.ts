@@ -5,7 +5,7 @@ import {
 	settings as ompSettings,
 	type AgentSession,
 } from "@oh-my-pi/pi-coding-agent";
-import { getLatestTodoPhasesFromEntries } from "@oh-my-pi/pi-coding-agent/tools/todo-write";
+import { getLatestTodoPhasesFromEntries } from "@oh-my-pi/pi-coding-agent/tools/todo";
 import { getEnvApiKey } from "@oh-my-pi/pi-ai";
 import { runExtensionCompact, runExtensionSetModel } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/compact-handler";
 import { getSessionSlashCommands } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/get-commands-handler";
@@ -464,13 +464,13 @@ export class InProcessAgentBridge implements AgentBridge {
 			}
 			// Same pattern for todos: the SDK only fires `todo_reminder` on
 			// reminder ticks (typically at turn boundaries), so the deck UI
-			// shows stale todos between an agent's `todo_write` call and the
+			// shows stale todos between an agent's `todo` call and the
 			// next reminder cycle. Synthesize `todo_phases_set` after each
-			// todo_write tool result so the Inspector TodoPanel reflects the
+			// todo tool result so the Inspector TodoPanel reflects the
 			// current phase tree within the same tick (T-106).
 			if (type === "tool_execution_end") {
 				const toolName = (event as { toolName?: string }).toolName;
-				if (toolName === "todo_write") {
+				if (toolName === "todo") {
 					const phases = (session as unknown as { getTodoPhases?: () => unknown[] }).getTodoPhases?.();
 					if (Array.isArray(phases)) {
 						handle.emit({ type: "todo_phases_set", todoPhases: phases } as unknown as AgentSessionEventJson);
