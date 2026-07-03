@@ -13,6 +13,7 @@
  */
 
 import { useEffect, useState } from "react";
+import type { JSX } from "react";
 
 import { useStore } from "../lib/store";
 

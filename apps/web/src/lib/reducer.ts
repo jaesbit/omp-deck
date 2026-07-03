@@ -181,7 +181,7 @@ export function applyEvent(state: SessionUi, event: AgentSessionEventJson): Sess
 			const todos = (event as any).todos as unknown;
 			return { ...state, todoPhases: normalizeTodoPhases([todos]) };
 		}
-		// Synthetic event emitted by the deck bridge after every `todo_write`
+		// Synthetic event emitted by the deck bridge after every `todo`
 		// `tool_execution_end`. Carries the canonical `TodoPhase[]` from
 		// `session.getTodoPhases()` so the Inspector reflects in-turn changes
 		// without waiting for the next SDK reminder tick (T-106).
@@ -191,7 +191,7 @@ export function applyEvent(state: SessionUi, event: AgentSessionEventJson): Sess
 		}
 		case "todo_auto_clear":
 			// The SDK clears completed tasks from its live cache after a delay, but
-			// the deck should keep the last rendered list until a new todo_write
+			// the deck should keep the last rendered list until a new todo
 			// explicitly replaces it.
 			return state;
 

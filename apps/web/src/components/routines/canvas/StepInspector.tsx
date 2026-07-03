@@ -13,6 +13,7 @@
  */
 
 import { useEffect, useState } from "react";
+import type { JSX } from "react";
 import { ExternalLink, Trash2, X } from "lucide-react";
 import { Link } from "react-router-dom";
 

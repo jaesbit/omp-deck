@@ -95,7 +95,7 @@ describe("reducer queue lifecycle", () => {
 });
 
 /**
- * T-106: bridge synthesizes `todo_phases_set` after every `todo_write`
+ * T-106: bridge synthesizes `todo_phases_set` after every `todo`
  * `tool_execution_end` so the Inspector doesn't show stale todos between
  * SDK reminder ticks. Reducer must normalize the carried `todoPhases`
  * into the same shape `todo_reminder` produces, and must coexist with

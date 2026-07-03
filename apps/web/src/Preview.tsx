@@ -163,7 +163,7 @@ const toolCalls: Record<string, ToolCallStream> = {
 	}),
 	"tc-todo": tcStream({
 		id: "tc-todo",
-		name: "todo_write",
+		name: "todo",
 		args: {
 			ops: [
 				{ op: "init", phase: "Phase 1", items: ["Map renderer surface", "Wire highlight.js"] },
@@ -278,7 +278,7 @@ export function PreviewPage() {
 							["tc-task", "task"],
 							["tc-web", "web_search"],
 							["tc-eval-js", "eval"],
-							["tc-todo", "todo_write"],
+							["tc-todo", "todo"],
 							["tc-gen", "generate_image"],
 							["tc-browser", "browser"],
 							["tc-running", "search"],

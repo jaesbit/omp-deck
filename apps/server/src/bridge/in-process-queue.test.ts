@@ -223,7 +223,7 @@ describe("InProcessSessionHandle queue shadow", () => {
 				type: "message",
 				message: {
 					role: "toolResult",
-					toolName: "todo_write",
+					toolName: "todo",
 					isError: false,
 					details: {
 						phases: [{ name: "Done", tasks: [{ content: "Ship it", status: "completed" }] }],

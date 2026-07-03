@@ -1156,7 +1156,7 @@ export const KNOWN_TOOLS = [
 	"web_search",
 	"eval",
 	"generate_image",
-	"todo_write",
+	"todo",
 	"browser",
 	"ast_edit",
 	"ast_grep",

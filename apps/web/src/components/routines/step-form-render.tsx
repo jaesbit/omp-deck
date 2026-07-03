@@ -11,6 +11,7 @@
  * switch is the load-bearing reason this module exists.
  */
 
+import type { JSX } from "react";
 import type { RoutineStep } from "@omp-deck/protocol";
 
 import {
