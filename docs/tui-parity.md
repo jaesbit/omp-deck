@@ -18,7 +18,7 @@ parity on. Updated alongside SDK upgrades.
 | Pasted text | ✓ | Native textarea behavior, no surprises. |
 | Pasted / dragged images | ✓ | Encoded to base64, thumbnail strip in composer, `[Image #N]` placeholder inserted at cursor — same UX as the TUI. |
 | Image attach button | ✓ | Paperclip; multi-select; accepts `image/*`. |
-| Multi-session sidebar | ✓ | Lists active (live badge) and persisted sessions, with workspace filter. |
+| Multi-session sidebar | ✓ | Lists active (live badge) and persisted sessions, with workspace filter and workspace color markers. |
 | Workspace switcher | ✓ | Pulled from `~/.omp/agent/sessions/*` grouped by cwd plus configured roots. |
 | Session resume | ✓ | Clicking a persisted session rehydrates via `SessionManager.open`. |
 | Abort while streaming | ✓ | Composer flips to red Abort button. |
@@ -65,4 +65,6 @@ These are deck-only — the TUI doesn't have them:
 - **Messaging bridges** (Telegram now; Slack/Discord-shaped to come).
 - **Live broadcasts** — agent or external scripts mutating `/api/tasks`, the KB tree, or installed skills push WS frames that cause every open client to refresh instantly without polling.
 - **Themes** with full runtime swap (Paper / Slate / Horizon).
-- **Multi-session sidebar** with workspace grouping + per-session plan-mode badge.
+- **Multi-session sidebar** with workspace grouping, per-session plan-mode badge, and workspace-scoped color markers on kanban cards.
+- **Goal Mode** — `/goal <objective>` autonomous multi-turn execution with pause/resume/cancel, mutually exclusive with Plan Mode. The TUI has no equivalent lifecycle controls.
+- **Session deep-linking** — every session is addressable at `/c/:sessionId`; reload, tab-restore, or a second browser window all reconnect to the same live session instead of losing place.

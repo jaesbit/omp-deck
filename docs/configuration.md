@@ -49,6 +49,8 @@ The same directory holds:
 | `OMP_DECK_DEFAULT_CWD` | `process.cwd()` | next session | Working dir for new chat sessions. |
 | `OMP_DECK_WORKSPACES` | _(none)_ | next session | Comma-separated extra workspace roots shown in the picker. |
 
+Per-workspace **default model** is not an env var — it's a UI-managed, DB-backed override (`workspace_preferences` table, one row per exact `cwd`) set from Settings → Workspaces. See `docs/architecture.md`'s database table inventory. Precedence at session creation: explicit request `model` > this override > `OMP_MODEL` / SDK default above.
+
 ### omp SDK
 
 | Var | Default | Restart? | Notes |
@@ -107,6 +109,19 @@ them masked; reveal requires a loopback request.
 
 If you authenticated via `omp` CLI (OAuth), the SDK reads credentials from
 `~/.omp/agent/auth.db` instead of env vars. Either path works.
+
+## Browser-local settings (not env vars)
+
+A handful of preferences live in the browser's `localStorage`/`sessionStorage`
+instead of the server-side layers above — per-browser, not shared across
+machines or synced by the server:
+
+| Setting | Where | Storage key |
+|---|---|---|
+| Stop-streaming keyboard shortcut | Settings → Appearance → Keyboard shortcuts | `abortShortcutKey` (default `/`) |
+| Kanban workspace color markers | Board inspector | `omp-deck:project-colors` |
+| Kanban workspace filter | Tasks header selector | `omp-deck:tasks:workspace-filter` (`sessionStorage`) |
+| Last-active session (for `/` reconnect) | — | `omp-deck:last-session-id` |
 
 ## Restart semantics
 

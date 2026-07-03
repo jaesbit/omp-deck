@@ -58,8 +58,8 @@ The WS hub maintains:
   forward `session_event` frames + per-session bridge frames (UI dialog,
   plan-mode).
 - **A global connection set** — `Set<ServerWebSocket>`. Used for broadcast
-  frames (`tasks_changed`, `skills_changed`, `kb_changed`, `heartbeat`,
-  `notification`) sent to every open client.
+  frames (`tasks_changed`, `skills_changed`, `kb_changed`, `sessions_changed`,
+  `heartbeat`, `notification`) sent to every open client.
 
 The `BroadcastBus` singleton (`apps/server/src/broadcast-bus.ts`) is the
 producer side. Routes (`routes-tasks.ts`, `routes-skills.ts`, …) and deck
@@ -111,7 +111,7 @@ Tables:
 
 - `schema_migrations` — applied migrations.
 - `task_states` — kanban columns. Configurable.
-- `tasks` — backlog/active/blocked/done items. `display_id` for human IDs (`T-1`, ...).
+- `tasks` — backlog/active/blocked/done items. `display_id` for human IDs (`T-1`, ...). `priority` is `P0`–`P5` (P0 highest, `P5` default).
 - `inbox_items` — quick captures + promote-to-task records.
 - `routines` — cron / webhook / manual / event routine definitions (V0 single-action + V1 multi-step pipelines via `spec_yaml`).
 - `routine_runs` — per-run history with status, duration, total cost.
@@ -120,6 +120,7 @@ Tables:
 - `bridge_state` — supervised bridge process records (currently Telegram).
 - `env_settings` — masked secret store backing Settings → Env (atomic writes paired with `env-audit.log`).
 - `sequences` — monotonic counters (currently just `tasks`).
+- `workspace_preferences` — one row per exact workspace `cwd` holding an optional model override (`ModelRef | null`); consulted at session creation with precedence explicit request model > this override > SDK default.
 
 On first boot against an empty `tasks` table the deck seeds a single
 "Welcome to omp-deck" backlog task — see `apps/server/src/db/index.ts`

@@ -4,7 +4,7 @@ Type `/` in any composer to open the picker. Commands come from four scopes:
 
 | Scope | Source | Dispatch | Example |
 |---|---|---|---|
-| **deck** | Built into omp-deck. | In-process. No model round-trip. | `/task add <title>`, `/plan` |
+| **deck** | Built into omp-deck. | In-process. No model round-trip. | `/task add <title>`, `/plan`, `/goal` |
 | **builtin** | omp SDK. Filtered to commands with text-mode handlers. | In-process via SDK dispatcher. No model round-trip. | `/context`, `/usage`, `/tools`, `/compact`, `/dump`, `/memory view`, `/mcp add ...` |
 | **user** | Markdown files at `~/.omp/agent/commands/*.md`. | Expanded into the prompt; the model interprets. Costs tokens. | Whatever you write. |
 | **project** | Markdown files at `<cwd>/.omp/agent/commands/*.md`. | Same as user, but per-workspace and shadows user with the same name. | Whatever you write. |
@@ -13,7 +13,7 @@ Picker filtering is fuzzy across name + description. Subcommands (e.g.
 `/mcp add`, `/copy last`) are flattened into top-level entries so typing
 `/add` surfaces `/mcp add` and `/task add` side by side.
 
-Some deck commands (`/plan`) are **client-virtual**: they're injected into
+Some deck commands (`/plan`, `/goal`) are **client-virtual**: they're injected into
 the picker by the web client and never sent over the WS as text. Selecting
 one — or typing it + Enter — dispatches a typed WS frame directly. Useful
 for UI shortcuts that don't need to round-trip through the agent.
@@ -86,6 +86,33 @@ zero tokens.
 /plan          # toggle
 /plan on       # explicit enter
 /plan off      # explicit exit
+```
+
+### `/goal <objective>` / `/goal pause|resume|cancel`
+
+Hands the active session an autonomous multi-turn objective instead of a
+single prompt. The agent keeps working turn after turn toward `<objective>`
+until it finishes, you pause it, or you cancel it.
+
+- `/goal <objective>` — starts a new goal. Header gains a live status +
+  progress display alongside pause/resume/cancel controls.
+- `/goal pause` — pauses after the current turn; the objective and progress
+  are preserved.
+- `/goal resume` — resumes a paused goal.
+- `/goal cancel` — aborts a streaming goal (if any) before dropping it and
+  restoring the previous tool set.
+
+**Mutually exclusive with Plan Mode.** Enabling Plan Mode pauses a live goal
+rather than dropping it; creating or resuming a goal exits Plan Mode first.
+Resuming a session with a previously-active goal always restores it
+**paused**, never running — autonomous execution never silently resumes
+behind your back just because you reopened a tab.
+
+```
+/goal Triage the open P0/P1 backlog and file follow-up tasks for anything ambiguous
+/goal pause
+/goal resume
+/goal cancel
 ```
 
 ## SDK builtins (text-mode subset)
