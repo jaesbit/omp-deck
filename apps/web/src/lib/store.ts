@@ -221,6 +221,12 @@ interface StoreState {
 		suppressAutoStart?: boolean;
 	}): Promise<string>;
 	selectSession(id: string): void;
+	/** Detach the current tab's view from the active session — clears
+	 *  `activeId` only. Unlike `disposeSession`, the underlying server-side
+	 *  session keeps running in the background (T-52) and any other tab
+	 *  still subscribed to it is unaffected; re-selecting the same id later
+	 *  just resumes viewing it via `selectSession`'s idempotent subscribe. */
+	closeActiveSession(): void;
 	sendPrompt(text: string, images?: import("@omp-deck/protocol").ImageAttachment[]): void;
 	abort(): void;
 	/** Drop every queued (followUp / steering) prompt for the active session.
@@ -436,6 +442,10 @@ export const useStore = create<StoreState>()(
 					activeId: s.activeId === id ? undefined : s.activeId,
 				};
 			});
+		},
+
+		closeActiveSession() {
+			set({ activeId: undefined });
 		},
 
 		async resumeIfKnown(id: string) {

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { ChevronDown, Plus } from "lucide-react";
+import { ChevronDown, Plus, X } from "lucide-react";
 import type { SessionUi } from "@/lib/types";
 import { selectActiveSession, useStore } from "@/lib/store";
 import { launchSession } from "@/lib/first-prompt";
@@ -30,6 +30,7 @@ function Inner({ session }: { session: SessionUi }) {
 	const defaultCwd = useStore((s) => s.defaultCwd);
 	const sessionsById = useStore((s) => s.sessionsById);
 	const actOnGoal = useStore((s) => s.actOnGoal);
+	const closeActiveSession = useStore((s) => s.closeActiveSession);
 
 	const [editing, setEditing] = useState(false);
 	const [draft, setDraft] = useState(session.sessionName ?? "");
@@ -270,6 +271,19 @@ function Inner({ session }: { session: SessionUi }) {
 					</div>
 				) : null}
 			</div>
+
+			{/* Close (detach) — clears activeId only; the session keeps running
+			    server-side (T-52) so other tabs viewing it are unaffected, and
+			    re-selecting it later (e.g. from the Sidebar) restores it as-is. */}
+			<button
+				type="button"
+				onClick={closeActiveSession}
+				className="btn-ghost h-7 w-7 p-0"
+				aria-label="Close session"
+				title="Close session (keeps running in background)"
+			>
+				<X className="h-3.5 w-3.5" />
+			</button>
 
 			<ModelPickerModal
 				open={modelOpen}
