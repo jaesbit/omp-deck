@@ -185,6 +185,52 @@ export class InProcessAgentBridge implements AgentBridge {
 		return raw.map((r: any) => summarize(r));
 	}
 
+	/**
+	 * Delete a session permanently. If a live handle exists, dispose it first
+	 * (same teardown as an explicit dispose — uiBridge/goalBridge/planBridge
+	 * cleanup, `active` eviction — via `handle.dispose()`'s `onDispose`
+	 * callback), then resolve the session's `.jsonl` path (live handle's
+	 * `sessionFile`, or a `listSessions({})` match for a persisted-only
+	 * session with no live handle) and drop the file + artifact dir via the
+	 * SDK's `SessionManager.dropSession`. Idempotent: a file already gone is
+	 * a successful no-op. Returns `deleted: false` only when the id matches
+	 * neither a live handle nor a persisted-listing entry (unknown id -> 404).
+	 */
+	async deleteSession(sessionId: string): Promise<{ deleted: boolean; sessionPath?: string }> {
+		const active = this.active.get(sessionId);
+		let sessionPath = active?.handle.sessionFile;
+		if (active) {
+			await active.handle.dispose();
+		}
+		if (!sessionPath) {
+			const persisted = await this.listAllSessionsForDelete();
+			sessionPath = persisted.find((s) => s.id === sessionId)?.path;
+		}
+		if (!sessionPath) {
+			return { deleted: false };
+		}
+		try {
+			const manager = await SessionManager.open(sessionPath);
+			await manager.dropSession(sessionPath);
+		} catch (err) {
+			if ((err as NodeJS.ErrnoException)?.code !== "ENOENT") throw err;
+		}
+		return { deleted: true, sessionPath };
+	}
+
+	/**
+	 * Hook point for `deleteSession`'s persisted-only branch: list every
+	 * session across all project directories so an id with no live handle
+	 * can still be resolved to a `.jsonl` path. Defaults to `listSessions({})`
+	 * (`SessionManager.listAll()`), which the SDK hardwires to the real
+	 * `~/.omp/agent/sessions` root with no override hook — a `protected`
+	 * seam so tests can substitute a fixture instead of touching the real
+	 * home directory.
+	 */
+	protected listAllSessionsForDelete(): Promise<SessionSummary[]> {
+		return this.listSessions({});
+	}
+
 	private ensureModelRegistry(): Promise<ModelRegistry> {
 		if (this.modelRegistry) return Promise.resolve(this.modelRegistry);
 		if (this.modelRegistryPromise) return this.modelRegistryPromise;

@@ -232,7 +232,11 @@ interface StoreState {
 	cancelQueued(queuedId: string): void;
 	/** Edit a queued prompt's text (and optionally images) in place. */
 	editQueued(queuedId: string, text: string, images?: import("@omp-deck/protocol").ImageAttachment[]): void;
-	disposeSession(id: string): Promise<void>;
+	/** Permanently delete a session (server drops the `.jsonl` file + any
+	 *  live handle — irreversible). Removes the row from both `sessionsById`
+	 *  and the persisted `sessions` list locally; clears `activeId` if it
+	 *  pointed at the deleted session. */
+	deleteSession(id: string): Promise<void>;
 	/** Auto-resume a session a `subscribe` attempt found inactive (idle-
 	 *  reaped, or the server restarted) but that still exists on disk.
 	 *  No-op past the first attempt per id in this tab; clears `activeId`
@@ -417,17 +421,18 @@ export const useStore = create<StoreState>()(
 			get().ws?.send(frame);
 		},
 
-		async disposeSession(id: string) {
+		async deleteSession(id: string) {
 			try {
 				await api.disposeSession(id);
 			} catch (err) {
-				console.warn("dispose failed", err);
+				console.warn("delete session failed", err);
 			}
 			set((s) => {
 				const next = { ...s.sessionsById };
 				delete next[id];
 				return {
 					sessionsById: next,
+					sessions: s.sessions.filter((row) => row.id !== id),
 					activeId: s.activeId === id ? undefined : s.activeId,
 				};
 			});
