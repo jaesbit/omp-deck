@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { Check, FolderOpen, Loader2, Search } from "lucide-react";
 import type { ModelRef } from "@omp-deck/protocol";
 
@@ -130,13 +130,78 @@ export function SessionLaunchModal({
 		}
 	}
 
+	// Flat, keyboard-navigable ordering of the model list: the leading "Use
+	// default" entry followed by every model across every provider group, in
+	// display order. Mirrors `SlashCommandPicker`'s selectedIndex idiom.
+	type ModelEntry = { kind: "default" } | { kind: "model"; model: (typeof grouped)[number]["items"][number] };
+	const flatEntries = useMemo<ModelEntry[]>(
+		() => [{ kind: "default" }, ...grouped.flatMap((g) => g.items.map((m) => ({ kind: "model" as const, model: m })))],
+		[grouped],
+	);
+	const flatIndexByKey = useMemo(() => {
+		const map = new Map<string, number>();
+		flatEntries.forEach((entry, i) => {
+			if (entry.kind === "model") map.set(`${entry.model.provider}/${entry.model.id}`, i);
+		});
+		return map;
+	}, [flatEntries]);
+
+	// -1 = nothing keyboard-highlighted yet (fall back to the `active`/selected
+	// styling). Reset on every fresh search and whenever the modal closes so a
+	// stale highlight doesn't survive into the next open.
+	const [highlightedIndex, setHighlightedIndex] = useState(-1);
+	useEffect(() => {
+		setHighlightedIndex(-1);
+	}, [query, open]);
+
+	const modelItemRefs = useRef<(HTMLButtonElement | null)[]>([]);
+	useEffect(() => {
+		if (highlightedIndex < 0) return;
+		modelItemRefs.current[highlightedIndex]?.scrollIntoView({ block: "nearest" });
+	}, [highlightedIndex]);
+
+	function selectEntry(entry: ModelEntry): void {
+		if (entry.kind === "default") {
+			setModel(undefined);
+		} else {
+			setModel({ provider: entry.model.provider, id: entry.model.id });
+		}
+		setModelTouched(true);
+	}
+
+	// Ctrl/Cmd+Enter starts the session from anywhere inside the modal
+	// (workspace input, model search, initial prompt) — mirrors the desktop
+	// convention of "submit the form" without swallowing plain Enter, which
+	// textareas/the model search still need for newlines/entry-selection.
+	function handleContentKeyDown(e: KeyboardEvent<HTMLDivElement>): void {
+		if (!(e.ctrlKey || e.metaKey) || e.key !== "Enter") return;
+		e.preventDefault();
+		if (busy) return;
+		void confirm();
+	}
+
+	function handleModelSearchKeyDown(e: KeyboardEvent<HTMLInputElement>): void {
+		if (e.ctrlKey || e.metaKey) return; // let Change 1's handler above handle Ctrl/Cmd+Enter
+		if (e.key === "ArrowDown") {
+			e.preventDefault();
+			setHighlightedIndex((i) => Math.min(i + 1, flatEntries.length - 1));
+		} else if (e.key === "ArrowUp") {
+			e.preventDefault();
+			setHighlightedIndex((i) => Math.max(i - 1, 0));
+		} else if (e.key === "Enter" && highlightedIndex >= 0) {
+			e.preventDefault();
+			const entry = flatEntries[highlightedIndex];
+			if (entry) selectEntry(entry);
+		}
+	}
+
 	return (
 		<Modal open={open} onClose={onCancel} widthClass="max-w-2xl">
 			<div className="flex h-11 items-center gap-2 border-b border-line px-3">
 				<div className="meta">{title}</div>
 			</div>
 
-			<div className="max-h-[70vh] overflow-y-auto px-4 py-3">
+			<div className="max-h-[70vh] overflow-y-auto px-4 py-3" onKeyDown={handleContentKeyDown}>
 				<div className="mb-3">
 					<div className="meta mb-1.5">Workspace</div>
 					{allowWorkspaceChange ? (
@@ -205,6 +270,7 @@ export function SessionLaunchModal({
 						<input
 							value={query}
 							onChange={(e) => setQuery(e.target.value)}
+							onKeyDown={handleModelSearchKeyDown}
 							placeholder="Filter by name, id, or provider — leave empty to use the default"
 							className="min-w-0 flex-1 bg-transparent text-sm text-ink placeholder:text-ink-4 focus:outline-none"
 						/>
@@ -212,14 +278,19 @@ export function SessionLaunchModal({
 					</div>
 					<div className="mt-2 max-h-56 overflow-y-auto rounded-md border border-line">
 						<button
+							ref={(el) => {
+								modelItemRefs.current[0] = el;
+							}}
 							type="button"
 							onClick={() => {
 								setModel(undefined);
 								setModelTouched(true);
 							}}
+							onMouseEnter={() => setHighlightedIndex(0)}
 							className={cn(
 								"flex w-full items-center gap-2 border-b border-line px-3 py-2 text-left text-sm transition-colors",
 								!model ? "bg-accent-soft/40 text-accent" : "text-ink-2 hover:bg-paper-3/60",
+								highlightedIndex === 0 && "ring-1 ring-inset ring-accent/50",
 							)}
 						>
 							<span className="flex-1">Use default{workspaceDefaultModel ? " (workspace override above)" : ""}</span>
@@ -235,17 +306,25 @@ export function SessionLaunchModal({
 									</div>
 									{g.items.map((m) => {
 										const active = model?.provider === m.provider && model?.id === m.id;
+										const idx = flatIndexByKey.get(`${m.provider}/${m.id}`) ?? -1;
 										return (
 											<button
 												key={`${m.provider}/${m.id}`}
+												ref={(el) => {
+													if (idx >= 0) modelItemRefs.current[idx] = el;
+												}}
 												type="button"
 												onClick={() => {
 													setModel({ provider: m.provider, id: m.id });
 													setModelTouched(true);
 												}}
+												onMouseEnter={() => {
+													if (idx >= 0) setHighlightedIndex(idx);
+												}}
 												className={cn(
 													"flex w-full items-center gap-2 border-b border-line px-3 py-2 text-left text-sm last:border-b-0 transition-colors",
 													active ? "bg-accent-soft/40 text-accent" : "text-ink hover:bg-paper-3/60",
+													idx >= 0 && idx === highlightedIndex && "ring-1 ring-inset ring-accent/50",
 												)}
 											>
 												<span className="min-w-0 flex-1 truncate">{m.label}</span>
@@ -266,6 +345,9 @@ export function SessionLaunchModal({
 								No matching models with configured auth ({availableCount} available total).
 							</div>
 						) : null}
+					</div>
+					<div className="mt-1 font-mono text-2xs text-ink-4">
+						↑↓ navigate · enter pick · ctrl+enter start session
 					</div>
 				</div>
 
