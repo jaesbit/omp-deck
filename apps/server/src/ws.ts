@@ -1,3 +1,4 @@
+import * as path from "node:path";
 import type { ServerWebSocket } from "bun";
 import type { ClientFrame, ServerFrame } from "@omp-deck/protocol";
 
@@ -5,6 +6,8 @@ import type { AgentBridge } from "./bridge/types.ts";
 import { broadcastBus } from "./broadcast-bus.ts";
 import { logger } from "./log.ts";
 import { getBuildInfo, getUptimeSecs } from "./build-info.ts";
+import { buildSkillInvocationPrompt, parseSkillSlashCommand } from "./skill-invocation.ts";
+import type { SkillsService } from "./skills-service.ts";
 const log = logger("ws");
 
 /** Per-connection state. */
@@ -24,7 +27,10 @@ export class WsHub {
 	private readonly connections = new Set<ServerWebSocket<ConnectionData>>();
 	private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
 
-	constructor(private bridge: AgentBridge) {
+	constructor(
+		private bridge: AgentBridge,
+		private skills: SkillsService,
+	) {
 		broadcastBus.subscribe((frame) => this.broadcast(frame));
 		this.startHeartbeat();
 	}
@@ -251,23 +257,52 @@ export class WsHub {
 			});
 		};
 		if (frame.text.startsWith("/")) {
-			handle
-				.dispatchDeckSlashCommand(frame.text)
-				.then((deck) => {
-					if (deck.kind === "consumed") return undefined;
-					if (deck.kind === "rewritten") return handle.prompt(deck.prompt, opts);
-					return handle
-						.dispatchSlashCommand(frame.text)
-						.then((sdk) => {
-							if (sdk.kind === "consumed") return undefined;
-							if (sdk.kind === "rewritten") return handle.prompt(sdk.prompt, opts);
-							return handle.prompt(frame.text, opts);
-						});
-				})
-				.catch(sendError);
+			// `/skill:<name>` isn't in the SDK's ACP-builtin registry (that's
+			// TUI-only plumbing gated behind InteractiveModeContext — see
+			// skill-invocation.ts's header comment). Intercept it here, ahead of
+			// the deck/SDK dispatch chain, and reimplement the same
+			// read-SKILL.md/strip-frontmatter/inject-as-user-message behavior
+			// against the deck's own SkillsService. A near-miss name (no skill
+			// found) intentionally falls through to the unchanged dispatch
+			// chain below rather than erroring — same as today's behavior for
+			// any other unrecognized slash command.
+			const parsedSkill = parseSkillSlashCommand(frame.text);
+			if (parsedSkill) {
+				this.skills
+					.getSkillDetailByName(parsedSkill.name, handle.cwd)
+					.then((detail) => {
+						if (!detail) return this.dispatchNonSkillSlashCommand(handle, frame.text, opts);
+						const baseDir = path.dirname(detail.skillPath);
+						const composed = buildSkillInvocationPrompt(
+							{ name: detail.name, body: detail.body, baseDir },
+							parsedSkill.args,
+						);
+						return handle.prompt(composed, opts);
+					})
+					.catch(sendError);
+				return;
+			}
+			await this.dispatchNonSkillSlashCommand(handle, frame.text, opts).catch(sendError);
 			return;
 		}
 		handle.prompt(frame.text, opts).catch(sendError);
+	}
+
+	/** The pre-T-21 slash dispatch chain: deck-native commands, then SDK ACP builtins, then plain prompt. */
+	private dispatchNonSkillSlashCommand(
+		handle: NonNullable<ReturnType<AgentBridge["getSession"]>>,
+		text: string,
+		opts: { streamingBehavior?: "steer" | "followUp"; images?: unknown },
+	): Promise<unknown> {
+		return handle.dispatchDeckSlashCommand(text).then((deck) => {
+			if (deck.kind === "consumed") return undefined;
+			if (deck.kind === "rewritten") return handle.prompt(deck.prompt, opts as never);
+			return handle.dispatchSlashCommand(text).then((sdk) => {
+				if (sdk.kind === "consumed") return undefined;
+				if (sdk.kind === "rewritten") return handle.prompt(sdk.prompt, opts as never);
+				return handle.prompt(text, opts as never);
+			});
+		});
 	}
 
 	private async handleAbort(ws: ServerWebSocket<ConnectionData>, sessionId: string): Promise<void> {

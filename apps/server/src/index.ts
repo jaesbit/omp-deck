@@ -119,7 +119,7 @@ async function main(): Promise<void> {
 	);
 	const skillsWatcherDispose = startSkillsWatcher(config);
 	const kbWatcherDispose = startKbWatcher(kbService);
-	const ws = new WsHub(bridge);
+	const ws = new WsHub(bridge, skillsService);
 
 	server = Bun.serve<ConnectionData>({
 		hostname: config.host,
