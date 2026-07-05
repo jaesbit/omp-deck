@@ -2,15 +2,19 @@ import { useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { Play, RotateCcw, Save, Square, X } from "lucide-react";
 import type {
+	AutoWorkConfig,
 	BridgeInfo,
 	BridgeName,
 	EnvEntry,
 	GateKnob,
 	ListEnvSettingsResponse,
 	MaintenanceGateState,
-	NotificationLevel,
+	ModelRef,
 	PreludeResponse,
+	SetAutoWorkConfigRequest,
+	NotificationLevel,
 	StartCommand,
+	TaskPriority,
 } from "@omp-deck/protocol";
 import type { ProviderInfo } from "@omp-deck/protocol";
 
@@ -38,6 +42,7 @@ const SECTIONS = [
 	{ id: "orientation", label: "Orientation", description: "Prelude, /start, maintenance gate" },
 	{ id: "appearance", label: "Appearance", description: "Themes, colors, fonts" },
 	{ id: "workspaces", label: "Workspaces", description: "Pinned roots and display names" },
+	{ id: "autowork", label: "Auto Work", description: "Unattended runs — enable, model, window, limits" },
 	{ id: "notifications", label: "Notifications", description: "Idle alerts and quiet hours" },
 	{ id: "about", label: "About", description: "Version, paths, diagnostics" },
 ] as const;
@@ -96,8 +101,10 @@ export function SettingsView() {
 								<AppearanceSection />
 							) : selected === "notifications" ? (
 								<NotificationsSection />
-							) : selected === "workspaces" ? (
+			) : selected === "workspaces" ? (
 								<WorkspacesSection />
+							) : selected === "autowork" ? (
+								<AutoWorkSection />
 							) : (
 								<StubSection section={selected} />
 							)}
@@ -1040,6 +1047,425 @@ function WorkspaceModelPickerModal({
 function shortWorkspacePath(cwd: string): string {
 	const parts = cwd.split(/[\\/]/).filter(Boolean);
 	return parts[parts.length - 1] ?? cwd;
+}
+
+const TASK_PRIORITIES: TaskPriority[] = ["P0", "P1", "P2", "P3", "P4", "P5"];
+
+function autoWorkToRequest(config: AutoWorkConfig): SetAutoWorkConfigRequest {
+	return {
+		enabled: config.enabled,
+		modelByPriority: config.modelByPriority,
+		timeWindows: config.timeWindows,
+		sessionPctLimit: config.sessionPctLimit,
+		weeklyPctLimit: config.weeklyPctLimit,
+	};
+}
+
+function AutoWorkSection() {
+	const [workspaces, setWorkspaces] = useState<import("@omp-deck/protocol").WorkspaceEntry[]>([]);
+	const [configs, setConfigs] = useState<Record<string, AutoWorkConfig>>({});
+	const [loading, setLoading] = useState(true);
+	const [error, setError] = useState<string | undefined>();
+	const [editingCwd, setEditingCwd] = useState<string | undefined>();
+
+	async function refresh(): Promise<void> {
+		try {
+			const resp = await api.listWorkspaces();
+			setWorkspaces(resp.workspaces);
+			// allSettled: a workspace on an unmounted NFS drive or a stale cwd
+			// should not break the entire panel — show "unavailable" for it.
+			const results = await Promise.allSettled(
+				resp.workspaces.map(async (w) => [w.cwd, await api.getAutoWorkConfig(w.cwd)] as const),
+			);
+			const entries = results.flatMap((r) => (r.status === "fulfilled" ? [r.value] : []));
+			setConfigs(Object.fromEntries(entries));
+			setError(undefined);
+		} catch (e) {
+			setError(String(e));
+		} finally {
+			setLoading(false);
+		}
+	}
+
+	useEffect(() => {
+		void refresh();
+	}, []);
+
+	async function toggleEnabled(cwd: string, enabled: boolean): Promise<void> {
+		const current = configs[cwd];
+		if (!current) return;
+		try {
+			const next = await api.setAutoWorkConfig(cwd, autoWorkToRequest({ ...current, enabled }));
+			setConfigs((prev) => ({ ...prev, [cwd]: next }));
+		} catch (e) {
+			setError(e instanceof Error ? e.message : String(e));
+		}
+	}
+
+	return (
+		<div className="mx-auto max-w-3xl">
+			<div className="mb-4">
+				<h1 className="text-lg font-semibold text-ink">Auto Work</h1>
+				<p className="mt-1 text-sm text-ink-3">
+					Per-workspace unattended-run settings: enable, per-priority model overrides, execution
+					window, and spend limits.
+				</p>
+			</div>
+			{error ? (
+				<div className="mb-3 rounded-md border border-danger/30 bg-danger/10 px-3 py-2 font-mono text-xs text-danger">
+					{error}
+				</div>
+			) : null}
+			{loading ? (
+				<div className="py-6 text-center text-sm text-ink-3">Loading…</div>
+			) : workspaces.length === 0 ? (
+				<div className="py-6 text-center text-sm text-ink-3">No known workspaces yet.</div>
+			) : (
+				<ul className="divide-y divide-line rounded-md border border-line bg-paper-2">
+					{workspaces.map((w) => {
+						const config = configs[w.cwd];
+						return (
+							<li key={w.cwd} className="flex items-center gap-3 px-3 py-2.5">
+								<div className="min-w-0 flex-1">
+									<div className="truncate text-sm font-medium text-ink">{w.label}</div>
+									<div className="truncate font-mono text-2xs text-ink-3" title={w.cwd}>{w.cwd}</div>
+								</div>
+								<div className="shrink-0 text-right font-mono text-2xs text-ink-3">
+								{config
+									? config.timeWindows.length === 0
+										? `never · ${config.sessionPctLimit}%/${config.weeklyPctLimit}%`
+										: `${config.timeWindows.map((w) => `${w.start}:00–${w.end}:00`).join(", ")} · ${config.sessionPctLimit}%/${config.weeklyPctLimit}%`
+									: "…"}
+								</div>
+								<div className="flex shrink-0 items-center gap-1.5">
+									<button
+										type="button"
+										role="switch"
+										aria-checked={config?.enabled ?? false}
+										disabled={!config}
+										onClick={() => config && void toggleEnabled(w.cwd, !config.enabled)}
+										className={cn(
+											"flex h-5 w-9 items-center rounded-full border border-line transition-colors",
+											config?.enabled ? "bg-accent-soft" : "bg-paper-3",
+										)}
+										title={config?.enabled ? "Auto Work enabled" : "Auto Work disabled"}
+									>
+										<span
+											className={cn(
+												"h-3.5 w-3.5 rounded-full bg-ink-2 transition-transform",
+												config?.enabled ? "translate-x-4" : "translate-x-0.5",
+											)}
+										/>
+									</button>
+									<Button variant="ghost" size="sm" onClick={() => setEditingCwd(w.cwd)}>
+										Configure
+									</Button>
+								</div>
+							</li>
+						);
+					})}
+				</ul>
+			)}
+			<AutoWorkConfigModal
+				cwd={editingCwd}
+				config={editingCwd ? configs[editingCwd] : undefined}
+				onClose={() => setEditingCwd(undefined)}
+				onSaved={(next) => {
+					setConfigs((prev) => ({ ...prev, [next.workspaceCwd]: next }));
+					setEditingCwd(undefined);
+				}}
+			/>
+		</div>
+	);
+}
+
+function AutoWorkConfigModal({
+	cwd,
+	config,
+	onClose,
+	onSaved,
+}: {
+	cwd: string | undefined;
+	config: AutoWorkConfig | undefined;
+	onClose: () => void;
+	onSaved: (config: AutoWorkConfig) => void;
+}) {
+	const open = cwd !== undefined && config !== undefined;
+	const [draft, setDraft] = useState<AutoWorkConfig | undefined>(config);
+	const [pickerPriority, setPickerPriority] = useState<TaskPriority | undefined>();
+	const [saving, setSaving] = useState(false);
+	const [error, setError] = useState<string | undefined>();
+
+	useEffect(() => {
+		if (open) {
+			setDraft(config);
+			setError(undefined);
+		}
+		// Only re-sync the draft when the modal (re)opens or the underlying
+		// config changes — not on every keystroke inside the draft itself.
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, [open, config]);
+
+	if (!open || !draft || !cwd) {
+		return null;
+	}
+
+	async function save(): Promise<void> {
+		if (!cwd || !draft) return;
+		const winError = draft.timeWindows.find((w) => w.start >= w.end);
+		if (winError) {
+			setError(`Window ${winError.start}:00–${winError.end}:00: start must be before end`);
+			return;
+		}
+		setSaving(true);
+		setError(undefined);
+		try {
+			const next = await api.setAutoWorkConfig(cwd, autoWorkToRequest(draft));
+			onSaved(next);
+		} catch (e) {
+			setError(e instanceof Error ? e.message : String(e));
+		} finally {
+			setSaving(false);
+		}
+	}
+
+	return (
+		<>
+			<Modal open={open} onClose={onClose} widthClass="max-w-xl">
+				<div className="flex h-11 items-center gap-2 border-b border-line px-3">
+					<div className="meta">Auto Work — {shortWorkspacePath(cwd)}</div>
+				</div>
+				<div className="max-h-[70vh] space-y-4 overflow-y-auto p-4">
+					{error ? (
+						<div className="rounded-md border border-danger/30 bg-danger/10 px-3 py-2 font-mono text-xs text-danger">
+							{error}
+						</div>
+					) : null}
+
+					<label className="flex items-center justify-between text-sm">
+						<span>Enabled</span>
+						<input
+							type="checkbox"
+							checked={draft.enabled}
+							onChange={(e) => setDraft({ ...draft, enabled: e.target.checked })}
+						/>
+					</label>
+
+					<div>
+						<div className="mb-1 flex items-center justify-between">
+							<span className="meta">Execution windows (hour of day)</span>
+							<Button
+								variant="ghost"
+								size="sm"
+								onClick={() =>
+									setDraft({ ...draft, timeWindows: [...draft.timeWindows, { start: 0, end: 24 }] })
+								}
+							>
+								+ Add
+							</Button>
+						</div>
+						{draft.timeWindows.length === 0 ? (
+							<p className="text-xs text-ink-3">No windows — auto-work will never run.</p>
+						) : (
+							<ul className="space-y-1.5">
+								{draft.timeWindows.map((w, i) => (
+									// eslint-disable-next-line react/no-array-index-key
+									<li key={i} className="flex items-center gap-2 text-sm">
+										<input
+											type="number"
+											min={0}
+											max={23}
+											value={w.start}
+											onChange={(e) => {
+												const next = [...draft.timeWindows];
+												next[i] = { ...w, start: Number(e.target.value) };
+												setDraft({ ...draft, timeWindows: next });
+											}}
+											className="field h-8 w-16 px-2"
+										/>
+										<span className="text-ink-3">to</span>
+										<input
+											type="number"
+											min={1}
+											max={24}
+											value={w.end}
+											onChange={(e) => {
+												const next = [...draft.timeWindows];
+												next[i] = { ...w, end: Number(e.target.value) };
+												setDraft({ ...draft, timeWindows: next });
+											}}
+											className="field h-8 w-16 px-2"
+										/>
+										<Button
+											variant="ghost"
+											size="sm"
+											onClick={() =>
+												setDraft({
+													...draft,
+													timeWindows: draft.timeWindows.filter((_, j) => j !== i),
+												})
+											}
+										>
+											Remove
+										</Button>
+									</li>
+								))}
+							</ul>
+						)}
+					</div>
+
+					<div>
+						<label className="mb-1 flex items-center justify-between text-sm">
+							<span>Session spend limit</span>
+							<span className="font-mono text-2xs text-ink-3">{draft.sessionPctLimit}%</span>
+						</label>
+						<input
+							type="range"
+							min={0}
+							max={100}
+							value={draft.sessionPctLimit}
+							onChange={(e) => setDraft({ ...draft, sessionPctLimit: Number(e.target.value) })}
+							className="w-full"
+						/>
+					</div>
+
+					<div>
+						<label className="mb-1 flex items-center justify-between text-sm">
+							<span>Weekly spend limit</span>
+							<span className="font-mono text-2xs text-ink-3">{draft.weeklyPctLimit}%</span>
+						</label>
+						<input
+							type="range"
+							min={0}
+							max={100}
+							value={draft.weeklyPctLimit}
+							onChange={(e) => setDraft({ ...draft, weeklyPctLimit: Number(e.target.value) })}
+							className="w-full"
+						/>
+					</div>
+
+					<div>
+						<div className="meta mb-1">Model per priority</div>
+						<ul className="divide-y divide-line rounded-md border border-line">
+							{TASK_PRIORITIES.map((priority) => {
+								const ref = draft.modelByPriority[priority];
+								return (
+									<li key={priority} className="flex items-center gap-2 px-2 py-1.5 text-sm">
+										<span className="w-8 font-mono text-2xs text-ink-3">{priority}</span>
+										<span className="min-w-0 flex-1 truncate font-mono text-2xs">
+											{ref ? `${ref.provider}/${ref.id}` : "workspace default"}
+										</span>
+										<Button variant="ghost" size="sm" onClick={() => setPickerPriority(priority)}>
+											Change
+										</Button>
+										{ref ? (
+											<Button
+												variant="ghost"
+												size="sm"
+												onClick={() =>
+													setDraft({
+														...draft,
+														modelByPriority: { ...draft.modelByPriority, [priority]: null },
+													})
+												}
+											>
+												Clear
+											</Button>
+										) : null}
+									</li>
+								);
+							})}
+						</ul>
+					</div>
+				</div>
+				<div className="flex items-center justify-end gap-2 border-t border-line px-3 py-2">
+					<Button variant="ghost" size="sm" onClick={onClose} disabled={saving}>
+						Cancel
+					</Button>
+					<Button size="sm" onClick={() => void save()} disabled={saving}>
+						{saving ? "Saving…" : "Save"}
+					</Button>
+				</div>
+			</Modal>
+			<PriorityModelPickerModal
+				open={pickerPriority !== undefined}
+				onClose={() => setPickerPriority(undefined)}
+				onPicked={(ref) => {
+					if (pickerPriority) {
+						setDraft({ ...draft, modelByPriority: { ...draft.modelByPriority, [pickerPriority]: ref } });
+					}
+					setPickerPriority(undefined);
+				}}
+			/>
+		</>
+	);
+}
+
+/**
+ * Model picker shared by all six priority rows in `AutoWorkConfigModal`.
+ * Reuses `useModelCatalog` (the fetch/filter/group hook backing
+ * `ModelPickerModal`) rather than that component directly — `ModelPickerModal`
+ * is hardwired to PATCH the active session's model on pick, which doesn't
+ * apply here. Same reuse pattern as `WorkspaceModelPickerModal` above.
+ */
+function PriorityModelPickerModal({
+	open,
+	onClose,
+	onPicked,
+}: {
+	open: boolean;
+	onClose: () => void;
+	onPicked: (model: ModelRef) => void;
+}) {
+	const { loading, error: catalogError, query, setQuery, grouped } = useModelCatalog(undefined, open);
+
+	useEffect(() => {
+		if (!open) return;
+		setQuery("");
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, [open]);
+
+	return (
+		<Modal open={open} onClose={onClose} widthClass="max-w-xl">
+			<div className="flex h-11 items-center gap-2 border-b border-line px-3">
+				<div className="meta">Pick a model</div>
+			</div>
+			<div className="border-b border-line px-3 py-2">
+				<input
+					value={query}
+					onChange={(e) => setQuery(e.target.value)}
+					placeholder="Filter by name, id, or provider"
+					className="field h-8 w-full px-2 text-sm"
+				/>
+			</div>
+			{catalogError ? (
+				<div className="mx-3 my-2 rounded-md border border-danger/30 bg-danger/10 px-3 py-2 font-mono text-xs text-danger">
+					{catalogError}
+				</div>
+			) : null}
+			<div className="max-h-[50vh] overflow-y-auto">
+				{loading ? <div className="px-3 py-6 text-center text-sm text-ink-3">Loading…</div> : null}
+				{grouped.map((g) => (
+					<div key={g.provider}>
+						<div className="border-b border-line bg-paper-2 px-3 py-1 font-mono text-2xs uppercase tracking-meta text-ink-3">
+							{g.provider}
+						</div>
+						{g.items.map((m) => (
+							<button
+								key={`${m.provider}/${m.id}`}
+								type="button"
+								onClick={() => onPicked({ provider: m.provider, id: m.id })}
+								className="flex w-full items-center gap-2 border-b border-line px-3 py-2 text-left text-sm last:border-b-0 hover:bg-paper-3/60"
+							>
+								<span className="min-w-0 flex-1 truncate">{m.label}</span>
+								<span className="shrink-0 font-mono text-2xs text-ink-3">{m.id}</span>
+							</button>
+						))}
+					</div>
+				))}
+			</div>
+		</Modal>
+	);
 }
 
 function PermissionCard({

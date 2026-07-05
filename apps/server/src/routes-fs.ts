@@ -277,17 +277,32 @@ function resolveHome(): string {
 }
 
 export function isCwdAllowed(cwd: string): boolean {
-	// Only allow cwds under the user's home directory. The deck is loopback-
-	// only, but a buggy client shouldn't be able to probe `C:\Windows\System32`.
-	const home = resolveHome();
-	if (!home) return false;
+	// Allow cwds under $HOME or under any root listed in OMP_DECK_WORKSPACES.
+	// The deck is loopback-only, but a buggy client shouldn't be able to probe
+	// arbitrary filesystem paths — only paths the user has explicitly configured
+	// as workspaces are permitted.
 	try {
 		const resolved = path.resolve(cwd);
-		const homeResolved = path.resolve(home);
-		const rel = path.relative(homeResolved, resolved);
-		if (rel.startsWith("..") || path.isAbsolute(rel)) return false;
-		// Reject if cwd doesn't actually exist on disk — fail closed.
-		return existsSync(resolved) && statSync(resolved).isDirectory();
+		if (!(existsSync(resolved) && statSync(resolved).isDirectory())) return false;
+
+		// Build the list of allowed roots: $HOME + each OMP_DECK_WORKSPACES entry.
+		const roots: string[] = [];
+		const home = resolveHome();
+		if (home) roots.push(path.resolve(home));
+		const extra = (process.env.OMP_DECK_WORKSPACES ?? "")
+			.split(",")
+			.map((s) => s.trim())
+			.filter(Boolean)
+			.map((p) => path.resolve(p));
+		roots.push(...extra);
+
+		if (roots.length === 0) return false;
+
+		return roots.some((root) => {
+			const rel = path.relative(root, resolved);
+			// Empty rel = resolved IS the root (exact match). Both are allowed.
+			return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
+		});
 	} catch {
 		return false;
 	}
