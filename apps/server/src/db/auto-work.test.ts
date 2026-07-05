@@ -53,6 +53,8 @@ describe("auto-work config", () => {
 			timeWindows: [{ start: 8, end: 20 }],
 			sessionPctLimit: 30,
 			weeklyPctLimit: 75,
+			defaultEstimatePctByPriority: { P0: 25, P1: 15, P2: 10, P3: 8, P4: 5, P5: 3 },
+			estimationBuffer: 1.5,
 		});
 		expect(stored.enabled).toBe(true);
 		expect(stored.modelByPriority.P0).toEqual({ provider: "anthropic", id: "claude-x" });
@@ -60,6 +62,8 @@ describe("auto-work config", () => {
 		expect(stored.timeWindows).toEqual([{ start: 8, end: 20 }]);
 		expect(stored.sessionPctLimit).toBe(30);
 		expect(stored.weeklyPctLimit).toBe(75);
+		expect(stored.defaultEstimatePctByPriority).toEqual({ P0: 25, P1: 15, P2: 10, P3: 8, P4: 5, P5: 3 });
+		expect(stored.estimationBuffer).toBe(1.5);
 
 		const fetched = getAutoWorkConfig("/tmp/project-a");
 		expect(fetched).toEqual(stored);

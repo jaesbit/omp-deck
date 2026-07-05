@@ -88,6 +88,8 @@ export function buildAutoWorkRouter(bridge: AgentBridge): Hono {
 				timeWindows: body.timeWindows,
 				sessionPctLimit: body.sessionPctLimit,
 				weeklyPctLimit: body.weeklyPctLimit,
+				defaultEstimatePctByPriority: body.defaultEstimatePctByPriority,
+				estimationBuffer: body.estimationBuffer,
 			});
 			return c.json(config);
 		} catch (err) {
@@ -181,6 +183,20 @@ function validateShape(body: SetAutoWorkConfigRequest): string | undefined {
 	}
 	if (typeof body.weeklyPctLimit !== "number" || body.weeklyPctLimit < 0 || body.weeklyPctLimit > 100) {
 		return "weeklyPctLimit must be a number between 0 and 100";
+	}
+
+	if (typeof body.defaultEstimatePctByPriority !== "object" || body.defaultEstimatePctByPriority === null) {
+		return "defaultEstimatePctByPriority must be an object";
+	}
+	for (const priority of TASK_PRIORITIES) {
+		const pct = body.defaultEstimatePctByPriority[priority];
+		if (typeof pct !== "number" || pct < 0 || pct > 100) {
+			return `defaultEstimatePctByPriority.${priority} must be a number between 0 and 100`;
+		}
+	}
+
+	if (typeof body.estimationBuffer !== "number" || body.estimationBuffer < 1 || body.estimationBuffer > 5) {
+		return "estimationBuffer must be a number between 1 and 5";
 	}
 
 	return undefined;

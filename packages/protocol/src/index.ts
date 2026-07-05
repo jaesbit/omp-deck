@@ -1911,6 +1911,14 @@ export interface AutoWorkConfig {
 	sessionPctLimit: number;
 	/** Ceiling on cumulative weekly auto-work spend, as % of the weekly budget, 0–100. */
 	weeklyPctLimit: number;
+	/**
+	 * Default cost estimate (% of a session budget) per priority, used by
+	 * `estimateTaskCostPct` (T-63) when no completed run history exists yet
+	 * for that priority.
+	 */
+	defaultEstimatePctByPriority: Record<TaskPriority, number>;
+	/** Safety-buffer multiplier applied to every cost estimate (T-63), e.g. 1.3 = 30% headroom. */
+	estimationBuffer: number;
 	updatedAt: string;
 }
 
@@ -1921,6 +1929,8 @@ export interface SetAutoWorkConfigRequest {
 	timeWindows: AutoWorkTimeWindow[];
 	sessionPctLimit: number;
 	weeklyPctLimit: number;
+	defaultEstimatePctByPriority: Record<TaskPriority, number>;
+	estimationBuffer: number;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

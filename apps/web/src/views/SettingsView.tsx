@@ -1168,6 +1168,8 @@ function autoWorkToRequest(config: AutoWorkConfig): SetAutoWorkConfigRequest {
 		timeWindows: config.timeWindows,
 		sessionPctLimit: config.sessionPctLimit,
 		weeklyPctLimit: config.weeklyPctLimit,
+		defaultEstimatePctByPriority: config.defaultEstimatePctByPriority,
+		estimationBuffer: config.estimationBuffer,
 	};
 }
 
@@ -1486,6 +1488,54 @@ function AutoWorkConfigModal({
 								);
 							})}
 						</ul>
+					</div>
+
+					<div>
+						<div className="meta mb-1">Default cost estimate per priority (% of session budget)</div>
+						<p className="mb-1 text-2xs text-ink-3">
+							Used to decide whether a task fits the remaining budget before history exists for that
+							priority.
+						</p>
+						<ul className="divide-y divide-line rounded-md border border-line">
+							{TASK_PRIORITIES.map((priority) => (
+								<li key={priority} className="flex items-center gap-2 px-2 py-1.5 text-sm">
+									<span className="w-8 font-mono text-2xs text-ink-3">{priority}</span>
+									<input
+										type="number"
+										min={0}
+										max={100}
+										value={draft.defaultEstimatePctByPriority[priority]}
+										onChange={(e) =>
+											setDraft({
+												...draft,
+												defaultEstimatePctByPriority: {
+													...draft.defaultEstimatePctByPriority,
+													[priority]: Number(e.target.value),
+												},
+											})
+										}
+										className="field h-8 w-20 px-2"
+									/>
+									<span className="text-2xs text-ink-3">%</span>
+								</li>
+							))}
+						</ul>
+					</div>
+
+					<div>
+						<label className="mb-1 flex items-center justify-between text-sm">
+							<span>Estimation safety buffer</span>
+							<span className="font-mono text-2xs text-ink-3">{draft.estimationBuffer.toFixed(2)}x</span>
+						</label>
+						<input
+							type="range"
+							min={1}
+							max={2}
+							step={0.05}
+							value={draft.estimationBuffer}
+							onChange={(e) => setDraft({ ...draft, estimationBuffer: Number(e.target.value) })}
+							className="w-full"
+						/>
 					</div>
 				</div>
 				<div className="flex items-center justify-end gap-2 border-t border-line px-3 py-2">
