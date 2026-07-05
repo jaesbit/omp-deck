@@ -57,6 +57,7 @@ function fakeBridge(sessions: SessionSummary[]): AgentBridge {
 function reportWith(usedFraction: number, resetsAt?: number): UsageReport {
 	return {
 		provider: "anthropic",
+		fetchedAt: Date.now(),
 		limits: [
 			{
 				id: "5h",

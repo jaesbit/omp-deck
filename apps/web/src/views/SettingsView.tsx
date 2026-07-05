@@ -1170,6 +1170,7 @@ function autoWorkToRequest(config: AutoWorkConfig): SetAutoWorkConfigRequest {
 		weeklyPctLimit: config.weeklyPctLimit,
 		defaultEstimatePctByPriority: config.defaultEstimatePctByPriority,
 		estimationBuffer: config.estimationBuffer,
+		timeoutMinutesByPriority: config.timeoutMinutesByPriority,
 	};
 }
 

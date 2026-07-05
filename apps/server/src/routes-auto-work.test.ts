@@ -9,6 +9,8 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
+import type { UsageReport } from "@oh-my-pi/pi-ai";
+
 import type {
 	AutoWorkConfig,
 	AutoWorkCostEstimateResponse,
@@ -18,9 +20,30 @@ import type {
 } from "@omp-deck/protocol";
 
 import { closeDb, openDb } from "./db/index.ts";
-import { completeAutoWorkRun, startAutoWorkRun } from "./db/auto-work-runs.ts";
+import { DEFAULT_AUTO_WORK_VALUES, setAutoWorkConfig } from "./db/auto-work.ts";
+import { completeAutoWorkRun, listAutoWorkRuns, startAutoWorkRun } from "./db/auto-work-runs.ts";
+import { createTask, getTask } from "./db/tasks.ts";
 import { buildAutoWorkRouter } from "./routes-auto-work.ts";
-import type { AgentBridge } from "./bridge/types.ts";
+import type { AgentBridge, EventListener, SessionHandle } from "./bridge/types.ts";
+import { resetSubscriptionUsageCacheForTests, type UsageReportsFetcher } from "./usage-subscription.ts";
+
+/** Synthetic single-window usage report fixing pctUsed at `usedFraction * 100`. */
+function stubUsageFetcher(usedFraction: number): UsageReportsFetcher {
+	const report: UsageReport = {
+		provider: "anthropic",
+		fetchedAt: Date.now(),
+		limits: [
+			{
+				id: "5h",
+				label: "5 Hour",
+				scope: { provider: "anthropic" },
+				amount: { usedFraction, unit: "percent" },
+				window: { id: "5h", label: "5 Hour", durationMs: 5 * 3600_000 },
+			},
+		],
+	};
+	return async () => [report];
+}
 
 let dbDir: string;
 let dbPath: string;
@@ -55,6 +78,7 @@ function fullConfigBody(overrides: Partial<SetAutoWorkConfigRequest> = {}): SetA
 		weeklyPctLimit: 60,
 		defaultEstimatePctByPriority: { P0: 20, P1: 15, P2: 10, P3: 8, P4: 5, P5: 3 },
 		estimationBuffer: 1.3,
+		timeoutMinutesByPriority: { P0: 120, P1: 90, P2: 60, P3: 45, P4: 45, P5: 45 },
 		...overrides,
 	};
 }
@@ -361,5 +385,129 @@ describe("GET /auto-work/cost-estimate", () => {
 		const body = (await res.json()) as AutoWorkCostEstimateResponse;
 		expect(body.sampleSize).toBe(10);
 		expect(body.avgPctConsumed).toBe(7.5);
+	});
+});
+
+/**
+ * `POST /auto-work/trigger` (T-64) — exercises the real route wired to the
+ * real `runAutoWorkCycle` orchestrator, with a stub `AgentBridge` standing in
+ * for a live agent session (no real session is ever spun up) and a real git
+ * repo so `git worktree add` runs for real.
+ */
+describe("POST /auto-work/trigger", () => {
+	class FakeSessionHandle {
+		readonly sessionId: string;
+		private listeners = new Set<EventListener>();
+
+		constructor(
+			sessionId: string,
+			private readonly terminalDelayMs: number | null,
+		) {
+			this.sessionId = sessionId;
+		}
+
+		subscribe(listener: EventListener): () => void {
+			this.listeners.add(listener);
+			if (this.terminalDelayMs !== null) {
+				setTimeout(() => listener({ type: "turn_end" } as never), this.terminalDelayMs);
+			}
+			return () => this.listeners.delete(listener);
+		}
+
+		async prompt(): Promise<void> {}
+	}
+
+	function triggerBridge(handle: FakeSessionHandle): AgentBridge {
+		return {
+			async listModels() {
+				return [];
+			},
+			async createSession() {
+				return handle as unknown as SessionHandle;
+			},
+		} as unknown as AgentBridge;
+	}
+
+	function runGit(args: string[], cwd: string): void {
+		const result = Bun.spawnSync({ cmd: ["git", ...args], cwd, stdout: "pipe", stderr: "pipe" });
+		if (result.exitCode !== 0) throw new Error(`git ${args.join(" ")} failed: ${result.stderr.toString()}`);
+	}
+
+	let homeDir: string;
+	let repoCwd: string;
+	let originalHome: string | undefined;
+
+	beforeEach(() => {
+		originalHome = process.env.HOME;
+		homeDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-deck-trigger-home-"));
+		process.env.HOME = homeDir;
+		repoCwd = path.join(homeDir, "workspace");
+		fs.mkdirSync(repoCwd, { recursive: true });
+		runGit(["init", "-q"], repoCwd);
+		runGit(["config", "user.email", "test@example.com"], repoCwd);
+		runGit(["config", "user.name", "Test"], repoCwd);
+		fs.writeFileSync(path.join(repoCwd, "README.md"), "hello\n");
+		runGit(["add", "."], repoCwd);
+		runGit(["commit", "-q", "-m", "init"], repoCwd);
+
+		resetSubscriptionUsageCacheForTests();
+	});
+
+	afterEach(() => {
+		if (originalHome === undefined) delete process.env.HOME;
+		else process.env.HOME = originalHome;
+		resetSubscriptionUsageCacheForTests();
+		fs.rmSync(homeDir, { recursive: true, force: true });
+	});
+
+
+	test("requires a cwd query param", async () => {
+		const app = buildAutoWorkRouter(triggerBridge(new FakeSessionHandle("s", 10)));
+		expect((await app.request("/auto-work/trigger", { method: "POST" })).status).toBe(400);
+	});
+
+	test("rejects a cwd outside the allowed root", async () => {
+		const app = buildAutoWorkRouter(triggerBridge(new FakeSessionHandle("s", 10)));
+		const res = await app.request(`/auto-work/trigger?cwd=${encodeURIComponent("/definitely/not/allowed")}`, {
+			method: "POST",
+		});
+		expect(res.status).toBe(400);
+	});
+
+	test("fires a cycle immediately, starting and completing a run for an eligible task", async () => {
+		setAutoWorkConfig(repoCwd, { ...DEFAULT_AUTO_WORK_VALUES, enabled: true });
+		const task = createTask({ title: "Trigger me", cwd: repoCwd, priority: "P5", autoWork: true });
+
+		const app = buildAutoWorkRouter(triggerBridge(new FakeSessionHandle("sess_trigger", 10)), {
+			fetcherOverride: stubUsageFetcher(0.05),
+		});
+		const res = await app.request(`/auto-work/trigger?cwd=${encodeURIComponent(repoCwd)}`, { method: "POST" });
+		expect(res.status).toBe(200);
+		const body = (await res.json()) as { outcome: string; taskId?: string; runId?: string };
+		expect(body.outcome).toBe("completed");
+		expect(body.taskId).toBe(task.id);
+
+		expect(getTask(task.id)?.stateId).toBe("s_active");
+		expect(listAutoWorkRuns({ taskId: task.id })[0]?.status).toBe("completed");
+	});
+
+	test("is safely callable a second time while a run is active — mutex skips instead of double-starting", async () => {
+		setAutoWorkConfig(repoCwd, { ...DEFAULT_AUTO_WORK_VALUES, enabled: true });
+		const task = createTask({ title: "Already running", cwd: repoCwd, priority: "P5", autoWork: true });
+		startAutoWorkRun({
+			taskId: task.id,
+			taskPriority: "P5",
+			sessionId: "in-flight",
+			worktreePath: "/tmp/x",
+		});
+
+		const app = buildAutoWorkRouter(triggerBridge(new FakeSessionHandle("sess_2", 10)), {
+			fetcherOverride: stubUsageFetcher(0.05),
+		});
+		const res = await app.request(`/auto-work/trigger?cwd=${encodeURIComponent(repoCwd)}`, { method: "POST" });
+		expect(res.status).toBe(200);
+		const body = (await res.json()) as { outcome: string; reason?: string };
+		expect(body.outcome).toBe("skipped");
+		expect(body.reason).toContain("already active");
 	});
 });

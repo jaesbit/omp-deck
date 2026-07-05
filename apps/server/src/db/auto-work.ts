@@ -30,6 +30,16 @@ export const DEFAULT_ESTIMATE_PCT_BY_PRIORITY: Record<TaskPriority, number> = {
 /** Default safety-buffer multiplier applied to every cost estimate (T-63) — 30% headroom. */
 export const DEFAULT_ESTIMATION_BUFFER = 1.3;
 
+/** Default per-priority execution timeout in minutes, used by the engine (T-64) while waiting for a session to finish. */
+export const DEFAULT_TIMEOUT_MINUTES_BY_PRIORITY: Record<TaskPriority, number> = {
+	P0: 120,
+	P1: 90,
+	P2: 60,
+	P3: 45,
+	P4: 45,
+	P5: 45,
+};
+
 /** Disabled, no model overrides, full-day window, unrestricted spend, default cost estimates. */
 export const DEFAULT_AUTO_WORK_VALUES: Omit<AutoWorkConfig, "workspaceCwd" | "updatedAt"> = {
 	enabled: false,
@@ -39,6 +49,7 @@ export const DEFAULT_AUTO_WORK_VALUES: Omit<AutoWorkConfig, "workspaceCwd" | "up
 	weeklyPctLimit: 100,
 	defaultEstimatePctByPriority: DEFAULT_ESTIMATE_PCT_BY_PRIORITY,
 	estimationBuffer: DEFAULT_ESTIMATION_BUFFER,
+	timeoutMinutesByPriority: DEFAULT_TIMEOUT_MINUTES_BY_PRIORITY,
 };
 
 interface Row {
@@ -50,6 +61,7 @@ interface Row {
 	weekly_pct_limit: number;
 	default_estimate_pct_by_priority: string;
 	estimation_buffer: number;
+	timeout_minutes_by_priority: string;
 	updated_at: string;
 }
 
@@ -93,6 +105,15 @@ function rowToConfig(r: Row): AutoWorkConfig {
 	} catch {
 		defaultEstimatePctByPriority = DEFAULT_ESTIMATE_PCT_BY_PRIORITY;
 	}
+	let timeoutMinutesByPriority: Record<TaskPriority, number>;
+	try {
+		const parsed = JSON.parse(r.timeout_minutes_by_priority) as Partial<Record<TaskPriority, number>>;
+		timeoutMinutesByPriority = Object.fromEntries(
+			TASK_PRIORITIES.map((p) => [p, parsed[p] ?? DEFAULT_TIMEOUT_MINUTES_BY_PRIORITY[p]]),
+		) as Record<TaskPriority, number>;
+	} catch {
+		timeoutMinutesByPriority = DEFAULT_TIMEOUT_MINUTES_BY_PRIORITY;
+	}
 	return {
 		workspaceCwd: r.workspace_cwd,
 		enabled: r.enabled !== 0,
@@ -102,6 +123,7 @@ function rowToConfig(r: Row): AutoWorkConfig {
 		weeklyPctLimit: r.weekly_pct_limit,
 		defaultEstimatePctByPriority,
 		estimationBuffer: r.estimation_buffer,
+		timeoutMinutesByPriority,
 		updatedAt: r.updated_at,
 	};
 }
@@ -112,7 +134,7 @@ export function getAutoWorkConfig(cwd: string): AutoWorkConfig {
 		.query<Row, [string]>(
 			`SELECT workspace_cwd, enabled, model_by_priority, time_windows,
 			        session_pct_limit, weekly_pct_limit, default_estimate_pct_by_priority,
-			        estimation_buffer, updated_at
+			        estimation_buffer, timeout_minutes_by_priority, updated_at
 			 FROM auto_work_config WHERE workspace_cwd = ?`,
 		)
 		.get(cwd) as Row | null;
@@ -127,12 +149,12 @@ export function setAutoWorkConfig(
 ): AutoWorkConfig {
 	const db = getDb();
 	const now = nowIso();
-	db.prepare<unknown, [string, number, string, string, number, number, string, number, string]>(
+	db.prepare<unknown, [string, number, string, string, number, number, string, number, string, string]>(
 		`INSERT INTO auto_work_config
 		   (workspace_cwd, enabled, model_by_priority, time_windows,
 		    session_pct_limit, weekly_pct_limit, default_estimate_pct_by_priority,
-		    estimation_buffer, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		    estimation_buffer, timeout_minutes_by_priority, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(workspace_cwd) DO UPDATE SET
 		   enabled = excluded.enabled,
 		   model_by_priority = excluded.model_by_priority,
@@ -141,6 +163,7 @@ export function setAutoWorkConfig(
 		   weekly_pct_limit = excluded.weekly_pct_limit,
 		   default_estimate_pct_by_priority = excluded.default_estimate_pct_by_priority,
 		   estimation_buffer = excluded.estimation_buffer,
+		   timeout_minutes_by_priority = excluded.timeout_minutes_by_priority,
 		   updated_at = excluded.updated_at`,
 	).run(
 		cwd,
@@ -151,6 +174,7 @@ export function setAutoWorkConfig(
 		values.weeklyPctLimit,
 		JSON.stringify(values.defaultEstimatePctByPriority),
 		values.estimationBuffer,
+		JSON.stringify(values.timeoutMinutesByPriority),
 		now,
 	);
 	return getAutoWorkConfig(cwd);

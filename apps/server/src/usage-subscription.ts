@@ -13,29 +13,23 @@
  */
 
 import { resolveUsedFraction, type UsageReport } from "@oh-my-pi/pi-ai";
+import type { SubscriptionUsageAvailable, SubscriptionUsageResponse, SubscriptionUsageUnavailable } from "@omp-deck/protocol";
 import { getDeckAuthStorage, getDeckModelRegistry } from "./auth-singleton.ts";
 import { logger } from "./log.ts";
 
 const log = logger("usage-subscription");
 
 // ---------------------------------------------------------------------------
-// Public types (also declared in packages/protocol/src/index.ts — keep in sync)
+// Public types — re-exported from @omp-deck/protocol (the wire contract),
+// not re-declared here. A prior local copy of these interfaces drifted out
+// of sync with the protocol package after the multi-window (limits/
+// sessionPct/weeklyPct) refactor below was implemented but the duplicate
+// declaration was never updated to match (T-69) — importing instead of
+// duplicating makes that class of drift structurally impossible.
 // ---------------------------------------------------------------------------
 
-export interface SubscriptionUsageAvailable {
-	available: true;
-	/** Percentage of the most-constraining usage window consumed (0–100). */
-	pctUsed: number;
-	/** ISO-8601 timestamp of when that window resets. */
-	resetAt: string;
-}
-
-export interface SubscriptionUsageUnavailable {
-	available: false;
-	reason: string;
-}
-
-export type SubscriptionUsageResult = SubscriptionUsageAvailable | SubscriptionUsageUnavailable;
+export type { SubscriptionUsageAvailable, SubscriptionUsageUnavailable };
+export type SubscriptionUsageResult = SubscriptionUsageResponse;
 
 // ---------------------------------------------------------------------------
 // Test seam
