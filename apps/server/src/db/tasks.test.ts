@@ -296,3 +296,52 @@ describe("dependencies (T-57)", () => {
 		expect(getTask(t.id)?.dependsOn).toEqual([]);
 	});
 });
+
+describe("autoWork (T-58)", () => {
+	test("createTask defaults autoWork to false", () => {
+		bootDb();
+		const t = createTask({ title: "no autowork", stateId: "s_backlog" });
+		expect(t.autoWork).toBe(false);
+	});
+
+	test("createTask accepts an explicit autoWork: true", () => {
+		bootDb();
+		const t = createTask({ title: "eligible", stateId: "s_backlog", autoWork: true });
+		expect(t.autoWork).toBe(true);
+	});
+
+	test("updateTask can flip autoWork on and off", () => {
+		bootDb();
+		const t = createTask({ title: "t", stateId: "s_backlog" });
+		expect(t.autoWork).toBe(false);
+
+		const flagged = updateTask(t.id, { autoWork: true })!;
+		expect(flagged.autoWork).toBe(true);
+
+		const unflagged = updateTask(t.id, { autoWork: false })!;
+		expect(unflagged.autoWork).toBe(false);
+	});
+
+	test("updateTask omitting autoWork leaves the existing value untouched", () => {
+		bootDb();
+		const t = createTask({ title: "t", stateId: "s_backlog", autoWork: true });
+		const updated = updateTask(t.id, { title: "t renamed" })!;
+		expect(updated.autoWork).toBe(true);
+	});
+
+	test("listTasks and getTask round-trip autoWork", () => {
+		bootDb();
+		const t = createTask({ title: "t", stateId: "s_backlog", autoWork: true });
+		expect(getTask(t.id)?.autoWork).toBe(true);
+		expect(listTasks().find((x) => x.id === t.id)?.autoWork).toBe(true);
+	});
+
+	test("autoWork and dependsOn are independent — setting one leaves the other untouched", () => {
+		bootDb();
+		const dep = createTask({ title: "dep", stateId: "s_backlog" });
+		const t = createTask({ title: "t", stateId: "s_backlog", dependsOn: [dep.id] });
+		const updated = updateTask(t.id, { autoWork: true })!;
+		expect(updated.autoWork).toBe(true);
+		expect(updated.dependsOn).toEqual([dep.id]);
+	});
+});

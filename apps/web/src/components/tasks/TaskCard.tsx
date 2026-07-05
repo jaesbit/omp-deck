@@ -1,5 +1,6 @@
 import { useSortable } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
+import { Zap } from "lucide-react";
 import type { Task, TaskPriority } from "@omp-deck/protocol";
 import { formatBriefTime } from "@/lib/time";
 import { cn, truncate } from "@/lib/utils";
@@ -130,6 +131,13 @@ export function TaskCardBody({
 				>
 					{task.priority}
 				</span>
+				{task.autoWork ? (
+					<Zap
+						className="h-3 w-3 shrink-0 text-accent"
+						role="img"
+						aria-label="Eligible for Auto Work"
+					/>
+				) : null}
 				{brief ? (
 					<time
 						dateTime={stamp}
