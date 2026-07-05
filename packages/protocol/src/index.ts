@@ -722,6 +722,53 @@ export interface ContextUsage {
 	percent: number | null;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Usage API (T-59): Anthropic subscription usage + per-session token usage.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * `GET /api/usage/subscription` success shape. Derived from the Anthropic
+ * Messages API's `anthropic-ratelimit-tokens-*` response headers (see
+ * `apps/server/src/usage-subscription.ts` for the exact request + parsing —
+ * flagged there as best-effort/unverified pending a live API check).
+ *
+ * `pctUsed` is a 0-100 percentage (not a 0-1 fraction). `resetAt` is
+ * ISO-8601, converted from the API's RFC 3339 header value.
+ */
+export interface SubscriptionUsageAvailable {
+	available: true;
+	used: number;
+	limit: number;
+	pctUsed: number;
+	resetAt: string;
+}
+
+/** `GET /api/usage/subscription` graceful-degradation shape — never a 500. */
+export interface SubscriptionUsageUnavailable {
+	available: false;
+	reason: string;
+}
+
+export type SubscriptionUsageResponse = SubscriptionUsageAvailable | SubscriptionUsageUnavailable;
+
+/** One entry of `GET /api/usage/sessions` — token/cost totals for a single persisted session. */
+export interface SessionUsageSummary {
+	id: string;
+	path: string;
+	cwd: string;
+	title?: string;
+	updatedAt: string;
+	/** Sum of `usage.totalTokens` across every assistant message in the transcript. */
+	totalTokens: number;
+	/** Sum of `usage.cost.total` (USD) across every assistant message, when the transcript recorded cost. */
+	costUsd: number;
+	messageCount: number;
+}
+
+export interface ListSessionUsageResponse {
+	sessions: SessionUsageSummary[];
+}
+
 /**
  * Live plan-mode state for a session. Mirrors the SDK's `PlanModeState` shape
  * minus internal flags the deck UI never consumes (workflow / reentry).
