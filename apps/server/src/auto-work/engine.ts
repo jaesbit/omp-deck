@@ -18,10 +18,12 @@
  * pair. There is no separate "auto-work done" event type — turn completion
  * *is* terminal state for a one-shot session.
  *
+ * On a successful run (T-66), `finalizeAutoWorkRun` opens a PR from the
+ * worktree branch, appends a session-link + PR-reference note to the task
+ * body, and moves the task to `validate` (never `done` — every auto-work
+ * result is human-reviewed) before closing the run row `status: "completed"`.
+ *
  * Explicitly out of scope here (later tickets in the stack):
- *  - T-66: PR creation + moving the task to `validate` on success. A
- *    successful run leaves the task in `active` with the run row closed
- *    `status: "completed"` — T-66 picks up from there.
  *  - T-67: notifications. Lifecycle transitions are logged at info/warn so a
  *    notifier can hook the log stream later.
  */
@@ -39,8 +41,11 @@ import type {
 } from "@omp-deck/protocol";
 
 import type { AgentBridge, SessionHandle } from "../bridge/types.ts";
+import { loadConfig } from "../config.ts";
+import { buildSessionUrl } from "../deck-links.ts";
 import { getAutoWorkConfig } from "../db/auto-work.ts";
 import { completeAutoWorkRun, listAutoWorkRuns, startAutoWorkRun } from "../db/auto-work-runs.ts";
+import { getDeckBaseUrl as getServerDeckBaseUrl } from "../db/server-settings.ts";
 import { findStateByName, getTask, listTasks, moveTask, updateTask } from "../db/tasks.ts";
 import { getWorkspacePreference } from "../db/workspace-preferences.ts";
 import { logger } from "../log.ts";
@@ -216,6 +221,20 @@ export interface RunAutoWorkCycleOptions {
 	getSubscriptionUsage?: () => Promise<{ available: boolean; weeklyPct?: number }>;
 	/** Injectable clock for tests — defaults to `new Date()`. */
 	now?: () => Date;
+	/**
+	 * Resolves the deck base URL used to build the session link appended to a
+	 * completed task's body (T-66). Defaults to the real T-61 setting via
+	 * `getDeckBaseUrl(loadConfig())`. Injectable for tests so they don't need
+	 * a real `Config`/on-disk `server_settings` row.
+	 */
+	getDeckBaseUrl?: () => string;
+	/**
+	 * Opens the PR for a successfully completed run (T-66). Defaults to a
+	 * real `gh pr create` invocation via `Bun.spawn`. Injectable for tests —
+	 * a test must NEVER let the real default run, since that would shell out
+	 * to `gh` and attempt to open an actual GitHub PR.
+	 */
+	createPullRequest?: (params: CreatePullRequestParams) => Promise<CreatePullRequestResult>;
 }
 
 /**
@@ -235,6 +254,8 @@ export async function runAutoWorkCycle(
 	const usageLookup = options.getSubscriptionUsage ?? (() => getSubscriptionUsage());
 	const usage = await usageLookup();
 	const subscriptionPctUsed = usage.available && typeof usage.weeklyPct === "number" ? usage.weeklyPct : null;
+	const resolveDeckBaseUrl = options.getDeckBaseUrl ?? (() => getServerDeckBaseUrl(loadConfig()).deckBaseUrl);
+	const createPullRequest = options.createPullRequest ?? createPullRequestViaGh;
 
 	const allTasks = listTasks();
 	const workspaceTasks = allTasks.filter((t) => t.cwd === cwd);
@@ -246,7 +267,10 @@ export async function runAutoWorkCycle(
 	// `classifyRunningAutoWorkRun` (T-65).
 	const runningRun = activeRuns.find((r) => r.status === "running");
 	if (runningRun) {
-		const resumed = await resumeOrRetireAutoWorkRun(cwd, bridge, runningRun, config);
+		const resumed = await resumeOrRetireAutoWorkRun(cwd, bridge, runningRun, config, {
+			resolveDeckBaseUrl,
+			createPullRequest,
+		});
 		if (resumed) return resumed;
 		activeRuns = activeRuns.filter((r) => r.id !== runningRun.id);
 	}
@@ -321,7 +345,7 @@ export async function runAutoWorkCycle(
 	await session.prompt(prompt);
 
 	const timeoutMinutes = resolveAutoWorkTimeoutMinutes(task.priority, config);
-	return finalizeAutoWorkRun({ runId, task, session, worktreePath, timeoutMinutes });
+	return finalizeAutoWorkRun({ runId, task, session, worktreePath, timeoutMinutes, resolveDeckBaseUrl, createPullRequest });
 }
 
 // ─── Small IO helpers ───────────────────────────────────────────────────────
@@ -332,6 +356,14 @@ export async function runAutoWorkCycle(
  * by both a freshly-started run and a `"resume"`/`"reconnect"` pickup of a
  * pre-existing one (T-65), so a resumed run gets exactly the same
  * timeout/blocked/completed handling a fresh one does.
+ *
+ * The success branch (T-66) opens a PR from the worktree branch, appends a
+ * session-link + PR-reference note to the task body, and moves the task to
+ * `validate` (never `done` — every auto-work result is human-reviewed). A PR
+ * creation failure does not fail the run: the agent's work did complete, so
+ * the task still moves to `validate` with a note that the PR needs to be
+ * opened by hand — surfacing that loudly in the body and the logs beats
+ * silently discarding a completed session behind an unrelated `gh` error.
  */
 async function finalizeAutoWorkRun(params: {
 	runId: string;
@@ -339,8 +371,10 @@ async function finalizeAutoWorkRun(params: {
 	session: SessionHandle;
 	worktreePath: string;
 	timeoutMinutes: number;
+	resolveDeckBaseUrl: () => string;
+	createPullRequest: (params: CreatePullRequestParams) => Promise<CreatePullRequestResult>;
 }): Promise<AutoWorkCycleResult> {
-	const { runId, task, session, worktreePath, timeoutMinutes } = params;
+	const { runId, task, session, worktreePath, timeoutMinutes, resolveDeckBaseUrl, createPullRequest } = params;
 	const terminal = await waitForAutoWorkSessionTerminal(session, timeoutMinutes * 60_000);
 
 	if (terminal === "timed_out") {
@@ -355,8 +389,34 @@ async function finalizeAutoWorkRun(params: {
 		return { outcome: "timed_out", taskId: task.id, runId, sessionId: session.sessionId, worktreePath };
 	}
 
+	const deckBaseUrl = resolveDeckBaseUrl();
+	const sessionUrl = buildSessionUrl(deckBaseUrl, session.sessionId);
+	const shortSessionId = session.sessionId.slice(0, 8);
+
+	let prNote: string;
+	try {
+		const pr = await createPullRequest({
+			cwd: worktreePath,
+			title: `feat: T-${task.displayId} ${task.title}`,
+			body: `Auto Work completed T-${task.displayId}: ${task.title}\n\nSession: ${sessionUrl}`,
+		});
+		prNote = `PR #${pr.number}`;
+		log.info(`run ${runId}: opened PR #${pr.number} (${pr.url}) for T-${task.displayId}`);
+	} catch (err) {
+		prNote = "PR creation failed — open manually";
+		log.error(`run ${runId}: gh pr create failed for T-${task.displayId}`, err);
+	}
+
+	updateTask(task.id, {
+		body: `${task.body}\n\n---\n**Auto Work** — [session ${shortSessionId}](${sessionUrl}) · ${prNote}`,
+	});
+
+	const validateState = findStateByName("validate");
+	if (validateState) moveTask(task.id, validateState.id, 0);
+	else log.error(`run ${runId}: "validate" task state not found — T-${task.displayId} left in its current state`);
+
 	completeAutoWorkRun(runId, { status: "completed" });
-	log.info(`run ${runId} completed for T-${task.displayId} — awaiting T-66 (PR + validate)`);
+	log.info(`run ${runId} completed for T-${task.displayId} — moved to validate`);
 	return { outcome: "completed", taskId: task.id, runId, sessionId: session.sessionId, worktreePath };
 }
 
@@ -437,6 +497,10 @@ async function resumeOrRetireAutoWorkRun(
 	bridge: AgentBridge,
 	run: AutoWorkRun,
 	config: AutoWorkConfig,
+	completion: {
+		resolveDeckBaseUrl: () => string;
+		createPullRequest: (params: CreatePullRequestParams) => Promise<CreatePullRequestResult>;
+	},
 ): Promise<AutoWorkCycleResult | undefined> {
 	const handle = await resolveRunningSessionHandle(bridge, run);
 	const worktreeExists = fs.existsSync(run.worktreePath);
@@ -473,6 +537,8 @@ async function resumeOrRetireAutoWorkRun(
 		session: handle,
 		worktreePath: run.worktreePath,
 		timeoutMinutes,
+		resolveDeckBaseUrl: completion.resolveDeckBaseUrl,
+		createPullRequest: completion.createPullRequest,
 	});
 }
 
@@ -554,4 +620,48 @@ async function validateModelRef(bridge: AgentBridge, ref: ModelRef): Promise<str
 	if (!match) return `unknown model: ${ref.provider}/${ref.id}`;
 	if (!match.isAvailable) return `no auth configured for ${ref.provider}/${ref.id}`;
 	return undefined;
+}
+
+export interface CreatePullRequestParams {
+	/** The worktree directory the PR is opened from — its checked-out branch becomes the PR head. */
+	cwd: string;
+	title: string;
+	body: string;
+}
+
+export interface CreatePullRequestResult {
+	url: string;
+	number: number;
+}
+
+/** Base branch auto-work PRs target. No per-workspace override exists yet (T-66 scope: `origin/main`). */
+const AUTO_WORK_PR_BASE_BRANCH = "main";
+
+/**
+ * `gh pr create --base main --title <title> --body <body>`, run from the
+ * worktree directory so `gh` infers the PR head from the branch already
+ * checked out there (see `createAutoWorkWorktree`). Follows the same
+ * `Bun.spawn` convention as `createAutoWorkWorktree`/`removeAutoWorkWorktree`
+ * rather than `node:child_process`. Parses the PR number out of the URL
+ * `gh pr create` prints on stdout (e.g. `https://github.com/o/r/pull/123`).
+ */
+async function createPullRequestViaGh(params: CreatePullRequestParams): Promise<CreatePullRequestResult> {
+	const proc = Bun.spawn(
+		["gh", "pr", "create", "--base", AUTO_WORK_PR_BASE_BRANCH, "--title", params.title, "--body", params.body],
+		{ cwd: params.cwd, stdin: "ignore", stdout: "pipe", stderr: "pipe", windowsHide: true },
+	);
+	const [stdout, stderr, exitCode] = await Promise.all([
+		new Response(proc.stdout).text(),
+		new Response(proc.stderr).text(),
+		proc.exited,
+	]);
+	if (exitCode !== 0) {
+		throw new Error(`gh pr create failed (exit ${exitCode}): ${stderr.trim()}`);
+	}
+	const url = stdout.trim().split("\n").pop() ?? "";
+	const match = url.match(/\/pull\/(\d+)\/?$/);
+	if (!match) {
+		throw new Error(`gh pr create succeeded but its output didn't contain a PR URL: ${stdout.trim()}`);
+	}
+	return { url, number: Number(match[1]) };
 }
