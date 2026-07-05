@@ -1,16 +1,24 @@
 /**
- * Exercises the real Hono router for `/auto-work/*` (T-60): defaults when
- * unconfigured, persistence across a simulated restart (close + reopen the
- * same on-disk DB file), and server-side validation of the PUT body.
+ * Exercises the real Hono router for `/auto-work/*` (T-60, T-62): defaults
+ * when unconfigured, persistence across a simulated restart (close + reopen
+ * the same on-disk DB file), server-side validation of the PUT body, and
+ * the run-history/cost-estimate read surface.
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-import type { AutoWorkConfig, ModelInfo, SetAutoWorkConfigRequest } from "@omp-deck/protocol";
+import type {
+	AutoWorkConfig,
+	AutoWorkCostEstimateResponse,
+	ListAutoWorkRunsResponse,
+	ModelInfo,
+	SetAutoWorkConfigRequest,
+} from "@omp-deck/protocol";
 
 import { closeDb, openDb } from "./db/index.ts";
+import { completeAutoWorkRun, startAutoWorkRun } from "./db/auto-work-runs.ts";
 import { buildAutoWorkRouter } from "./routes-auto-work.ts";
 import type { AgentBridge } from "./bridge/types.ts";
 
@@ -257,5 +265,99 @@ describe("PUT /auto-work/config — persistence", () => {
 		const body = (await res.json()) as AutoWorkConfig;
 		expect(body.enabled).toBe(false);
 		expect(body.sessionPctLimit).toBe(80);
+	});
+});
+
+describe("GET /auto-work/runs", () => {
+	test("returns an empty list when no runs exist", async () => {
+		const app = buildAutoWorkRouter(fakeBridge([]));
+		const res = await app.request("/auto-work/runs");
+		expect(res.status).toBe(200);
+		const body = (await res.json()) as ListAutoWorkRunsResponse;
+		expect(body.runs).toEqual([]);
+	});
+
+	test("reflects a run recorded via startAutoWorkRun/completeAutoWorkRun", async () => {
+		const runId = startAutoWorkRun({
+			taskId: "task-x",
+			taskPriority: "P2",
+			sessionId: "session-x",
+			worktreePath: "/tmp/wt-x",
+		});
+		completeAutoWorkRun(runId, { status: "completed", inputTokens: 100, outputTokens: 50, pctConsumed: 1.5 });
+
+		const app = buildAutoWorkRouter(fakeBridge([]));
+		const res = await app.request("/auto-work/runs");
+		const body = (await res.json()) as ListAutoWorkRunsResponse;
+		expect(body.runs.length).toBe(1);
+		expect(body.runs[0]!.id).toBe(runId);
+		expect(body.runs[0]!.status).toBe("completed");
+		expect(body.runs[0]!.inputTokens).toBe(100);
+		expect(body.runs[0]!.outputTokens).toBe(50);
+		expect(body.runs[0]!.pctConsumed).toBe(1.5);
+	});
+
+	test("filters by taskId, priority, and status", async () => {
+		const a = startAutoWorkRun({ taskId: "t-a", taskPriority: "P1", sessionId: "s-a", worktreePath: "/tmp/a" });
+		completeAutoWorkRun(a, { status: "completed", pctConsumed: 1 });
+		startAutoWorkRun({ taskId: "t-b", taskPriority: "P3", sessionId: "s-b", worktreePath: "/tmp/b" });
+
+		const app = buildAutoWorkRouter(fakeBridge([]));
+
+		const byTask = (await (await app.request("/auto-work/runs?taskId=t-a")).json()) as ListAutoWorkRunsResponse;
+		expect(byTask.runs.map((r) => r.id)).toEqual([a]);
+
+		const byPriority = (await (
+			await app.request("/auto-work/runs?priority=P3")
+		).json()) as ListAutoWorkRunsResponse;
+		expect(byPriority.runs.length).toBe(1);
+		expect(byPriority.runs[0]!.taskId).toBe("t-b");
+
+		const byStatus = (await (
+			await app.request("/auto-work/runs?status=completed")
+		).json()) as ListAutoWorkRunsResponse;
+		expect(byStatus.runs.map((r) => r.id)).toEqual([a]);
+	});
+
+	test("rejects an invalid priority or status filter", async () => {
+		const app = buildAutoWorkRouter(fakeBridge([]));
+		expect((await app.request("/auto-work/runs?priority=P9")).status).toBe(400);
+		expect((await app.request("/auto-work/runs?status=bogus")).status).toBe(400);
+		expect((await app.request("/auto-work/runs?limit=0")).status).toBe(400);
+		expect((await app.request("/auto-work/runs?limit=abc")).status).toBe(400);
+	});
+});
+
+describe("GET /auto-work/cost-estimate", () => {
+	test("requires a valid priority query param", async () => {
+		const app = buildAutoWorkRouter(fakeBridge([]));
+		expect((await app.request("/auto-work/cost-estimate")).status).toBe(400);
+		expect((await app.request("/auto-work/cost-estimate?priority=nope")).status).toBe(400);
+	});
+
+	test("returns null average with zero sample size when no history exists", async () => {
+		const app = buildAutoWorkRouter(fakeBridge([]));
+		const res = await app.request("/auto-work/cost-estimate?priority=P4");
+		expect(res.status).toBe(200);
+		const body = (await res.json()) as AutoWorkCostEstimateResponse;
+		expect(body).toEqual({ avgPctConsumed: null, sampleSize: 0 });
+	});
+
+	test("averages the last 10 completed runs at the given priority", async () => {
+		for (let i = 1; i <= 12; i++) {
+			const runId = startAutoWorkRun({
+				taskId: `p2-${i}`,
+				taskPriority: "P2",
+				sessionId: `s-${i}`,
+				worktreePath: `/tmp/${i}`,
+			});
+			completeAutoWorkRun(runId, { status: "completed", pctConsumed: i });
+		}
+
+		const app = buildAutoWorkRouter(fakeBridge([]));
+		const res = await app.request("/auto-work/cost-estimate?priority=P2");
+		const body = (await res.json()) as AutoWorkCostEstimateResponse;
+		expect(body.sampleSize).toBe(10);
+		expect(body.avgPctConsumed).toBe(7.5);
 	});
 });

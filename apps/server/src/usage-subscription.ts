@@ -121,17 +121,56 @@ export async function fetchSubscriptionUsage(
 		if (!reports || reports.length === 0) {
 			return { available: false, reason: "no provider usage data available" };
 		}
+		// Identify the primary provider: "anthropic" first (the deck is Claude-based),
+		// otherwise the provider whose limits carry the highest max fraction.
+		// Other providers (copilot, openai-codex, etc.) must not mix into the
+		// session/weekly sort — e.g. copilot limits have windowDurationMs=undefined
+		// which sorts to +∞ and would win as "weekly" with fraction 0.
+		const byProvider = new Map<string, typeof reports[number]["limits"]>();
+		for (const report of reports) {
+			const existing = byProvider.get(report.provider);
+			byProvider.set(report.provider, existing ? [...existing, ...report.limits] : [...report.limits]);
+		}
+		const primaryProvider =
+			byProvider.has("anthropic")
+				? "anthropic"
+				: [...byProvider.entries()].reduce(
+						(best, [provider, limits]) => {
+							const maxFrac = Math.max(0, ...limits.map((l) => resolveUsedFraction(l) ?? 0));
+							const bestFrac = Math.max(0, ...(byProvider.get(best) ?? []).map((l) => resolveUsedFraction(l) ?? 0));
+							return maxFrac > bestFrac ? provider : best;
+						},
+						[...byProvider.keys()][0]!,
+					);
+		const primaryLimits = byProvider.get(primaryProvider) ?? [];
 
-		// Collect all limits that carry a usedFraction, dedup by limitId (same
-		// window can appear on multiple accounts — keep the highest fraction seen).
+		// Dedup within the primary provider's limits (same window can appear
+		// across multiple accounts — keep the highest fraction seen).
 		const byId = new Map<string, { fraction: number; label: string; resetsAt?: number; windowDurationMs?: number }>();
+		for (const limit of primaryLimits) {
+			const fraction = resolveUsedFraction(limit);
+			if (fraction === undefined) continue;
+			const existing = byId.get(limit.id);
+			if (existing === undefined || fraction > existing.fraction) {
+				byId.set(limit.id, {
+					fraction,
+					label: limit.label,
+					resetsAt: limit.window?.resetsAt,
+					windowDurationMs: limit.window?.durationMs,
+				});
+			}
+		}
+
+		// Build the full limits array across ALL providers (for display), sorted
+		// shortest-first. This is separate from the primary-report selection above.
+		const allById = new Map<string, { fraction: number; label: string; resetsAt?: number; windowDurationMs?: number }>();
 		for (const report of reports) {
 			for (const limit of report.limits) {
 				const fraction = resolveUsedFraction(limit);
 				if (fraction === undefined) continue;
-				const existing = byId.get(limit.id);
+				const existing = allById.get(limit.id);
 				if (existing === undefined || fraction > existing.fraction) {
-					byId.set(limit.id, {
+					allById.set(limit.id, {
 						fraction,
 						label: limit.label,
 						resetsAt: limit.window?.resetsAt,
@@ -140,34 +179,35 @@ export async function fetchSubscriptionUsage(
 				}
 			}
 		}
-
-		// Sort shortest window first so callers can find the session (5h) limit
-		// at index 0 and the weekly (7d) limit further along.
-		const sorted = [...byId.values()].sort((a, b) => {
+		const allSorted = [...allById.values()].sort((a, b) => {
 			const da = a.windowDurationMs ?? Number.POSITIVE_INFINITY;
 			const db = b.windowDurationMs ?? Number.POSITIVE_INFINITY;
 			return da - db;
 		});
-
-		// Build the wire-format limits array.
-		const limits = sorted.map((entry) => ({
+		const limits = allSorted.map((entry) => ({
 			label: entry.label,
 			pctUsed: Math.min(100, Math.max(0, entry.fraction * 100)),
 			resetAt: entry.resetsAt != null ? new Date(entry.resetsAt).toISOString() : new Date().toISOString(),
 			...(entry.windowDurationMs != null ? { windowDurationMs: entry.windowDurationMs } : {}),
 		}));
 
-		// Top-level pctUsed / resetAt = most-constraining limit (highest fraction).
-		const worst = sorted.reduce(
-			(best, entry) => (entry.fraction > best.fraction ? entry : best),
-			sorted[0] ?? { fraction: 0, resetsAt: undefined },
-		);
+		// session = shortest primary window, weekly = longest primary window.
+		const primarySorted = [...byId.values()].sort((a, b) => {
+			const da = a.windowDurationMs ?? Number.POSITIVE_INFINITY;
+			const db = b.windowDurationMs ?? Number.POSITIVE_INFINITY;
+			return da - db;
+		});
+		const now = new Date().toISOString();
+		const session = primarySorted[0];
+		const weekly = primarySorted[primarySorted.length - 1] ?? session;
 
 		return {
 			available: true,
 			limits,
-			pctUsed: Math.min(100, Math.max(0, worst.fraction * 100)),
-			resetAt: worst.resetsAt != null ? new Date(worst.resetsAt).toISOString() : new Date().toISOString(),
+			sessionPct: session != null ? Math.min(100, Math.max(0, session.fraction * 100)) : 0,
+			sessionResetAt: session?.resetsAt != null ? new Date(session.resetsAt).toISOString() : now,
+			weeklyPct: weekly != null ? Math.min(100, Math.max(0, weekly.fraction * 100)) : 0,
+			weeklyResetAt: weekly?.resetsAt != null ? new Date(weekly.resetsAt).toISOString() : now,
 		};
 	} catch (err) {
 		log.warn("failed to fetch subscription usage", err);
