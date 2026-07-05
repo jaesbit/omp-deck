@@ -727,19 +727,33 @@ export interface ContextUsage {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * `GET /api/usage/subscription` success shape. Derived from the Anthropic
- * Messages API's `anthropic-ratelimit-tokens-*` response headers (see
- * `apps/server/src/usage-subscription.ts` for the exact request + parsing —
- * flagged there as best-effort/unverified pending a live API check).
- *
- * `pctUsed` is a 0-100 percentage (not a 0-1 fraction). `resetAt` is
- * ISO-8601, converted from the API's RFC 3339 header value.
+ * One reported usage window (e.g. "5 Hour", "7 Day").
+ * Returned as part of `SubscriptionUsageAvailable.limits`.
+ */
+export interface SubscriptionUsageLimit {
+	/** Human-readable label from the provider (e.g. "5 Hour", "7 Day"). */
+	label: string;
+	/** Percentage consumed in this window (0–100). */
+	pctUsed: number;
+	/** ISO-8601 timestamp when this window resets. */
+	resetAt: string;
+	/** Window duration in milliseconds, when the provider reports it. */
+	windowDurationMs?: number;
+}
+
+/**
+ * `GET /api/usage/subscription` success shape.
+ * All reported usage windows are in `limits`, sorted shortest-first.
+ * `pctUsed` / `resetAt` are a convenience alias for the most-constraining
+ * limit (highest pctUsed) — useful for simple budget checks.
  */
 export interface SubscriptionUsageAvailable {
 	available: true;
-	used: number;
-	limit: number;
+	/** All usage windows reported by the provider, shortest window first. */
+	limits: SubscriptionUsageLimit[];
+	/** pctUsed of the most-constraining limit (highest across all windows). */
 	pctUsed: number;
+	/** resetAt of the most-constraining limit. */
 	resetAt: string;
 }
 

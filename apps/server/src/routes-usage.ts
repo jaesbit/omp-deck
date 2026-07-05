@@ -1,8 +1,8 @@
 /**
  * Usage REST surface (T-59). Mounted on the main router at `/api/usage/*`.
  *
- * - `GET /usage/subscription` — cached Anthropic subscription/rate-limit
- *   usage; see `usage-subscription.ts` for the endpoint-choice caveat.
+ * - `GET /usage/subscription` — cached provider subscription / rate-limit
+ *   usage via the SDK's AuthStorage; see `usage-subscription.ts`.
  * - `GET /usage/sessions` — per-session token/cost totals from persisted
  *   transcripts; see `usage-sessions.ts`.
  */
@@ -11,17 +11,25 @@ import { Hono } from "hono";
 import type { ListSessionUsageResponse } from "@omp-deck/protocol";
 
 import type { AgentBridge } from "./bridge/types.ts";
-import { getSubscriptionUsage } from "./usage-subscription.ts";
+import { getSubscriptionUsage, type UsageReportsFetcher } from "./usage-subscription.ts";
 import { listSessionUsage } from "./usage-sessions.ts";
 
 const DEFAULT_SESSIONS_LIMIT = 20;
 const MAX_SESSIONS_LIMIT = 200;
 
-export function buildUsageRouter(bridge: AgentBridge): Hono {
+export interface BuildUsageRouterOptions {
+	/**
+	 * Test-only: override the usage-reports fetcher injected into
+	 * `getSubscriptionUsage`, avoiding the real `getDeckAuthStorage()` call.
+	 */
+	fetcherOverride?: UsageReportsFetcher;
+}
+
+export function buildUsageRouter(bridge: AgentBridge, options: BuildUsageRouterOptions = {}): Hono {
 	const app = new Hono();
 
 	app.get("/usage/subscription", async (c) => {
-		const result = await getSubscriptionUsage();
+		const result = await getSubscriptionUsage(options.fetcherOverride);
 		return c.json(result);
 	});
 

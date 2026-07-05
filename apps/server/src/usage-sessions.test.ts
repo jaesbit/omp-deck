@@ -74,10 +74,10 @@ describe("listSessionUsage", () => {
 			messageCount: 5,
 		};
 		const [result] = await listSessionUsage(fakeBridge([summary]), 20);
-		expect(result.totalTokens).toBe(150);
-		expect(result.costUsd).toBeCloseTo(0.015, 6);
-		expect(result.id).toBe("s1");
-		expect(result.messageCount).toBe(5);
+		expect(result?.totalTokens).toBe(150);
+		expect(result?.costUsd).toBeCloseTo(0.015, 6);
+		expect(result?.id).toBe("s1");
+		expect(result?.messageCount).toBe(5);
 	});
 
 	test("sorts by updatedAt desc and respects the limit", async () => {
@@ -103,7 +103,7 @@ describe("listSessionUsage", () => {
 		];
 		const result = await listSessionUsage(fakeBridge(sessions), 1);
 		expect(result).toHaveLength(1);
-		expect(result[0].id).toBe("newer");
+		expect(result[0]?.id).toBe("newer");
 	});
 
 	test("tolerates a missing/unreadable transcript file without throwing", async () => {
@@ -116,7 +116,7 @@ describe("listSessionUsage", () => {
 			messageCount: 0,
 		};
 		const [result] = await listSessionUsage(fakeBridge([summary]), 20);
-		expect(result.totalTokens).toBe(0);
-		expect(result.costUsd).toBe(0);
+		expect(result?.totalTokens).toBe(0);
+		expect(result?.costUsd).toBe(0);
 	});
 });
