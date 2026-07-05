@@ -22,6 +22,14 @@ function defaultTelegramEntry(): string {
 	return path.resolve(here, "..", "..", "bridges", "telegram", "src", "index.ts");
 }
 
+/** Env vars the telegram bridge needs to start — also the "is Telegram configured" signal `auto-work/notify.ts` (T-67) gates outbound push notifications on. */
+export const TELEGRAM_REQUIRED_ENV = ["TELEGRAM_BOT_TOKEN", "TELEGRAM_ALLOWED_USERS"];
+
+/** True when every var `TELEGRAM_REQUIRED_ENV` lists is set — the same check `BridgeSupervisor.start` uses to refuse starting the interactive bridge. */
+export function isTelegramBridgeConfigured(): boolean {
+	return TELEGRAM_REQUIRED_ENV.every((key) => (process.env[key] ?? "").trim() !== "");
+}
+
 interface BridgeSpec {
 	name: BridgeName;
 	label: string;
@@ -248,7 +256,7 @@ export function buildDefaultBridgeSupervisor(): BridgeSupervisor {
 			name: "telegram",
 			label: "Telegram",
 			entry: defaultTelegramEntry(),
-			requiredEnv: ["TELEGRAM_BOT_TOKEN", "TELEGRAM_ALLOWED_USERS"],
+			requiredEnv: TELEGRAM_REQUIRED_ENV,
 		},
 	]);
 }

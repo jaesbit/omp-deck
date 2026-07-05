@@ -63,6 +63,7 @@ function fullConfigBody(overrides: Partial<SetAutoWorkConfigRequest> = {}): SetA
 		timeWindows: [{ start: 9, end: 17 }],
 		sessionPctLimit: 25,
 		weeklyPctLimit: 60,
+		weeklyPctThreshold: 80,
 		defaultEstimatePctByPriority: { P0: 20, P1: 15, P2: 10, P3: 8, P4: 5, P5: 3 },
 		estimationBuffer: 1.3,
 		timeoutMinutesByPriority: { P0: 120, P1: 90, P2: 60, P3: 45, P4: 45, P5: 45 },
@@ -174,6 +175,16 @@ describe("PUT /auto-work/config — validation", () => {
 		const res = await app.request(`/auto-work/config?cwd=${encodeURIComponent(cwd)}`, {
 			method: "PUT",
 			body: JSON.stringify(fullConfigBody({ sessionPctLimit: 150 })),
+		});
+		expect(res.status).toBe(400);
+	});
+
+	test("rejects an out-of-range weekly threshold", async () => {
+		const app = buildAutoWorkRouter(fakeBridge([]), fakeConfig());
+		const cwd = process.cwd();
+		const res = await app.request(`/auto-work/config?cwd=${encodeURIComponent(cwd)}`, {
+			method: "PUT",
+			body: JSON.stringify(fullConfigBody({ weeklyPctThreshold: -1 })),
 		});
 		expect(res.status).toBe(400);
 	});

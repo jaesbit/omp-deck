@@ -22,6 +22,7 @@ import { DEFAULT_AUTO_WORK_VALUES, setAutoWorkConfig } from "../db/auto-work.ts"
 import { getAutoWorkCostEstimate, listAutoWorkRuns, startAutoWorkRun } from "../db/auto-work-runs.ts";
 import { closeDb, openDb } from "../db/index.ts";
 import { createTask, getTask, moveTask } from "../db/tasks.ts";
+import type { AutoWorkNotificationEvent } from "./notify.ts";
 import {
 	checkAutoWorkPreflight,
 	classifyRunningAutoWorkRun,
@@ -844,5 +845,147 @@ describe("runAutoWorkCycle session continuation (T-65)", () => {
 
 		expect(getTask(staleTask.id)?.stateId).toBe("s_backlog");
 		expect(fs.existsSync(worktreePath)).toBe(false);
+	});
+});
+
+// ─── Notifications (T-67) ───────────────────────────────────────────────────
+
+function recordingNotify(): {
+	notify: (event: AutoWorkNotificationEvent) => Promise<void>;
+	calls: AutoWorkNotificationEvent[];
+} {
+	const calls: AutoWorkNotificationEvent[] = [];
+	return {
+		calls,
+		notify: async (event) => {
+			calls.push(event);
+		},
+	};
+}
+
+describe("runAutoWorkCycle notifications (T-67)", () => {
+	test("notifies task_started then task_completed with the PR number on a fresh successful run", async () => {
+		setAutoWorkConfig(repoCwd, { ...DEFAULT_AUTO_WORK_VALUES, enabled: true });
+		const task = createTask({ title: "Ship the thing", cwd: repoCwd, priority: "P5", autoWork: true });
+		const { notify, calls } = recordingNotify();
+
+		const handle = new FakeSessionHandle("sess_notify_1", 10);
+		const result = await runAutoWorkCycle(repoCwd, fakeBridge(handle), {
+			getSubscriptionUsage: async () => ({ available: true, weeklyPct: 5 }),
+			createPullRequest: stubCreatePullRequest,
+			notify,
+		});
+
+		expect(result.outcome).toBe("completed");
+		expect(calls).toEqual([
+			{ kind: "task_started", displayId: task.displayId, title: task.title, model: "default" },
+			{ kind: "task_completed", displayId: task.displayId, prNumber: 321 },
+		]);
+	});
+
+	test("notifies task_failed with the timeout reason when a run times out", async () => {
+		setAutoWorkConfig(repoCwd, {
+			...DEFAULT_AUTO_WORK_VALUES,
+			enabled: true,
+			timeoutMinutesByPriority: { P0: 120, P1: 90, P2: 60, P3: 45, P4: 45, P5: 0.0005 },
+		});
+		const task = createTask({ title: "Slow task", cwd: repoCwd, priority: "P5", autoWork: true });
+		const { notify, calls } = recordingNotify();
+
+		const handle = new FakeSessionHandle("sess_notify_timeout", null);
+		const result = await runAutoWorkCycle(repoCwd, fakeBridge(handle), {
+			getSubscriptionUsage: async () => ({ available: true, weeklyPct: 5 }),
+			notify,
+		});
+
+		expect(result.outcome).toBe("timed_out");
+		expect(calls).toHaveLength(2);
+		expect(calls[0]).toEqual({ kind: "task_started", displayId: task.displayId, title: task.title, model: "default" });
+		expect(calls[1]?.kind).toBe("task_failed");
+		if (calls[1]?.kind === "task_failed") {
+			expect(calls[1].displayId).toBe(task.displayId);
+			expect(calls[1].reason).toContain("timeout");
+		}
+	});
+
+	test("does not notify task_completed when PR creation fails (fallback note only)", async () => {
+		setAutoWorkConfig(repoCwd, { ...DEFAULT_AUTO_WORK_VALUES, enabled: true });
+		createTask({ title: "PR step fails", cwd: repoCwd, priority: "P5", autoWork: true });
+		const { notify, calls } = recordingNotify();
+
+		const handle = new FakeSessionHandle("sess_notify_pr_fail", 10);
+		const result = await runAutoWorkCycle(repoCwd, fakeBridge(handle), {
+			getSubscriptionUsage: async () => ({ available: true, weeklyPct: 5 }),
+			createPullRequest: async () => {
+				throw new Error("gh pr create failed (exit 1): no git remotes found");
+			},
+			notify,
+		});
+
+		expect(result.outcome).toBe("completed");
+		expect(calls.map((c) => c.kind)).toEqual(["task_started"]);
+	});
+
+	test("notifies weekly_threshold once usage crosses the configured threshold, even on a cycle that still starts a task", async () => {
+		setAutoWorkConfig(repoCwd, { ...DEFAULT_AUTO_WORK_VALUES, enabled: true, weeklyPctThreshold: 70 });
+		createTask({ title: "Under the hard limit", cwd: repoCwd, priority: "P5", autoWork: true });
+		const { notify, calls } = recordingNotify();
+
+		const handle = new FakeSessionHandle("sess_notify_weekly", 10);
+		const result = await runAutoWorkCycle(repoCwd, fakeBridge(handle), {
+			// Below weeklyPctLimit (100, default) so the cycle proceeds, but above
+			// the 70% weeklyPctThreshold configured above.
+			getSubscriptionUsage: async () => ({ available: true, weeklyPct: 75 }),
+			createPullRequest: stubCreatePullRequest,
+			notify,
+		});
+
+		expect(result.outcome).toBe("completed");
+		expect(calls[0]).toEqual({ kind: "weekly_threshold", cwd: repoCwd, pctUsed: 75, thresholdPct: 70 });
+	});
+
+	test("notifies session_limit when every eligible task is skipped for budget reasons", async () => {
+		setAutoWorkConfig(repoCwd, {
+			...DEFAULT_AUTO_WORK_VALUES,
+			enabled: true,
+			sessionPctLimit: 1,
+			weeklyPctLimit: 100,
+			weeklyPctThreshold: 100,
+		});
+		createTask({ title: "Too expensive", cwd: repoCwd, priority: "P0", autoWork: true });
+		const { notify, calls } = recordingNotify();
+
+		const handle = new FakeSessionHandle("sess_notify_session_limit", 10);
+		const result = await runAutoWorkCycle(repoCwd, fakeBridge(handle), {
+			getSubscriptionUsage: async () => ({ available: true, weeklyPct: 5 }),
+			notify,
+		});
+
+		expect(result.outcome).toBe("skipped");
+		expect(calls).toEqual([{ kind: "session_limit", sessionPctUsed: 5, sessionPctLimit: 1 }]);
+	});
+
+	test("prefers the weekly_threshold notification over session_limit when both conditions are true in the same cycle", async () => {
+		setAutoWorkConfig(repoCwd, {
+			...DEFAULT_AUTO_WORK_VALUES,
+			enabled: true,
+			sessionPctLimit: 1,
+			weeklyPctLimit: 100,
+			weeklyPctThreshold: 70,
+		});
+		createTask({ title: "Too expensive", cwd: repoCwd, priority: "P0", autoWork: true });
+		const { notify, calls } = recordingNotify();
+
+		const handle = new FakeSessionHandle("sess_notify_precedence", 10);
+		const result = await runAutoWorkCycle(repoCwd, fakeBridge(handle), {
+			// Above both the 70% weekly threshold and (given sessionPctLimit=1)
+			// enough to also make every eligible task fail to fit the budget.
+			getSubscriptionUsage: async () => ({ available: true, weeklyPct: 80 }),
+			notify,
+		});
+
+		expect(result.outcome).toBe("skipped");
+		// Exactly one notification for the cycle — the weekly warning — never both.
+		expect(calls).toEqual([{ kind: "weekly_threshold", cwd: repoCwd, pctUsed: 80, thresholdPct: 70 }]);
 	});
 });

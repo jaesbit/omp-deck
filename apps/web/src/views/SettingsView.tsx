@@ -1168,6 +1168,7 @@ function autoWorkToRequest(config: AutoWorkConfig): SetAutoWorkConfigRequest {
 		timeWindows: config.timeWindows,
 		sessionPctLimit: config.sessionPctLimit,
 		weeklyPctLimit: config.weeklyPctLimit,
+		weeklyPctThreshold: config.weeklyPctThreshold,
 		defaultEstimatePctByPriority: config.defaultEstimatePctByPriority,
 		estimationBuffer: config.estimationBuffer,
 		timeoutMinutesByPriority: config.timeoutMinutesByPriority,
@@ -1455,6 +1456,22 @@ function AutoWorkConfigModal({
 							onChange={(e) => setDraft({ ...draft, weeklyPctLimit: Number(e.target.value) })}
 							className="w-full"
 						/>
+					</div>
+
+					<div>
+						<label className="mb-1 flex items-center justify-between text-sm">
+							<span>Weekly budget warning</span>
+							<span className="font-mono text-2xs text-ink-3">{draft.weeklyPctThreshold}%</span>
+						</label>
+						<input
+							type="range"
+							min={0}
+							max={100}
+							value={draft.weeklyPctThreshold}
+							onChange={(e) => setDraft({ ...draft, weeklyPctThreshold: Number(e.target.value) })}
+							className="w-full"
+						/>
+						<div className="meta mt-1">Sends a Telegram heads-up (at most once/day) once weekly usage crosses this %.</div>
 					</div>
 
 					<div>
