@@ -6,6 +6,7 @@
  * tricks. A move == one transaction that renumbers the destination column.
  */
 
+import type { Database } from "bun:sqlite";
 import type { Task, TaskPriority, TaskState } from "@omp-deck/protocol";
 
 import { getDb, id, nowIso } from "./index.ts";
@@ -33,7 +34,7 @@ interface StateRow {
 	is_default: number;
 }
 
-function rowToTask(r: TaskRow): Task {
+function rowToTask(r: TaskRow, dependsOn: string[]): Task {
 	const t: Task = {
 		id: r.id,
 		displayId: r.display_id,
@@ -45,6 +46,7 @@ function rowToTask(r: TaskRow): Task {
 		createdAt: r.created_at,
 		updatedAt: r.updated_at,
 		stateEnteredAt: r.state_entered_at,
+		dependsOn,
 	};
 	if (r.cwd !== null) t.cwd = r.cwd;
 	if (r.archived_at !== null) t.archivedAt = r.archived_at;
@@ -59,6 +61,83 @@ function rowToState(r: StateRow): TaskState {
 		position: r.position,
 		isDefault: r.is_default === 1,
 	};
+}
+
+// ─── Dependencies (T-57) ───────────────────────────────────────────────────
+
+function listDependenciesFor(taskId: string): string[] {
+	const rows = getDb()
+		.query<{ depends_on_task_id: string }, [string]>(
+			"SELECT depends_on_task_id FROM task_dependencies WHERE task_id = ? ORDER BY depends_on_task_id",
+		)
+		.all(taskId) as { depends_on_task_id: string }[];
+	return rows.map((r) => r.depends_on_task_id);
+}
+
+/** Batch-loads every dependency edge in one query, grouped by dependent task id. */
+function listAllDependencies(): Map<string, string[]> {
+	const rows = getDb()
+		.query<{ task_id: string; depends_on_task_id: string }, []>(
+			"SELECT task_id, depends_on_task_id FROM task_dependencies ORDER BY task_id, depends_on_task_id",
+		)
+		.all() as { task_id: string; depends_on_task_id: string }[];
+	const map = new Map<string, string[]>();
+	for (const r of rows) {
+		const list = map.get(r.task_id);
+		if (list) list.push(r.depends_on_task_id);
+		else map.set(r.task_id, [r.depends_on_task_id]);
+	}
+	return map;
+}
+
+/**
+ * Dedupes `dependsOn`, rejects self-reference, and rejects any id that isn't
+ * an existing task. Does not check for cycles — see {@link wouldCreateCycle}.
+ */
+function validateDependencyIds(db: Database, taskId: string, dependsOn: string[]): string[] {
+	const unique = Array.from(new Set(dependsOn));
+	if (unique.includes(taskId)) throw new Error("a task cannot depend on itself");
+	for (const dep of unique) {
+		const exists = db.query<{ id: string }, [string]>("SELECT id FROM tasks WHERE id = ?").get(dep);
+		if (!exists) throw new Error(`unknown dependency task id: ${dep}`);
+	}
+	return unique;
+}
+
+/**
+ * True when setting `taskId`'s dependencies to `dependsOn` would make the
+ * dependency graph cyclic — i.e. one of `dependsOn` (transitively, via
+ * *its* existing dependencies) already depends on `taskId`.
+ */
+function wouldCreateCycle(db: Database, taskId: string, dependsOn: string[]): boolean {
+	const visited = new Set<string>();
+	const queue = [...dependsOn];
+	while (queue.length > 0) {
+		const cur = queue.shift()!;
+		if (cur === taskId) return true;
+		if (visited.has(cur)) continue;
+		visited.add(cur);
+		const rows = db
+			.query<{ depends_on_task_id: string }, [string]>(
+				"SELECT depends_on_task_id FROM task_dependencies WHERE task_id = ?",
+			)
+			.all(cur) as { depends_on_task_id: string }[];
+		for (const r of rows) queue.push(r.depends_on_task_id);
+	}
+	return false;
+}
+
+/** Replaces `taskId`'s full dependency set. Caller must have already validated. */
+function applyDependencies(db: Database, taskId: string, dependsOn: string[]): void {
+	const now = nowIso();
+	db.transaction(() => {
+		db.prepare<unknown, [string]>("DELETE FROM task_dependencies WHERE task_id = ?").run(taskId);
+		if (dependsOn.length === 0) return;
+		const insert = db.prepare<unknown, [string, string, string]>(
+			"INSERT INTO task_dependencies (task_id, depends_on_task_id, created_at) VALUES (?, ?, ?)",
+		);
+		for (const dep of dependsOn) insert.run(taskId, dep, now);
+	})();
 }
 
 // ─── States ────────────────────────────────────────────────────────────────
@@ -210,7 +289,8 @@ export function listTasks(opts: { includeArchived?: boolean } = {}): Task[] {
 			 ORDER BY state_id, state_entered_at DESC, order_in_state ASC`,
 		)
 		.all() as TaskRow[];
-	return rows.map(rowToTask);
+	const depsByTask = listAllDependencies();
+	return rows.map((r) => rowToTask(r, depsByTask.get(r.id) ?? []));
 }
 
 export function getTask(taskId: string): Task | undefined {
@@ -220,7 +300,7 @@ export function getTask(taskId: string): Task | undefined {
 			 FROM tasks WHERE id = ?`,
 		)
 		.get(taskId) as TaskRow | null;
-	return row ? rowToTask(row) : undefined;
+	return row ? rowToTask(row, listDependenciesFor(row.id)) : undefined;
 }
 
 export function createTask(input: {
@@ -229,6 +309,7 @@ export function createTask(input: {
 	stateId?: string;
 	cwd?: string;
 	priority?: TaskPriority;
+	dependsOn?: string[];
 }): Task {
 	const db = getDb();
 	const state = input.stateId ? getState(input.stateId) : getDefaultState();
@@ -242,6 +323,7 @@ export function createTask(input: {
 
 	const taskId = `t_${id().toLowerCase().slice(0, 18)}`;
 	const now = nowIso();
+	const dependsOn = input.dependsOn ? validateDependencyIds(db, taskId, input.dependsOn) : [];
 	let displayId = 0;
 	db.transaction(() => {
 		const seqRow = db
@@ -255,6 +337,12 @@ export function createTask(input: {
 			`INSERT INTO tasks (id, display_id, title, body, state_id, order_in_state, priority, cwd, created_at, updated_at, state_entered_at)
 			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		).run(taskId, displayId, input.title, input.body ?? "", state.id, maxOrder + 1000, input.priority ?? "P5", input.cwd ?? null, now, now, now);
+		if (dependsOn.length > 0) {
+			const insertDep = db.prepare<unknown, [string, string, string]>(
+				"INSERT INTO task_dependencies (task_id, depends_on_task_id, created_at) VALUES (?, ?, ?)",
+			);
+			for (const dep of dependsOn) insertDep.run(taskId, dep, now);
+		}
 	})();
 	const out = getTask(taskId);
 	if (!out) throw new Error("createTask failed");
@@ -271,6 +359,7 @@ export function updateTask(
 		cwd?: string;
 		archived?: boolean;
 		priority?: TaskPriority;
+		dependsOn?: string[];
 	},
 ): Task | undefined {
 	const existing = getTask(taskId);
@@ -284,6 +373,13 @@ export function updateTask(
 	// edits must NOT reset the per-column recency sort.
 	const stateChanged = patch.stateId !== undefined && patch.stateId !== existing.stateId;
 	const stateEnteredAt = stateChanged ? nowIso() : existing.stateEnteredAt;
+	// Validate before mutating so a bad dependency patch never leaves the
+	// primary row updated but the dependency set untouched (or vice versa).
+	const nextDependsOn =
+		patch.dependsOn !== undefined ? validateDependencyIds(db, taskId, patch.dependsOn) : undefined;
+	if (nextDependsOn !== undefined && wouldCreateCycle(db, taskId, nextDependsOn)) {
+		throw new Error("dependency change would create a cycle");
+	}
 	db.prepare<
 		unknown,
 		[string, string, string, number, string, string | null, string, string, string | null, string]
@@ -304,6 +400,7 @@ export function updateTask(
 		archivedAt,
 		taskId,
 	);
+	if (nextDependsOn !== undefined) applyDependencies(db, taskId, nextDependsOn);
 	return getTask(taskId);
 }
 
@@ -392,7 +489,7 @@ export function findTaskByDisplayOrId(ref: string): Task | undefined {
 				 FROM tasks WHERE display_id = ?`,
 			)
 			.get(num) as TaskRow | null;
-		return row ? rowToTask(row) : undefined;
+		return row ? rowToTask(row, listDependenciesFor(row.id)) : undefined;
 	}
 	return getTask(trimmed.toLowerCase());
 }

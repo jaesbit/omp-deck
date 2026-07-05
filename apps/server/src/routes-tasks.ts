@@ -38,6 +38,10 @@ const log = logger("routes:tasks");
 
 const TASK_PRIORITIES = new Set(["P0", "P1", "P2", "P3", "P4", "P5"]);
 
+function isStringArray(v: unknown): v is string[] {
+	return Array.isArray(v) && v.every((x) => typeof x === "string");
+}
+
 function notifyTasksChanged(): void {
 	broadcastBus.broadcast({ type: "tasks_changed" });
 }
@@ -68,6 +72,9 @@ export function buildTasksRouter(): Hono {
 		if (body.priority !== undefined && !TASK_PRIORITIES.has(body.priority)) {
 			return c.json({ error: `invalid priority: ${body.priority}` }, 400);
 		}
+		if (body.dependsOn !== undefined && !isStringArray(body.dependsOn)) {
+			return c.json({ error: "dependsOn must be string[]" }, 400);
+		}
 		try {
 			const task = createTask(body);
 			notifyTasksChanged();
@@ -93,6 +100,9 @@ export function buildTasksRouter(): Hono {
 		}
 		if (body.priority !== undefined && !TASK_PRIORITIES.has(body.priority)) {
 			return c.json({ error: `invalid priority: ${body.priority}` }, 400);
+		}
+		if (body.dependsOn !== undefined && !isStringArray(body.dependsOn)) {
+			return c.json({ error: "dependsOn must be string[]" }, 400);
 		}
 		try {
 			const updated = updateTask(c.req.param("id"), body);

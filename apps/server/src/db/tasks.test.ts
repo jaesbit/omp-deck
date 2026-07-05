@@ -11,6 +11,7 @@ import { closeDb, openDb } from "./index.ts";
 import {
 	createState,
 	createTask,
+	deleteTask,
 	getTask,
 	listStates,
 	listTasks,
@@ -200,5 +201,98 @@ describe("priority (T-38)", () => {
 		const t = createTask({ title: "roundtrip", stateId: "s_backlog", priority: "P2" });
 		expect(getTask(t.id)?.priority).toBe("P2");
 		expect(listTasks().find((x) => x.id === t.id)?.priority).toBe("P2");
+	});
+});
+
+describe("dependencies (T-57)", () => {
+	test("createTask defaults dependsOn to an empty array", () => {
+		bootDb();
+		const t = createTask({ title: "no deps", stateId: "s_backlog" });
+		expect(t.dependsOn).toEqual([]);
+	});
+
+	test("createTask accepts an explicit dependsOn set", () => {
+		bootDb();
+		const blocker = createTask({ title: "blocker", stateId: "s_backlog" });
+		const t = createTask({ title: "blocked", stateId: "s_backlog", dependsOn: [blocker.id] });
+		expect(t.dependsOn).toEqual([blocker.id]);
+	});
+
+	test("updateTask replaces the full dependency set", () => {
+		bootDb();
+		const a = createTask({ title: "a", stateId: "s_backlog" });
+		const b = createTask({ title: "b", stateId: "s_backlog" });
+		const t = createTask({ title: "t", stateId: "s_backlog", dependsOn: [a.id] });
+		expect(t.dependsOn).toEqual([a.id]);
+
+		const updated = updateTask(t.id, { dependsOn: [b.id] })!;
+		expect(updated.dependsOn).toEqual([b.id]);
+	});
+
+	test("updateTask can clear dependencies with an empty array", () => {
+		bootDb();
+		const a = createTask({ title: "a", stateId: "s_backlog" });
+		const t = createTask({ title: "t", stateId: "s_backlog", dependsOn: [a.id] });
+		const cleared = updateTask(t.id, { dependsOn: [] })!;
+		expect(cleared.dependsOn).toEqual([]);
+	});
+
+	test("updateTask omitting dependsOn leaves the existing set untouched", () => {
+		bootDb();
+		const a = createTask({ title: "a", stateId: "s_backlog" });
+		const t = createTask({ title: "t", stateId: "s_backlog", dependsOn: [a.id] });
+		const updated = updateTask(t.id, { title: "t renamed" })!;
+		expect(updated.dependsOn).toEqual([a.id]);
+	});
+
+	test("rejects self-dependency", () => {
+		bootDb();
+		// The generated id isn't known ahead of time, so exercise the
+		// self-reference guard via updateTask instead, which can target itself.
+		const t = createTask({ title: "t", stateId: "s_backlog" });
+		expect(() => updateTask(t.id, { dependsOn: [t.id] })).toThrow(/cannot depend on itself/);
+	});
+
+	test("rejects an unknown dependency id", () => {
+		bootDb();
+		const t = createTask({ title: "t", stateId: "s_backlog" });
+		expect(() => updateTask(t.id, { dependsOn: ["t_does_not_exist"] })).toThrow(
+			/unknown dependency task id/,
+		);
+		expect(getTask(t.id)!.dependsOn).toEqual([]);
+	});
+
+	test("rejects a dependency change that would create a cycle", () => {
+		bootDb();
+		const a = createTask({ title: "a", stateId: "s_backlog" });
+		const b = createTask({ title: "b", stateId: "s_backlog", dependsOn: [a.id] });
+		// a -> depends on b would close the loop a -> b -> a.
+		expect(() => updateTask(a.id, { dependsOn: [b.id] })).toThrow(/would create a cycle/);
+		expect(getTask(a.id)!.dependsOn).toEqual([]);
+	});
+
+	test("rejects a transitive cycle across three tasks", () => {
+		bootDb();
+		const a = createTask({ title: "a", stateId: "s_backlog" });
+		const b = createTask({ title: "b", stateId: "s_backlog", dependsOn: [a.id] });
+		const c = createTask({ title: "c", stateId: "s_backlog", dependsOn: [b.id] });
+		// a -> depends on c would close a -> c -> b -> a.
+		expect(() => updateTask(a.id, { dependsOn: [c.id] })).toThrow(/would create a cycle/);
+	});
+
+	test("listTasks and getTask round-trip dependsOn", () => {
+		bootDb();
+		const a = createTask({ title: "a", stateId: "s_backlog" });
+		const t = createTask({ title: "t", stateId: "s_backlog", dependsOn: [a.id] });
+		expect(getTask(t.id)?.dependsOn).toEqual([a.id]);
+		expect(listTasks().find((x) => x.id === t.id)?.dependsOn).toEqual([a.id]);
+	});
+
+	test("deleting a dependency task cascades out of dependents' dependsOn", () => {
+		bootDb();
+		const a = createTask({ title: "a", stateId: "s_backlog" });
+		const t = createTask({ title: "t", stateId: "s_backlog", dependsOn: [a.id] });
+		deleteTask(a.id);
+		expect(getTask(t.id)?.dependsOn).toEqual([]);
 	});
 });
