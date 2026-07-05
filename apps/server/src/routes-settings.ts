@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import * as os from "node:os";
 import * as path from "node:path";
 import type {
+	DeckBaseUrlResponse,
 	EnvEntry,
 	EnvValueSource,
 	ListEnvSettingsResponse,
@@ -9,6 +10,7 @@ import type {
 	PatchEnvSettingsResponse,
 	RestartServerResponse,
 	RevealEnvValueResponse,
+	SetDeckBaseUrlRequest,
 } from "@omp-deck/protocol";
 
 import type { Config } from "./config.ts";
@@ -23,6 +25,7 @@ import {
 	readManagedEnvFile,
 	writeManagedEnvUpdates,
 } from "./env-store.ts";
+import { getDeckBaseUrl, setDeckBaseUrl } from "./db/server-settings.ts";
 import { setLogLevel } from "./log.ts";
 import type { AgentBridge } from "./bridge/types.ts";
 
@@ -90,6 +93,32 @@ export function buildSettingsRouter(
 		if (!isLoopbackRequest(c.req.raw)) return c.json({ error: "restart requires loopback" }, 403);
 		const resp = opts.restartServer?.() ?? { ok: false, message: "Restart is unavailable" };
 		return c.json(resp);
+	});
+
+	app.get("/settings/deck-base-url", (c) => {
+		const body: DeckBaseUrlResponse = getDeckBaseUrl(config);
+		return c.json(body);
+	});
+
+	app.put("/settings/deck-base-url", async (c) => {
+		let body: SetDeckBaseUrlRequest;
+		try {
+			body = (await c.req.json()) as SetDeckBaseUrlRequest;
+		} catch {
+			return c.json({ error: "invalid json body" }, 400);
+		}
+		if (body.deckBaseUrl !== null && typeof body.deckBaseUrl !== "string") {
+			return c.json({ error: "deckBaseUrl must be a string or null" }, 400);
+		}
+		if (typeof body.deckBaseUrl === "string" && body.deckBaseUrl.trim() !== "") {
+			try {
+				new URL(body.deckBaseUrl.trim());
+			} catch {
+				return c.json({ error: "deckBaseUrl must be a valid absolute URL" }, 400);
+			}
+		}
+		const response: DeckBaseUrlResponse = setDeckBaseUrl(config, body.deckBaseUrl);
+		return c.json(response);
 	});
 
 	return app;

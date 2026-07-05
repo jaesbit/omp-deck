@@ -5,6 +5,7 @@ import type {
 	AutoWorkConfig,
 	BridgeInfo,
 	BridgeName,
+	DeckBaseUrlResponse,
 	EnvEntry,
 	GateKnob,
 	ListEnvSettingsResponse,
@@ -36,6 +37,7 @@ import { THEMES, useTheme } from "@/lib/theme";
 import { cn } from "@/lib/utils";
 
 const SECTIONS = [
+	{ id: "general", label: "General", description: "Deck base URL for session links" },
 	{ id: "env", label: "Env", description: "Process and deck-managed variables" },
 	{ id: "providers", label: "Providers", description: "OAuth sign-in and API-key state" },
 	{ id: "messaging", label: "Messaging", description: "Telegram and future chat bridges" },
@@ -89,7 +91,9 @@ export function SettingsView() {
 							))}
 						</nav>
 						<section className="min-h-0 overflow-auto p-4">
-							{selected === "env" ? (
+						{selected === "general" ? (
+								<GeneralSection />
+							) : selected === "env" ? (
 								<EnvSection />
 							) : selected === "providers" ? (
 								<ProvidersSection />
@@ -863,6 +867,112 @@ function NotificationsSection() {
 				items={recent}
 				onDismiss={(id) => dismissNotification(id)}
 			/>
+		</div>
+	);
+}
+
+/**
+ * General section (T-61): the deck base URL used to build session deep
+ * links (e.g. from the auto-work completion flow, T-66). Falls back to
+ * `http://localhost:${OMP_DECK_PORT}` server-side when unset — the "Test"
+ * button opens the current effective URL's root in a new tab so the user
+ * can confirm it resolves before relying on generated links.
+ */
+function GeneralSection() {
+	const [current, setCurrent] = useState<DeckBaseUrlResponse | undefined>();
+	const [draft, setDraft] = useState("");
+	const [loading, setLoading] = useState(true);
+	const [saving, setSaving] = useState(false);
+	const [error, setError] = useState<string | undefined>();
+	const [saved, setSaved] = useState(false);
+
+	useEffect(() => {
+		let cancelled = false;
+		void api
+			.getDeckBaseUrl()
+			.then((resp) => {
+				if (cancelled) return;
+				setCurrent(resp);
+				setDraft(resp.isCustom ? resp.deckBaseUrl : "");
+			})
+			.catch((e) => !cancelled && setError(e instanceof Error ? e.message : String(e)))
+			.finally(() => !cancelled && setLoading(false));
+		return () => {
+			cancelled = true;
+		};
+	}, []);
+
+	async function save(): Promise<void> {
+		setSaving(true);
+		setError(undefined);
+		setSaved(false);
+		try {
+			const resp = await api.setDeckBaseUrl(draft.trim() === "" ? null : draft.trim());
+			setCurrent(resp);
+			setDraft(resp.isCustom ? resp.deckBaseUrl : "");
+			setSaved(true);
+		} catch (e) {
+			setError(e instanceof Error ? e.message : String(e));
+		} finally {
+			setSaving(false);
+		}
+	}
+
+	return (
+		<div className="mx-auto max-w-3xl space-y-4">
+			<div>
+				<h1 className="text-xl font-semibold tracking-tight">General</h1>
+				<p className="mt-1 text-sm text-ink-3">
+					Deck-wide settings that aren't tied to a specific workspace.
+				</p>
+			</div>
+
+			<div className="rounded-md border border-line bg-paper-2 p-4">
+				<div className="meta mb-1">Deck base URL</div>
+				<p className="mb-3 text-xs text-ink-3">
+					Used to build clickable session links (e.g. from unattended Auto Work
+					runs). The deck may be reachable via localhost, a LAN hostname, or a
+					tunnel — set this to whatever URL actually resolves for you. Leave
+					blank to use the default.
+				</p>
+				{error ? (
+					<div className="mb-3 rounded-md border border-danger/30 bg-danger/10 px-3 py-2 font-mono text-xs text-danger">
+						{error}
+					</div>
+				) : null}
+				{loading ? (
+					<div className="py-4 text-center text-sm text-ink-3">Loading…</div>
+				) : (
+					<div className="flex items-center gap-2">
+						<input
+							value={draft}
+							onChange={(e) => {
+								setDraft(e.target.value);
+								setSaved(false);
+							}}
+							placeholder={current?.deckBaseUrl ?? "http://localhost:8787"}
+							className="field h-8 flex-1 px-2 text-sm"
+						/>
+						<Button size="sm" onClick={() => void save()} disabled={saving}>
+							{saving ? "Saving…" : "Save"}
+						</Button>
+						<Button
+							variant="ghost"
+							size="sm"
+							onClick={() => current && window.open(current.deckBaseUrl, "_blank", "noopener,noreferrer")}
+							disabled={!current}
+						>
+							Test
+						</Button>
+					</div>
+				)}
+				{!loading && current ? (
+					<div className="mt-2 font-mono text-2xs text-ink-3">
+						Effective: {current.deckBaseUrl} {current.isCustom ? "(custom)" : "(default)"}
+						{saved ? " · saved" : ""}
+					</div>
+				) : null}
+			</div>
 		</div>
 	);
 }

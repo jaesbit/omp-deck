@@ -2,6 +2,7 @@ import type {
 	AutoWorkConfig,
 	CreateSessionRequest,
 	CreateSessionResponse,
+	DeckBaseUrlResponse,
 	ListDirResponse,
 	ListFilePathsResponse,
 	ListModelsResponse,
@@ -11,6 +12,7 @@ import type {
 	ListWorkspacesResponse,
 	ModelRef,
 	SetAutoWorkConfigRequest,
+	SetDeckBaseUrlRequest,
 	WorkspacePreference,
 } from "@omp-deck/protocol";
 
@@ -110,6 +112,15 @@ export const api = {
 		return request<AutoWorkConfig>(`/auto-work/config?cwd=${encodeURIComponent(cwd)}`, {
 			method: "PUT",
 			body: JSON.stringify(config),
+		});
+	},
+	getDeckBaseUrl(): Promise<DeckBaseUrlResponse> {
+		return request<DeckBaseUrlResponse>("/settings/deck-base-url");
+	},
+	setDeckBaseUrl(deckBaseUrl: string | null): Promise<DeckBaseUrlResponse> {
+		return request<DeckBaseUrlResponse>("/settings/deck-base-url", {
+			method: "PUT",
+			body: JSON.stringify({ deckBaseUrl } satisfies SetDeckBaseUrlRequest),
 		});
 	},
 };
