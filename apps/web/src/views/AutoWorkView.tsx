@@ -350,7 +350,6 @@ function DetailPane({ run, task }: DetailPaneProps) {
 export function AutoWorkView() {
 	const autoWorkRunsChangeCounter = useStore((s) => s.autoWorkRunsChangeCounter);
 	const workspaces = useStore((s) => s.workspaces);
-	const defaultCwd = useStore((s) => s.defaultCwd);
 
 	// Workspace filter — controls which runs are visible in the left panel.
 	const [selectedCwd, setSelectedCwd] = useState("");
@@ -364,13 +363,6 @@ export function AutoWorkView() {
 	const [scheduleStatus, setScheduleStatus] = useState<AutoWorkScheduleStatus | null>(null);
 	const [triggering, setTriggering] = useState(false);
 
-	// Seed selectedCwd from defaultCwd once workspaces load.
-	useEffect(() => {
-		if (!selectedCwd) {
-			const first = defaultCwd || workspaces[0]?.cwd || "";
-			if (first) setSelectedCwd(first);
-		}
-	}, [defaultCwd, workspaces, selectedCwd]);
 
 	const refreshScheduleStatus = useCallback(async (): Promise<void> => {
 		try {
@@ -471,6 +463,7 @@ export function AutoWorkView() {
 							onChange={(e) => setSelectedCwd(e.target.value)}
 							className="w-full rounded border border-line bg-paper px-2 py-1.5 text-xs text-ink focus:outline-none focus:ring-1 focus:ring-accent/50"
 						>
+							<option value="">All workspaces</option>
 							{workspaces.map((ws) => (
 								<option key={ws.cwd} value={ws.cwd}>
 									{ws.cwd.split("/").pop() ?? ws.cwd}

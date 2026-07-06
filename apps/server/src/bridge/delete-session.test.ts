@@ -55,7 +55,7 @@ function registerFakeActive(
 	bridge: InProcessAgentBridge,
 	id: string,
 	sessionFile: string,
-): { disposed: boolean } {
+): { state: { disposed: boolean }; handle: InProcessSessionHandle } {
 	const state = { disposed: false };
 	const handle = {
 		sessionId: id,
@@ -67,7 +67,7 @@ function registerFakeActive(
 		},
 	} as unknown as InProcessSessionHandle;
 	(bridge as unknown as { active: Map<string, unknown> }).active.set(id, { handle });
-	return state;
+	return { state, handle };
 }
 
 /** Subclass overriding the persisted-listing seam with a fixture instead of scanning ~/.omp. */
@@ -85,7 +85,7 @@ describe("InProcessAgentBridge.deleteSession", () => {
 		const bridge = new InProcessAgentBridge({ idleTimeoutMs: 0 });
 		const { id, filePath } = await createRealSessionFile();
 		expect(fs.existsSync(filePath)).toBe(true);
-		const state = registerFakeActive(bridge, id, filePath);
+		const { state } = registerFakeActive(bridge, id, filePath);
 
 		const result = await bridge.deleteSession(id);
 
@@ -93,6 +93,17 @@ describe("InProcessAgentBridge.deleteSession", () => {
 		expect(state.disposed).toBe(true);
 		expect(bridge.getSession(id)).toBeUndefined();
 		expect(fs.existsSync(filePath)).toBe(false);
+	});
+
+	test("active persisted session: returns the live handle without disposing it", async () => {
+		const bridge = new InProcessAgentBridge({ idleTimeoutMs: 0 });
+		const { id, filePath } = await createRealSessionFile();
+		const { handle, state } = registerFakeActive(bridge, id, filePath);
+
+		const resumed = await bridge.resumeSession({ sessionPath: filePath });
+
+		expect(resumed).toBe(handle);
+		expect(state.disposed).toBe(false);
 	});
 
 	test("persisted-only session (no live handle): resolves via the listing and drops the file", async () => {

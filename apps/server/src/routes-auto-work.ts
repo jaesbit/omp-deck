@@ -37,7 +37,7 @@ import { getAutoWorkConfig, setAutoWorkConfig } from "./db/auto-work.ts";
 import { getAutoWorkGlobalConfig, setAutoWorkGlobalConfig } from "./db/auto-work-global.ts";
 import { getAutoWorkCostEstimate, listAutoWorkRuns } from "./db/auto-work-runs.ts";
 import { getDeckBaseUrl as getServerDeckBaseUrl } from "./db/server-settings.ts";
-import { runGlobalAutoWorkCycle } from "./auto-work/engine.ts";
+import { reconcileInactiveAutoWorkRuns, runGlobalAutoWorkCycle } from "./auto-work/engine.ts";
 import type { RunAutoWorkCycleOptions } from "./auto-work/engine.ts";
 import { getScheduleStatus, updateGlobalSchedule, recordManualTrigger } from "./auto-work/scheduler.ts";
 import { logger } from "./log.ts";
@@ -134,6 +134,7 @@ export function buildAutoWorkRouter(bridge: AgentBridge, config: Config, cycleOp
 			status = statusParam as AutoWorkRunStatus;
 		}
 
+		reconcileInactiveAutoWorkRuns(bridge);
 		const response: ListAutoWorkRunsResponse = { runs: listAutoWorkRuns({ limit, taskId, priority, status }) };
 		return c.json(response);
 	});

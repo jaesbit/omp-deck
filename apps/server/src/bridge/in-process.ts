@@ -135,6 +135,14 @@ interface Active {
 	goalBridge: GoalModeBridge;
 }
 
+function readSessionManagerId(sessionManager: unknown): string | undefined {
+	if (!sessionManager || typeof sessionManager !== "object" || !("getSessionId" in sessionManager)) return undefined;
+	const getSessionId = sessionManager.getSessionId;
+	if (typeof getSessionId !== "function") return undefined;
+	const sessionId = getSessionId.call(sessionManager);
+	return typeof sessionId === "string" ? sessionId : undefined;
+}
+
 export class InProcessAgentBridge implements AgentBridge {
 	private active = new Map<string, Active>();
 	private disposed = false;
@@ -210,6 +218,14 @@ export class InProcessAgentBridge implements AgentBridge {
 
 	async resumeSession(opts: ResumeSessionOpts): Promise<SessionHandle> {
 		const sessionManager = await SessionManager.open(opts.sessionPath);
+		const existingSessionId = readSessionManagerId(sessionManager);
+		if (existingSessionId) {
+			const existing = this.active.get(existingSessionId);
+			if (existing) {
+				log.info(`resume requested for active session ${existingSessionId}; retaining the live instance`);
+				return existing.handle;
+			}
+		}
 		const cwd = (sessionManager.getCwd?.() as string | undefined) ?? process.cwd();
 		const agentRegistry = new AgentRegistry();
 		const modelRegistry = await this.ensureModelRegistry();
