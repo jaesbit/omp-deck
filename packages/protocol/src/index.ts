@@ -1918,3 +1918,24 @@ export interface SetAutoWorkConfigRequest {
 	sessionPctLimit: number;
 	weeklyPctLimit: number;
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Deck base URL (T-61) — configurable host for session deep links
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * `GET/PUT /api/settings/deck-base-url`. `deckBaseUrl` is always resolvable:
+ * falls back to `http://localhost:${OMP_DECK_PORT}` (computed server-side)
+ * when nothing has been persisted, so session deep links work out of the
+ * box. `isCustom` distinguishes the computed default from a persisted
+ * override so the UI can show which one is in effect.
+ */
+export interface DeckBaseUrlResponse {
+	deckBaseUrl: string;
+	isCustom: boolean;
+}
+
+/** `deckBaseUrl: null` (or `""`) clears the override, reverting to the computed default. */
+export interface SetDeckBaseUrlRequest {
+	deckBaseUrl: string | null;
+}
