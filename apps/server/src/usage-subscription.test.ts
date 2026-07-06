@@ -89,57 +89,60 @@ describe("fetchSubscriptionUsage", () => {
 		expect(result.available).toBe(false);
 	});
 
-	test("maps usedFraction to pctUsed and builds limits array", async () => {
+	test("maps usedFraction to sessionPct and builds limits array", async () => {
 		const resetMs = Date.parse("2026-08-01T00:00:00Z");
 		const result = await fetchSubscriptionUsage(fetcher([makeReport(0.75, resetMs)]));
 		expect(result.available).toBe(true);
 		if (!result.available) return;
-		expect(result.pctUsed).toBe(75);
-		expect(result.resetAt).toBe(new Date(resetMs).toISOString());
+		expect(result.sessionPct).toBe(75);
+		expect(result.weeklyPct).toBe(75); // only one window → session = weekly
+		expect(result.sessionResetAt).toBe(new Date(resetMs).toISOString());
 		expect(result.limits).toHaveLength(1);
 		expect(result.limits[0]).toMatchObject({ label: "5 Hour", pctUsed: 75, windowDurationMs: FIVE_HOURS_MS });
 	});
 
-	test("exposes both session (5h) and weekly (7d) limits in sorted order", async () => {
+	test("exposes sessionPct (5h) and weeklyPct (7d) separately", async () => {
 		const reset5h = Date.parse("2026-08-01T05:00:00Z");
 		const reset7d = Date.parse("2026-08-07T00:00:00Z");
 		const result = await fetchSubscriptionUsage(fetcher([makeFullReport(0.4, 0.2, reset5h, reset7d)]));
 		expect(result.available).toBe(true);
 		if (!result.available) return;
 
-		// Shortest window (5h) comes first
 		expect(result.limits[0]).toMatchObject({ label: "5 Hour", pctUsed: 40, windowDurationMs: FIVE_HOURS_MS });
 		expect(result.limits[1]).toMatchObject({ label: "7 Day", pctUsed: 20, windowDurationMs: SEVEN_DAYS_MS });
 
-		// Top-level pctUsed = most-constraining (5h at 40% > 7d at 20%)
-		expect(result.pctUsed).toBe(40);
+		expect(result.sessionPct).toBe(40);
+		expect(result.sessionResetAt).toBe(new Date(reset5h).toISOString());
+		expect(result.weeklyPct).toBe(20);
+		expect(result.weeklyResetAt).toBe(new Date(reset7d).toISOString());
 	});
 
-	test("top-level pctUsed reflects the most-constraining window", async () => {
-		// 7d is more constraining than 5h here
+	test("sessionPct is from shortest window, weeklyPct from longest", async () => {
+		// 7d window is more used than 5h
 		const result = await fetchSubscriptionUsage(fetcher([makeFullReport(0.3, 0.8)]));
 		expect(result.available).toBe(true);
 		if (!result.available) return;
-		expect(result.pctUsed).toBeCloseTo(80, 5);
+		expect(result.sessionPct).toBeCloseTo(30, 5);
+		expect(result.weeklyPct).toBeCloseTo(80, 5);
 	});
 
-	test("deduplicates limits with the same id across multiple reports, keeping highest fraction", async () => {
+	test("deduplicates limits with the same id, keeping highest fraction", async () => {
 		const low: UsageReport = { provider: "anthropic", limits: [makeLimit("5h", "5 Hour", 0.2, FIVE_HOURS_MS)] };
 		const high: UsageReport = { provider: "anthropic", limits: [makeLimit("5h", "5 Hour", 0.9, FIVE_HOURS_MS)] };
 		const result = await fetchSubscriptionUsage(fetcher([low, high]));
 		expect(result.available).toBe(true);
 		if (!result.available) return;
-		expect(result.pctUsed).toBeCloseTo(90, 5);
-		// Deduped: only one "5h" entry
+		expect(result.sessionPct).toBeCloseTo(90, 5);
+		expect(result.weeklyPct).toBeCloseTo(90, 5); // one window → session = weekly
 		expect(result.limits).toHaveLength(1);
 	});
 
-	test("clamps pctUsed to [0, 100]", async () => {
-		const report = makeReport(1.5); // over 100%
-		const result = await fetchSubscriptionUsage(fetcher([report]));
+	test("clamps sessionPct and weeklyPct to [0, 100]", async () => {
+		const result = await fetchSubscriptionUsage(fetcher([makeReport(1.5)]));
 		expect(result.available).toBe(true);
 		if (!result.available) return;
-		expect(result.pctUsed).toBe(100);
+		expect(result.sessionPct).toBe(100);
+		expect(result.weeklyPct).toBe(100);
 		expect(result.limits[0]!.pctUsed).toBe(100);
 	});
 
@@ -151,8 +154,9 @@ describe("fetchSubscriptionUsage", () => {
 		const result = await fetchSubscriptionUsage(fetcher([report]));
 		expect(result.available).toBe(true);
 		if (!result.available) return;
-		expect(result.pctUsed).toBe(0);
-		expect(result.limits).toHaveLength(0); // no usedFraction → excluded from limits array
+		expect(result.sessionPct).toBe(0);
+		expect(result.weeklyPct).toBe(0);
+		expect(result.limits).toHaveLength(0);
 	});
 
 	test("returns graceful unavailable when fetcher throws (network error)", async () => {
@@ -161,12 +165,12 @@ describe("fetchSubscriptionUsage", () => {
 		if (!result.available) expect(result.reason).toMatch(/ECONNREFUSED/);
 	});
 
-	test("uses a fallback resetAt when window has no resetsAt", async () => {
-		const report = makeReport(0.5); // makeReport passes no resetsAt
-		const result = await fetchSubscriptionUsage(fetcher([report]));
+	test("uses fallback resetAt values when windows have no resetsAt", async () => {
+		const result = await fetchSubscriptionUsage(fetcher([makeReport(0.5)]));
 		expect(result.available).toBe(true);
 		if (!result.available) return;
-		expect(() => new Date(result.resetAt)).not.toThrow();
+		expect(() => new Date(result.sessionResetAt)).not.toThrow();
+		expect(() => new Date(result.weeklyResetAt)).not.toThrow();
 		expect(() => new Date(result.limits[0]!.resetAt)).not.toThrow();
 	});
 });

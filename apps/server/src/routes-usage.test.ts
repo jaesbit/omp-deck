@@ -85,8 +85,8 @@ describe("GET /usage/subscription", () => {
 		const body = (await res.json()) as SubscriptionUsageResponse;
 		expect(body).toMatchObject({
 			available: true,
-			pctUsed: 60,
-			resetAt: new Date(resetMs).toISOString(),
+			sessionPct: 60,
+			weeklyPct: 60, // single window → session = weekly
 			limits: [{ label: "5 Hour", pctUsed: 60 }],
 		});
 

@@ -744,17 +744,21 @@ export interface SubscriptionUsageLimit {
 /**
  * `GET /api/usage/subscription` success shape.
  * All reported usage windows are in `limits`, sorted shortest-first.
- * `pctUsed` / `resetAt` are a convenience alias for the most-constraining
- * limit (highest pctUsed) — useful for simple budget checks.
+ * `sessionPct` / `weeklyPct` map the two most relevant windows for the
+ * auto-work engine directly — no need to scan `limits` for each check.
  */
 export interface SubscriptionUsageAvailable {
 	available: true;
 	/** All usage windows reported by the provider, shortest window first. */
 	limits: SubscriptionUsageLimit[];
-	/** pctUsed of the most-constraining limit (highest across all windows). */
-	pctUsed: number;
-	/** resetAt of the most-constraining limit. */
-	resetAt: string;
+	/** % consumed in the shortest (session) window, 0–100. 0 when not reported. */
+	sessionPct: number;
+	/** ISO-8601 reset time for the session window. */
+	sessionResetAt: string;
+	/** % consumed in the longest (weekly) window, 0–100. 0 when not reported. */
+	weeklyPct: number;
+	/** ISO-8601 reset time for the weekly window. */
+	weeklyResetAt: string;
 }
 
 /** `GET /api/usage/subscription` graceful-degradation shape — never a 500. */
@@ -1938,4 +1942,47 @@ export interface DeckBaseUrlResponse {
 /** `deckBaseUrl: null` (or `""`) clears the override, reverting to the computed default. */
 export interface SetDeckBaseUrlRequest {
 	deckBaseUrl: string | null;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Auto Work run history and cost tracking (T-62)
+// ─────────────────────────────────────────────────────────────────────────────
+
+export type AutoWorkRunStatus = "running" | "completed" | "failed" | "timed_out";
+
+/**
+ * One historical (or in-flight) Auto Work run. A row is inserted with
+ * `status: "running"` the moment a run starts (`startAutoWorkRun`) and
+ * closed out with tokens/pct/status when it finishes
+ * (`completeAutoWorkRun`). `completedAt` is `null` while `status ===
+ * "running"`. The engine that actually drives this lifecycle is T-64 —
+ * this type only describes the persisted record.
+ */
+export interface AutoWorkRun {
+	id: string;
+	taskId: string;
+	/** Denormalized from the task at run-start time, for fast cost-estimate lookups. */
+	taskPriority: TaskPriority;
+	sessionId: string;
+	worktreePath: string;
+	startedAt: string;
+	completedAt: string | null;
+	status: AutoWorkRunStatus;
+	inputTokens: number | null;
+	outputTokens: number | null;
+	/** Subscription % consumed during this run, computed from a usage delta. */
+	pctConsumed: number | null;
+	failureReason: string | null;
+}
+
+/** `GET /api/auto-work/runs?limit=&taskId=&priority=&status=` response. */
+export interface ListAutoWorkRunsResponse {
+	runs: AutoWorkRun[];
+}
+
+/** `GET /api/auto-work/cost-estimate?priority=` response. */
+export interface AutoWorkCostEstimateResponse {
+	/** Average `pctConsumed` over the last 10 completed runs at this priority, or `null` if none exist yet. */
+	avgPctConsumed: number | null;
+	sampleSize: number;
 }

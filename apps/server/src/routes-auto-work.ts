@@ -1,5 +1,5 @@
 /**
- * Auto Work REST surface (T-60). Mounted on the main router at
+ * Auto Work REST surface (T-60/T-62). Mounted on the main router at
  * `/api/auto-work/*`.
  *
  * - `GET /auto-work/config?cwd=<path>` — per-workspace Auto Work
@@ -7,26 +7,42 @@
  *   `db/auto-work.ts`).
  * - `PUT /auto-work/config?cwd=<path>` — replaces the full configuration.
  *   All fields are required and validated server-side (400 on bad input).
+ * - `GET /auto-work/runs?limit=&taskId=&priority=&status=` — run history
+ *   (see `db/auto-work-runs.ts`). Recording runs (open on start, close on
+ *   finish) is the DB layer's `startAutoWorkRun`/`completeAutoWorkRun` —
+ *   the engine that calls them at the right lifecycle moments is T-64.
+ * - `GET /auto-work/cost-estimate?priority=` — rolling average
+ *   `pctConsumed` over the last 10 completed runs at that priority.
  *
  * This file is the shared home for the whole Auto Work settings surface —
- * later tickets (T-62 eligibility, T-63 scheduler, T-64 execution, T-66/67
- * reporting) extend `buildAutoWorkRouter` with more routes rather than
- * spawning parallel files. Keep additions as more `app.<verb>(...)` calls
- * plus small private helpers below, matching this repo's router-per-file
- * convention (see `routes-usage.ts`, `routes-tasks.ts`).
+ * later tickets (T-63 scheduler, T-64 execution, T-66/67 reporting) extend
+ * `buildAutoWorkRouter` with more routes rather than spawning parallel
+ * files. Keep additions as more `app.<verb>(...)` calls plus small private
+ * helpers below, matching this repo's router-per-file convention (see
+ * `routes-usage.ts`, `routes-tasks.ts`).
  */
 
 import * as path from "node:path";
 import { Hono } from "hono";
-import type { AutoWorkConfig, ModelRef, SetAutoWorkConfigRequest, TaskPriority } from "@omp-deck/protocol";
+import type {
+	AutoWorkConfig,
+	AutoWorkCostEstimateResponse,
+	AutoWorkRunStatus,
+	ListAutoWorkRunsResponse,
+	ModelRef,
+	SetAutoWorkConfigRequest,
+	TaskPriority,
+} from "@omp-deck/protocol";
 
 import type { AgentBridge } from "./bridge/types.ts";
 import { getAutoWorkConfig, setAutoWorkConfig } from "./db/auto-work.ts";
+import { getAutoWorkCostEstimate, listAutoWorkRuns } from "./db/auto-work-runs.ts";
 import { logger } from "./log.ts";
 
 const log = logger("routes:auto-work");
 
 const TASK_PRIORITIES: TaskPriority[] = ["P0", "P1", "P2", "P3", "P4", "P5"];
+const RUN_STATUSES: AutoWorkRunStatus[] = ["running", "completed", "failed", "timed_out"];
 
 export function buildAutoWorkRouter(bridge: AgentBridge): Hono {
 	const app = new Hono();
@@ -78,6 +94,49 @@ export function buildAutoWorkRouter(bridge: AgentBridge): Hono {
 			log.error("setAutoWorkConfig failed", err);
 			return c.json({ error: String(err) }, 500);
 		}
+	});
+
+	app.get("/auto-work/runs", (c) => {
+		const limitParam = c.req.query("limit");
+		let limit: number | undefined;
+		if (limitParam !== undefined) {
+			limit = Number(limitParam);
+			if (!Number.isInteger(limit) || limit <= 0) {
+				return c.json({ error: "limit must be a positive integer" }, 400);
+			}
+		}
+
+		const taskId = c.req.query("taskId")?.trim() || undefined;
+
+		const priorityParam = c.req.query("priority")?.trim();
+		let priority: TaskPriority | undefined;
+		if (priorityParam !== undefined) {
+			if (!TASK_PRIORITIES.includes(priorityParam as TaskPriority)) {
+				return c.json({ error: `priority must be one of ${TASK_PRIORITIES.join(", ")}` }, 400);
+			}
+			priority = priorityParam as TaskPriority;
+		}
+
+		const statusParam = c.req.query("status")?.trim();
+		let status: AutoWorkRunStatus | undefined;
+		if (statusParam !== undefined) {
+			if (!RUN_STATUSES.includes(statusParam as AutoWorkRunStatus)) {
+				return c.json({ error: `status must be one of ${RUN_STATUSES.join(", ")}` }, 400);
+			}
+			status = statusParam as AutoWorkRunStatus;
+		}
+
+		const response: ListAutoWorkRunsResponse = { runs: listAutoWorkRuns({ limit, taskId, priority, status }) };
+		return c.json(response);
+	});
+
+	app.get("/auto-work/cost-estimate", (c) => {
+		const priorityParam = c.req.query("priority")?.trim();
+		if (!priorityParam || !TASK_PRIORITIES.includes(priorityParam as TaskPriority)) {
+			return c.json({ error: `priority query param must be one of ${TASK_PRIORITIES.join(", ")}` }, 400);
+		}
+		const response: AutoWorkCostEstimateResponse = getAutoWorkCostEstimate(priorityParam as TaskPriority);
+		return c.json(response);
 	});
 
 	return app;
