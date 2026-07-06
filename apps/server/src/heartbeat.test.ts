@@ -28,7 +28,7 @@ describe("WsHub heartbeat", () => {
 		expect(HEARTBEAT_INTERVAL_MS).toBeLessThanOrEqual(30_000);
 	});
 
-	test("broadcasts a heartbeat frame on its interval", async () => {
+	test("broadcasts a heartbeat frame on its interval, and keeps re-arming", async () => {
 		const frames: BroadcastFrame[] = [];
 		const unsubscribe = broadcastBus.subscribe((frame) => {
 			if (frame.type === "heartbeat") frames.push(frame);
@@ -36,15 +36,18 @@ describe("WsHub heartbeat", () => {
 
 		const hub = new WsHub(stubBridge, stubSkills);
 		try {
-			// Wait long enough for at least one tick of the real interval. Cap at
-			// 7s so the test fails fast if the timer isn't firing rather than
-			// hanging forever.
-			const deadline = Date.now() + HEARTBEAT_INTERVAL_MS + 2000;
-			while (frames.length === 0 && Date.now() < deadline) {
+			// Wait for two ticks, not just one — a regression where the timer
+			// fires once and silently never re-arms (the production bug this
+			// hardening addresses: the ref'd/unref'd timer stopped rescheduling
+			// after the first success, no crash, no error) would pass a
+			// single-tick assertion but fail here. Cap the wait well past two
+			// intervals so the test fails fast instead of hanging forever.
+			const deadline = Date.now() + HEARTBEAT_INTERVAL_MS * 2 + 2000;
+			while (frames.length < 2 && Date.now() < deadline) {
 				await new Promise((r) => setTimeout(r, 250));
 			}
 
-			expect(frames.length).toBeGreaterThanOrEqual(1);
+			expect(frames.length).toBeGreaterThanOrEqual(2);
 			const f = frames[0];
 			if (!f || f.type !== "heartbeat") throw new Error("no heartbeat captured");
 			expect(typeof f.serverStartedAt).toBe("string");
@@ -54,11 +57,16 @@ describe("WsHub heartbeat", () => {
 			expect(typeof f.timestamp).toBe("string");
 			// buildSha is null when no git / no env / no .buildinfo — accept either.
 			expect(f.buildSha === null || typeof f.buildSha === "string").toBe(true);
+			// The second tick must be a genuinely later frame, not a duplicate.
+			const g = frames[1];
+			if (!g || g.type !== "heartbeat") throw new Error("no second heartbeat captured");
+			expect(g.uptimeSecs).toBeGreaterThanOrEqual(f.uptimeSecs);
+			expect(g.timestamp >= f.timestamp).toBe(true);
 		} finally {
 			hub.dispose();
 			unsubscribe();
 		}
-	}, { timeout: HEARTBEAT_INTERVAL_MS + 4000 });
+	}, { timeout: HEARTBEAT_INTERVAL_MS * 2 + 4000 });
 
 	test("dispose stops the heartbeat timer", async () => {
 		const before: BroadcastFrame[] = [];
