@@ -1,3 +1,4 @@
+import { memo } from "react";
 import type { AssistantMsg, ToolCallStream } from "@/lib/types";
 import { Markdown } from "@/lib/markdown";
 import { formatCost, formatDurationMs, formatTokens } from "@/lib/utils";
@@ -9,7 +10,14 @@ interface Props {
 	toolCalls: Record<string, ToolCallStream>;
 }
 
-export function AssistantMessage({ msg, toolCalls }: Props) {
+/**
+ * Memoized with a custom comparator: `toolCalls` is the whole per-session
+ * map and gets a new identity on EVERY tool event anywhere in the session,
+ * which would defeat plain shallow memo. A past assistant message only
+ * depends on the streams of its own toolCall blocks, so it re-renders only
+ * when one of those (or the message object itself) actually changed.
+ */
+export const AssistantMessage = memo(function AssistantMessage({ msg, toolCalls }: Props) {
 	const lastBlockIdx = msg.blocks.length - 1;
 
 	return (
@@ -84,4 +92,11 @@ export function AssistantMessage({ msg, toolCalls }: Props) {
 			</div>
 		</div>
 	);
-}
+}, (prev, next) => {
+	if (prev.msg !== next.msg) return false;
+	if (prev.toolCalls === next.toolCalls) return true;
+	for (const b of next.msg.blocks) {
+		if (b.type === "toolCall" && prev.toolCalls[b.id] !== next.toolCalls[b.id]) return false;
+	}
+	return true;
+});

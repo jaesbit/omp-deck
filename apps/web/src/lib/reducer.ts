@@ -56,10 +56,97 @@ export function initSession(snapshot: SessionSnapshot): SessionUi {
 		pendingPlanApproval: snapshot.pendingPlanApproval,
 		goalMode: snapshot.goalMode,
 	};
-	for (const m of snapshot.messages) {
-		ingestMessage(state, m);
+	const base = snapshot.messagesStartIndex ?? 0;
+	state.historyStartIndex = base;
+	snapshot.messages.forEach((m, i) => {
+		ingestMessage(state, m, base + i);
+	});
+	// A tail-sliced snapshot can't rebuild usage from its messages alone —
+	// the server rolls up the FULL history and ships it alongside.
+	if (snapshot.usageRollup) {
+		state.usage = { ...snapshot.usageRollup };
 	}
 	return state;
+}
+
+/**
+ * Prepend one fetched page of older history. The page is ingested in
+ * isolation (so usage rollup and queued-prompt draining don't double-apply)
+ * and merged in front of the current window. Existing tool-call streams win
+ * over re-folded historical ones.
+ */
+export function prependHistory(
+	state: SessionUi,
+	messages: SessionSnapshot["messages"],
+	startIndex: number,
+): SessionUi {
+	if (messages.length === 0) {
+		return { ...state, historyStartIndex: startIndex, historyLoading: false };
+	}
+	const temp: SessionUi = {
+		...state,
+		messages: [],
+		toolCalls: {},
+		queuedPrompts: [],
+		usage: { ...EMPTY_USAGE },
+	};
+	messages.forEach((m, i) => {
+		ingestMessage(temp, m, startIndex + i);
+	});
+	return {
+		...state,
+		messages: [...temp.messages, ...state.messages],
+		toolCalls: { ...temp.toolCalls, ...state.toolCalls },
+		historyStartIndex: startIndex,
+		historyLoading: false,
+	};
+}
+
+/**
+ * Shrink the loaded window back to ~`targetCount` messages by dropping the
+ * oldest ones (and the tool-call streams they own). Cuts only at a message
+ * whose server-side history index is known, so `historyStartIndex` stays a
+ * valid re-fetch cursor: scrolling back up re-pages exactly what was
+ * dropped. Returns `state` unchanged when there is nothing to trim or no
+ * safe cut point exists.
+ */
+export function trimHistory(state: SessionUi, targetCount: number): SessionUi {
+	const excess = state.messages.length - targetCount;
+	if (excess <= 0) return state;
+	// Latest safe cut at or before `excess` — the newest droppable prefix
+	// whose boundary message carries a known srcIndex.
+	let cut = -1;
+	let cutSrc = 0;
+	for (let i = excess; i >= 1; i--) {
+		const m = state.messages[i];
+		if (m && (m.role === "user" || m.role === "assistant") && typeof m.srcIndex === "number") {
+			cut = i;
+			cutSrc = m.srcIndex;
+			break;
+		}
+	}
+	if (cut <= 0) return state;
+	const dropped = state.messages.slice(0, cut);
+	// Free the tool-call streams owned by dropped assistant messages; their
+	// cards are no longer rendered and re-paging re-folds the results.
+	let toolCalls = state.toolCalls;
+	const deadIds: string[] = [];
+	for (const m of dropped) {
+		if (m.role !== "assistant") continue;
+		for (const b of m.blocks) {
+			if (b.type === "toolCall" && b.id) deadIds.push(b.id);
+		}
+	}
+	if (deadIds.length > 0) {
+		toolCalls = { ...state.toolCalls };
+		for (const id of deadIds) delete toolCalls[id];
+	}
+	return {
+		...state,
+		messages: state.messages.slice(cut),
+		toolCalls,
+		historyStartIndex: cutSrc,
+	};
 }
 
 export function applyEvent(state: SessionUi, event: AgentSessionEventJson): SessionUi {
@@ -392,7 +479,7 @@ function pushNotice(state: SessionUi, p: Omit<NoticeMsg, "id" | "role" | "timest
 	};
 }
 
-function ingestMessage(state: SessionUi, msg: any): void {
+function ingestMessage(state: SessionUi, msg: any, srcIndex?: number): void {
 	if (!msg || typeof msg !== "object") return;
 	switch (msg.role) {
 		case "user": {
@@ -405,6 +492,7 @@ function ingestMessage(state: SessionUi, msg: any): void {
 				images: extractImages(msg.content),
 				timestamp: typeof msg.timestamp === "number" ? msg.timestamp : Date.now(),
 				synthetic,
+				srcIndex,
 			});
 			// If this real user message corresponds to a previously-queued prompt
 			// (same text, FIFO), drop the queued bubble so we don't render the
@@ -435,6 +523,7 @@ function ingestMessage(state: SessionUi, msg: any): void {
 				timestamp: typeof msg.timestamp === "number" ? msg.timestamp : undefined,
 				durationMs: typeof msg.duration === "number" ? msg.duration : undefined,
 				ttft: typeof msg.ttft === "number" ? msg.ttft : undefined,
+				srcIndex,
 			});
 			if (msg.usage) {
 				rollupUsage(state, msg.usage);

@@ -6,6 +6,7 @@ import {
 	type AgentSession,
 } from "@oh-my-pi/pi-coding-agent";
 import { getLatestTodoPhasesFromEntries } from "@oh-my-pi/pi-coding-agent/tools/todo";
+import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { getEnvApiKey } from "@oh-my-pi/pi-ai";
 import { runExtensionCompact, runExtensionSetModel } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/compact-handler";
 import { getSessionSlashCommands } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/get-commands-handler";
@@ -30,7 +31,9 @@ import type {
 	PendingPlanApprovalWire,
 	PlanModeContextWire,
 	ServerFrame,
+	SessionHistoryResponse,
 	SessionSnapshot,
+	UsageRollupWire,
 	SessionSummary,
 } from "@omp-deck/protocol";
 
@@ -54,6 +57,56 @@ import type {
 } from "./types.ts";
 
 const log = logger("bridge:in-process");
+
+/**
+ * Maximum number of trailing messages included in a subscribe snapshot.
+ * Older messages are paged on demand via `SessionHandle.getHistory` /
+ * `GET /sessions/:id/history` so subscribing to a long-running session does
+ * not serialize (or force the client to render) the entire history at once.
+ */
+export const SNAPSHOT_MESSAGE_TAIL = 200;
+/**
+ * Pure paging arithmetic behind `SessionHandle.getHistory`: the page of
+ * messages older than index `before` (exclusive), clamped to the valid
+ * range, at least one and at most `limit` messages when any exist.
+ */
+export function sliceHistoryPage(
+	all: AgentMessageJson[],
+	before: number,
+	limit: number,
+): SessionHistoryResponse {
+	const end = Math.max(0, Math.min(Math.floor(before), all.length));
+	const start = Math.max(0, end - Math.max(1, Math.floor(limit)));
+	return { messages: all.slice(start, end), startIndex: start };
+}
+
+
+/**
+ * Sum token/cost usage across every assistant message in `messages`.
+ * Mirrors the web reducer's `extractUsage`/`rollupUsage` semantics so a
+ * tail-sliced snapshot can seed the client's cost strip with full-history
+ * totals.
+ */
+export function computeUsageRollup(messages: AgentMessageJson[]): UsageRollupWire {
+	const rollup: UsageRollupWire = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: 0 };
+	for (const msg of messages) {
+		if (!msg || msg.role !== "assistant") continue;
+		const usage = (msg as Record<string, unknown>).usage;
+		if (!usage || typeof usage !== "object") continue;
+		const u = usage as Record<string, unknown>;
+		rollup.input += Number(u.input ?? 0) || 0;
+		rollup.output += Number(u.output ?? 0) || 0;
+		rollup.cacheRead += Number(u.cacheRead ?? 0) || 0;
+		rollup.cacheWrite += Number(u.cacheWrite ?? 0) || 0;
+		rollup.totalTokens += Number(u.totalTokens ?? 0) || 0;
+		const cost = u.cost && typeof u.cost === "object" ? Number((u.cost as Record<string, unknown>).total ?? 0) : 0;
+		rollup.cost += Number.isFinite(cost) ? cost : 0;
+		if (typeof u.reasoningTokens === "number") {
+			rollup.reasoningTokens = (rollup.reasoningTokens ?? 0) + u.reasoningTokens;
+		}
+	}
+	return rollup;
+}
 
 
 /**
@@ -108,10 +161,12 @@ export class InProcessAgentBridge implements AgentBridge {
 
 	async createSession(opts: CreateSessionOpts): Promise<SessionHandle> {
 		const sessionManager = SessionManager.create(opts.cwd);
+		const agentRegistry = new AgentRegistry();
 		const modelRegistry = await this.ensureModelRegistry();
 		const result = await createAgentSession({
 			cwd: opts.cwd,
 			sessionManager,
+			agentRegistry,
 			modelRegistry,
 			authStorage: modelRegistry.authStorage,
 			// Skip eval-tool Python warmup on session create. On Windows this otherwise
@@ -156,11 +211,13 @@ export class InProcessAgentBridge implements AgentBridge {
 	async resumeSession(opts: ResumeSessionOpts): Promise<SessionHandle> {
 		const sessionManager = await SessionManager.open(opts.sessionPath);
 		const cwd = (sessionManager.getCwd?.() as string | undefined) ?? process.cwd();
+		const agentRegistry = new AgentRegistry();
 		const modelRegistry = await this.ensureModelRegistry();
 		const result = await createAgentSession({
 			cwd,
 			sessionManager,
 			modelRegistry,
+			agentRegistry,
 			authStorage: modelRegistry.authStorage,
 			skipPythonPreflight: true,
 			systemPrompt: (defaults) => [getEffectivePrelude(), ...defaults],
@@ -804,6 +861,8 @@ export class InProcessSessionHandle implements SessionHandle {
 	snapshot(): SessionSnapshot {
 		const s = this.session as any;
 		const usage = this.getContextUsage();
+		const all = this.allMessages();
+		const tail = all.length > SNAPSHOT_MESSAGE_TAIL ? all.slice(all.length - SNAPSHOT_MESSAGE_TAIL) : all;
 		const snap: SessionSnapshot = {
 			sessionId: this.sessionId,
 			sessionFile: this.sessionFile,
@@ -815,7 +874,14 @@ export class InProcessSessionHandle implements SessionHandle {
 					: undefined,
 			thinkingLevel: typeof s.thinkingLevel === "string" ? s.thinkingLevel : undefined,
 			isStreaming: Boolean(s.isStreaming),
-			messages: Array.isArray(s.messages) ? (s.messages as AgentMessageJson[]) : [],
+			// Long histories ship only the most recent SNAPSHOT_MESSAGE_TAIL
+			// messages; the client pages older ones on demand via
+			// `GET /sessions/:id/history`. `usageRollup` still covers the FULL
+			// history so the cost strip never under-reports.
+			messages: tail,
+			messagesStartIndex: all.length - tail.length,
+			messagesTotal: all.length,
+			usageRollup: computeUsageRollup(all),
 			// The SDK's live todo cache auto-clears completed tasks, while the session
 			// entries retain the latest list for reconnects and snapshots.
 			todoPhases: getLatestTodoPhasesFromEntries(this.sessionManager.getBranch()) as unknown as Array<Record<string, unknown>>,
@@ -829,6 +895,16 @@ export class InProcessSessionHandle implements SessionHandle {
 		if (goalMode) snap.goalMode = goalMode;
 		if (this.shadowQueue.length > 0) snap.queuedPrompts = [...this.shadowQueue];
 		return snap;
+	}
+
+	/** Full message history as the SDK holds it, `[]` when unavailable. */
+	private allMessages(): AgentMessageJson[] {
+		const s = this.session as unknown as { messages?: unknown };
+		return Array.isArray(s.messages) ? (s.messages as AgentMessageJson[]) : [];
+	}
+
+	getHistory(before: number, limit: number): SessionHistoryResponse {
+		return sliceHistoryPage(this.allMessages(), before, limit);
 	}
 
 	getContextUsage(): import("@omp-deck/protocol").ContextUsage | undefined {

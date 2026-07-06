@@ -187,3 +187,16 @@ export function setAutoWorkConfig(
 	);
 	return getAutoWorkConfig(cwd);
 }
+
+/** Returns all workspaces with a persisted config row — used by the global scheduler to find enabled workspaces. */
+export function listAutoWorkConfigs(): AutoWorkConfig[] {
+	const rows = getDb()
+		.query<Row, []>(
+			`SELECT workspace_cwd, enabled, model_by_priority, time_windows,
+			        session_pct_limit, weekly_pct_limit, weekly_pct_threshold, default_estimate_pct_by_priority,
+			        estimation_buffer, timeout_minutes_by_priority, updated_at
+			 FROM auto_work_config`,
+		)
+		.all() as Row[];
+	return rows.map(rowToConfig);
+}

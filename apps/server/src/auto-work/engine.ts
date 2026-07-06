@@ -246,6 +246,24 @@ export interface RunAutoWorkCycleOptions {
 	createPullRequest?: (params: CreatePullRequestParams) => Promise<CreatePullRequestResult>;
 }
 
+/** Candidate supplied to the optional cross-workspace task selector. */
+export interface GlobalAutoWorkCandidate {
+	workspaceCwd: string;
+	task: Task;
+	estimatedCostPct: number;
+}
+
+/** Injectable decision seam for tests or a future non-LLM policy. */
+export type GlobalTaskSelector = (candidates: GlobalAutoWorkCandidate[]) => Promise<string | undefined>;
+
+/** Options specific to global scheduling; extends the ordinary per-workspace cycle options. */
+export interface RunGlobalAutoWorkCycleOptions extends RunAutoWorkCycleOptions {
+	/** Model that chooses among cross-workspace candidates. Null = bridge/server default. */
+	taskSelectionModel?: ModelRef | null;
+	/** Test seam or alternate policy. Return a candidate task ID, or undefined to use priority order. */
+	selectTask?: GlobalTaskSelector;
+}
+
 /**
  * Runs exactly one auto-work cycle for `cwd`: pre-flight checks, task
  * selection, worktree + session creation, and waiting for the session to
@@ -729,4 +747,240 @@ async function createPullRequestViaGh(params: CreatePullRequestParams): Promise<
 		throw new Error(`gh pr create succeeded but its output didn't contain a PR URL: ${stdout.trim()}`);
 	}
 	return { url, number: Number(match[1]) };
+}
+
+
+// ─── Global cycle (multi-workspace) ─────────────────────────────────────────
+
+/**
+ * How many auto-work–enabled workspaces currently have at least one eligible
+ * task (autoWork flag, backlog state, dependencies met). Used by the
+ * schedule-status endpoint so the UI can show whether there's work to do.
+ * Pure DB read — does NOT run preflight, budget, or mutex checks.
+ */
+export function countEligibleWorkspaces(): number {
+	const allTasks = listTasks();
+	const backlogState = findStateByName("backlog");
+	const doneState = findStateByName("done");
+	if (!backlogState || !doneState) return 0;
+
+	const tasksByCwd = new Map<string, Task[]>();
+	for (const t of allTasks) {
+		if (!t.cwd) continue;
+		const list = tasksByCwd.get(t.cwd) ?? [];
+		list.push(t);
+		tasksByCwd.set(t.cwd, list);
+	}
+
+	const tasksById = new Map(allTasks.map((t) => [t.id, t]));
+	let count = 0;
+	for (const [cwd, cwdTasks] of tasksByCwd) {
+		const config = getAutoWorkConfig(cwd);
+		if (!config.enabled) continue;
+		const hasEligible = cwdTasks.some(
+			(t) =>
+				t.autoWork &&
+				t.stateId === backlogState.id &&
+				t.dependsOn.every((depId) => tasksById.get(depId)?.stateId === doneState.id),
+		);
+		if (hasEligible) count++;
+	}
+	return count;
+}
+
+/**
+ * Global auto-work cycle: selects the highest-priority eligible task across
+ * ALL enabled workspaces and runs it. Called by the global scheduler and the
+ * manual trigger endpoint.
+ *
+ * Algorithm (priority-based, LLM selection deferred to a future iteration):
+ * 1. Fetch subscription usage once (shared across workspace checks).
+ * 2. For each workspace with `enabled: true`, run preflight + task selection.
+ * 3. Collect all candidates (workspace, task, estimatedCostPct).
+ * 4. Pick the candidate whose task has the highest priority (lowest PRIORITY_ORDER).
+ * 5. Run `runAutoWorkCycle` for the winning workspace, passing the already-
+ *    fetched subscription usage so it isn't re-fetched.
+ *
+ * Returns `{ outcome: "skipped" }` when no workspace passes preflight or no
+ * task fits the budget. Returns the inner `AutoWorkCycleResult` otherwise.
+ */
+export async function runGlobalAutoWorkCycle(
+	bridge: AgentBridge,
+	options: RunGlobalAutoWorkCycleOptions = {},
+): Promise<AutoWorkCycleResult> {
+	const now = (options.now ?? (() => new Date()))();
+	const usageLookup = options.getSubscriptionUsage ?? (() => getSubscriptionUsage());
+	const usage = await usageLookup();
+	const subscriptionPctUsed = usage.available && typeof usage.weeklyPct === "number" ? usage.weeklyPct : null;
+
+	const allTasks = listTasks();
+	const backlogState = findStateByName("backlog");
+	const doneState = findStateByName("done");
+	if (!backlogState || !doneState) {
+		return { outcome: "skipped", reason: "backlog/done task states missing — cannot run auto-work" };
+	}
+
+	// Global Auto Work is deliberately sequential. A running row anywhere is
+	// enough to defer this cycle, rather than starting work in another workspace.
+	if (listAutoWorkRuns({ status: "running" }).length > 0) {
+		return { outcome: "skipped", reason: "another auto-work run is already active" };
+	}
+
+	// Collect distinct enabled cwds from all auto-work–flagged tasks.
+	const enabledCwds = new Set<string>();
+	for (const t of allTasks) {
+		if (!t.autoWork || !t.cwd) continue;
+		const config = getAutoWorkConfig(t.cwd);
+		if (config.enabled) enabledCwds.add(t.cwd);
+	}
+
+	if (enabledCwds.size === 0) {
+		return { outcome: "skipped", reason: "no workspace has auto-work enabled" };
+	}
+
+	// Per-workspace: preflight + task selection.
+	const tasksById = new Map(allTasks.map((t) => [t.id, t]));
+
+	const candidates: GlobalAutoWorkCandidate[] = [];
+
+	for (const cwd of enabledCwds) {
+		const config = getAutoWorkConfig(cwd);
+		const activeRuns = listAutoWorkRuns({ status: "running" }).filter((r) => {
+			const task = tasksById.get(r.taskId);
+			return task?.cwd === cwd;
+		});
+		const preflight = checkAutoWorkPreflight({ config, now, subscriptionPctUsed, activeRuns });
+		if (!preflight.ok) {
+			log.debug(`global cycle: ${cwd} skipped (${preflight.reason})`);
+			continue;
+		}
+		const cwdTasks = allTasks.filter((t) => t.cwd === cwd);
+		const selection = selectNextAutoWorkTask({
+			tasks: cwdTasks,
+			config,
+			currentPctUsed: subscriptionPctUsed ?? 0,
+			backlogStateId: backlogState.id,
+			doneStateId: doneState.id,
+			estimateCostPct: (priority) => estimateTaskCostPct(priority, config),
+		});
+		if (selection.kind === "selected") {
+			candidates.push({ workspaceCwd: cwd, task: selection.task, estimatedCostPct: selection.estimatedCostPct });
+		}
+	}
+
+	if (candidates.length === 0) {
+		return { outcome: "skipped", reason: "no eligible task fits the current budget across all workspaces" };
+	}
+
+	// Priority remains the deterministic fallback. A selector only runs after
+	// candidates exist, so the system never spends a model request on an empty queue.
+	candidates.sort(
+		(a, b) =>
+			PRIORITY_ORDER[a.task.priority] - PRIORITY_ORDER[b.task.priority] ||
+			a.task.orderInState - b.task.orderInState,
+	);
+	const selectedTaskId = options.selectTask
+		? await options.selectTask(candidates)
+		: await selectTaskWithModel(bridge, candidates, options.taskSelectionModel ?? null);
+	const winner = candidates.find((candidate) => candidate.task.id === selectedTaskId) ?? candidates[0]!;
+	log.info(
+		`global cycle: selected T-${winner.task.displayId} "${winner.task.title}" (${winner.task.priority}) in ${winner.workspaceCwd}`,
+	);
+
+	// Run the cycle for the winning workspace, sharing the already-fetched usage.
+	const cachedUsage = usage;
+	return runAutoWorkCycle(winner.workspaceCwd, bridge, {
+		...options,
+		now: () => now,
+		getSubscriptionUsage: () => Promise.resolve(cachedUsage),
+	});
+}
+
+/**
+ * Ask a short-lived agent session to select one candidate task. The prompt
+ * contains no task bodies or repository content, only the fields needed for
+ * prioritization. The response must be one candidate task ID. Any malformed
+ * response or model/session error returns undefined so priority order wins.
+ */
+async function selectTaskWithModel(
+	bridge: AgentBridge,
+	candidates: GlobalAutoWorkCandidate[],
+	model: ModelRef | null,
+): Promise<string | undefined> {
+	const candidateList = candidates
+		.map((candidate) =>
+			[
+				`id=${candidate.task.id}`,
+				`display=T-${candidate.task.displayId}`,
+				`priority=${candidate.task.priority}`,
+				`workspace=${candidate.workspaceCwd}`,
+				`estimatePct=${candidate.estimatedCostPct.toFixed(1)}`,
+				`title=${JSON.stringify(candidate.task.title)}`,
+			].join(" | "),
+		)
+		.join("\n");
+	const prompt = [
+		"Choose exactly one task ID from the candidate list for the next unattended engineering run.",
+		"Prioritize urgency, small safe high-value work, and avoiding risky broad changes.",
+		"Return ONLY the exact id= value, with no prose, punctuation, or markdown.",
+		"Candidates:",
+		candidateList,
+	].join("\n");
+
+	let session: SessionHandle | undefined;
+	try {
+		session = await bridge.createSession({
+			cwd: candidates[0]!.workspaceCwd,
+			suppressAutoStart: true,
+			...(model ? { model } : {}),
+		});
+		const terminal = waitForAutoWorkSessionTerminal(session, 30_000);
+		await session.prompt(prompt);
+		const outcome = await terminal;
+		if (outcome !== "completed") {
+			log.warn("global task selector timed out; using priority order");
+			return undefined;
+		}
+		const response = latestAssistantText(session.snapshot().messages);
+		const match = candidates.find((candidate) => response.trim() === candidate.task.id);
+		if (!match) {
+			log.warn(`global task selector returned an invalid task ID; using priority order`);
+			return undefined;
+		}
+		return match.task.id;
+	} catch (err) {
+		log.warn("global task selector failed; using priority order", err);
+		return undefined;
+	} finally {
+		if (session) {
+			try {
+				await bridge.deleteSession(session.sessionId);
+			} catch (err) {
+				log.warn("global task selector cleanup failed", err);
+			}
+		}
+	}
+}
+
+/** Extract text from the most recent assistant message without unchecked casts. */
+function latestAssistantText(messages: ReadonlyArray<{ role: string; content: unknown }>): string {
+	for (let index = messages.length - 1; index >= 0; index--) {
+		const message = messages[index]!;
+		if (message.role !== "assistant") continue;
+		if (typeof message.content === "string") return message.content;
+		if (!Array.isArray(message.content)) continue;
+		const text = message.content.flatMap((block) => {
+			if (
+				block &&
+				typeof block === "object" &&
+				"type" in block &&
+				block.type === "text" &&
+				"text" in block &&
+				typeof block.text === "string"
+			) return [block.text];
+			return [];
+		}).join("");
+		if (text) return text;
+	}
+	return "";
 }

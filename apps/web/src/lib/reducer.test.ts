@@ -7,7 +7,9 @@
  */
 import { describe, expect, test } from "bun:test";
 
-import { applyEvent, initSession } from "./reducer";
+import type { AgentMessageJson, SessionSnapshot } from "@omp-deck/protocol";
+
+import { applyEvent, initSession, prependHistory, trimHistory } from "./reducer";
 import type { SessionUi } from "./types";
 
 function fresh(): SessionUi {
@@ -264,5 +266,163 @@ describe("reducer Goal Mode lifecycle", () => {
 		const cancelled = applyEvent(active, { type: "goal_updated", goal: null } as never);
 		expect(cancelled.goalMode).toBeUndefined();
 		expect(cancelled.goal).toBeNull();
+	});
+});
+
+// ─── History paging (tail-sliced snapshots) ────────────────────────────────
+
+function snap(over: Partial<SessionSnapshot> = {}): SessionSnapshot {
+	return { sessionId: "s1", cwd: "/tmp/x", isStreaming: false, messages: [], todoPhases: [], ...over };
+}
+
+function userMsg(text: string): AgentMessageJson {
+	return { role: "user", content: text };
+}
+
+function toolResultMsg(toolCallId: string, text: string): AgentMessageJson {
+	return { role: "toolResult", toolCallId, toolName: "ls", content: [{ type: "text", text }] };
+}
+
+function srcIndexes(state: SessionUi): Array<number | undefined> {
+	return state.messages.map((m) => ("srcIndex" in m ? m.srcIndex : undefined));
+}
+
+/** User messages by text; non-user entries collapse to their role name. */
+function texts(state: SessionUi): string[] {
+	return state.messages.map((m) => (m.role === "user" ? m.text : m.role));
+}
+
+const FULL_ROLLUP = { input: 100, output: 50, cacheRead: 5, cacheWrite: 6, totalTokens: 161, cost: 1.25 };
+
+describe("initSession history paging", () => {
+	test("tail snapshot: srcIndex counts every snapshot position, including toolResults folded into toolCalls", () => {
+		const state = initSession(
+			snap({
+				messagesStartIndex: 40,
+				messages: [userMsg("q"), toolResultMsg("t1", "out"), { role: "assistant", content: [{ type: "text", text: "a" }] }],
+			}),
+		);
+		expect(state.historyStartIndex).toBe(40);
+		// The toolResult occupies history index 41 but folds into toolCalls,
+		// so the assistant that follows must still land on 42 — otherwise the
+		// paging cursor drifts and re-fetches skip or duplicate messages.
+		expect(srcIndexes(state)).toEqual([40, 42]);
+		expect(state.toolCalls["t1"]?.status).toBe("complete");
+	});
+
+	test("snapshot without messagesStartIndex numbers the full history from 0", () => {
+		const state = initSession(snap({ messages: [userMsg("a"), userMsg("b")] }));
+		expect(state.historyStartIndex).toBe(0);
+		expect(srcIndexes(state)).toEqual([0, 1]);
+	});
+
+	test("snapshot usageRollup replaces the tail-derived usage instead of adding to it", () => {
+		const tail: AgentMessageJson[] = [
+			{ role: "assistant", content: [], usage: { input: 1, output: 2, totalTokens: 3, cost: { total: 0.5 } } },
+		];
+		// Without a rollup the tail messages seed usage…
+		expect(initSession(snap({ messages: tail })).usage.input).toBe(1);
+		// …with one, the server-computed full-history totals win wholesale
+		// (input must be 100, not 101 — replace, never sum).
+		const state = initSession(snap({ messages: tail, messagesStartIndex: 500, usageRollup: FULL_ROLLUP }));
+		expect(state.usage).toEqual(FULL_ROLLUP);
+	});
+});
+
+describe("prependHistory", () => {
+	test("prepends the ingested page in front of the window and moves the cursor", () => {
+		const state = initSession(snap({ messages: [userMsg("new")], messagesStartIndex: 2 }));
+		const next = prependHistory(state, [userMsg("old0"), userMsg("old1")], 0);
+		expect(texts(next)).toEqual(["old0", "old1", "new"]);
+		expect(srcIndexes(next)).toEqual([0, 1, 2]);
+		expect(next.historyStartIndex).toBe(0);
+		expect(next.historyLoading).toBe(false);
+	});
+
+	test("existing tool-call streams win over re-folded historical ones", () => {
+		const state = initSession(snap({ messages: [toolResultMsg("t1", "live")], messagesStartIndex: 4 }));
+		const next = prependHistory(state, [toolResultMsg("t0", "older"), toolResultMsg("t1", "stale")], 2);
+		expect(next.toolCalls["t1"]?.resultContent).toEqual([{ type: "text", text: "live" }]);
+		expect(next.toolCalls["t0"]?.resultContent).toEqual([{ type: "text", text: "older" }]);
+	});
+
+	test("does not double-count usage or drain queued prompts while ingesting the page", () => {
+		let state = initSession(snap({ messages: [], messagesStartIndex: 10, usageRollup: FULL_ROLLUP }));
+		state = applyEvent(state, queueEvent("hi"));
+		const page: AgentMessageJson[] = [
+			// The rollup already covers this historical assistant turn.
+			{ role: "assistant", content: [], usage: { input: 7, output: 7, totalTokens: 14, cost: { total: 1 } } },
+			// Same text as the queued prompt — a historical user message must
+			// not be mistaken for the queued prompt's real echo.
+			userMsg("hi"),
+		];
+		const next = prependHistory(state, page, 8);
+		expect(next.usage).toEqual(FULL_ROLLUP);
+		expect(next.queuedPrompts.map((q) => q.text)).toEqual(["hi"]);
+	});
+
+	test("an empty page still updates the cursor and clears the loading flag", () => {
+		const state = { ...initSession(snap({ messages: [userMsg("only")], messagesStartIndex: 9 })), historyLoading: true };
+		const next = prependHistory(state, [], 5);
+		expect(next.historyStartIndex).toBe(5);
+		expect(next.historyLoading).toBe(false);
+		expect(next.messages).toBe(state.messages);
+	});
+});
+
+describe("trimHistory", () => {
+	test("returns the same state when the window is already within target", () => {
+		const state = initSession(snap({ messages: [userMsg("a"), userMsg("b")] }));
+		expect(trimHistory(state, 2)).toBe(state);
+		expect(trimHistory(state, 5)).toBe(state);
+	});
+
+	test("returns the same state when no droppable message carries a known srcIndex", () => {
+		let state = initSession(snap());
+		for (const t of ["l0", "l1", "l2", "l3"]) {
+			state = applyEvent(state, userMessageStart(t));
+		}
+		// Live-appended messages have no history index yet — cutting here
+		// would leave historyStartIndex pointing at the wrong page.
+		expect(trimHistory(state, 2)).toBe(state);
+	});
+
+	test("cuts at the latest known srcIndex within the excess, skipping unindexed live messages", () => {
+		let state = initSession(snap());
+		for (const t of ["l0", "l1", "l2"]) {
+			state = applyEvent(state, userMessageStart(t));
+		}
+		state = prependHistory(state, [userMsg("h0"), userMsg("h1"), userMsg("h2")], 0);
+		expect(texts(state)).toEqual(["h0", "h1", "h2", "l0", "l1", "l2"]);
+
+		// excess = 3, but messages[3] (l0) has no srcIndex — the cut lands on
+		// h2 (srcIndex 2), the newest safe boundary at or before the excess.
+		const trimmed = trimHistory(state, 3);
+		expect(texts(trimmed)).toEqual(["h2", "l0", "l1", "l2"]);
+		expect(trimmed.historyStartIndex).toBe(2);
+	});
+
+	test("drops tool-call streams owned by dropped assistant messages and keeps the rest", () => {
+		const state = initSession(
+			snap({
+				messagesStartIndex: 0,
+				messages: [
+					{ role: "assistant", content: [{ type: "toolCall", id: "t1", name: "ls", arguments: {} }] },
+					toolResultMsg("t1", "one"),
+					userMsg("mid"),
+					{ role: "assistant", content: [{ type: "toolCall", id: "t2", name: "cat", arguments: {} }] },
+					toolResultMsg("t2", "two"),
+					userMsg("tail"),
+				],
+			}),
+		);
+		expect(Object.keys(state.toolCalls).sort()).toEqual(["t1", "t2"]);
+
+		// Window: [asst(0), user(2), asst(3), user(5)] — trim to 2 cuts at the
+		// second assistant (srcIndex 3), dropping the first turn and its tool.
+		const trimmed = trimHistory(state, 2);
+		expect(srcIndexes(trimmed)).toEqual([3, 5]);
+		expect(trimmed.historyStartIndex).toBe(3);
+		expect(Object.keys(trimmed.toolCalls)).toEqual(["t2"]);
 	});
 });

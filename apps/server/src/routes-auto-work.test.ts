@@ -14,9 +14,11 @@ import type { UsageReport } from "@oh-my-pi/pi-ai";
 import type {
 	AutoWorkConfig,
 	AutoWorkCostEstimateResponse,
+	AutoWorkGlobalConfig,
 	ListAutoWorkRunsResponse,
 	ModelInfo,
 	SetAutoWorkConfigRequest,
+	SetAutoWorkGlobalConfigRequest,
 } from "@omp-deck/protocol";
 
 import { closeDb, openDb } from "./db/index.ts";
@@ -27,6 +29,7 @@ import { buildAutoWorkRouter } from "./routes-auto-work.ts";
 import type { AgentBridge, EventListener, SessionHandle } from "./bridge/types.ts";
 import type { Config } from "./config.ts";
 import { resetSubscriptionUsageCacheForTests } from "./usage-subscription.ts";
+import { disposeScheduler } from "./auto-work/scheduler.ts";
 
 let dbDir: string;
 let dbPath: string;
@@ -71,6 +74,17 @@ function fullConfigBody(overrides: Partial<SetAutoWorkConfigRequest> = {}): SetA
 	};
 }
 
+function globalConfigBody(
+	overrides: Partial<SetAutoWorkGlobalConfigRequest> = {},
+): SetAutoWorkGlobalConfigRequest {
+	return {
+		scheduleEnabled: true,
+		scheduleIntervalMinutes: 15,
+		taskSelectionModel: { provider: "anthropic", id: "claude-good" },
+		...overrides,
+	};
+}
+
 beforeEach(() => {
 	dbDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-deck-routes-auto-work-db-"));
 	dbPath = path.join(dbDir, "deck.db");
@@ -78,12 +92,81 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+	disposeScheduler();
 	closeDb();
 	try {
 		fs.rmSync(dbDir, { recursive: true, force: true });
 	} catch {
 		// best-effort cleanup
 	}
+});
+
+describe("GET and PUT /auto-work/global-config", () => {
+	test("GET returns the computed global config when no row exists", async () => {
+		const app = buildAutoWorkRouter(fakeBridge([]), fakeConfig());
+
+		const res = await app.request("/auto-work/global-config");
+		expect(res.status).toBe(200);
+		const body = (await res.json()) as AutoWorkGlobalConfig;
+		expect(body).toMatchObject({
+			scheduleEnabled: false,
+			scheduleIntervalMinutes: 5,
+			taskSelectionModel: null,
+		});
+	});
+
+	test("PUT saves and returns a global schedule configuration", async () => {
+		const app = buildAutoWorkRouter(fakeBridge([AVAILABLE_MODEL]), fakeConfig());
+		const request = globalConfigBody();
+
+		const putRes = await app.request("/auto-work/global-config", {
+			method: "PUT",
+			body: JSON.stringify(request),
+		});
+		expect(putRes.status).toBe(200);
+		const saved = (await putRes.json()) as AutoWorkGlobalConfig;
+		expect(saved).toMatchObject(request);
+
+		const getRes = await app.request("/auto-work/global-config");
+		expect(getRes.status).toBe(200);
+		expect((await getRes.json()) as AutoWorkGlobalConfig).toMatchObject(request);
+	});
+
+	test("PUT rejects a non-positive schedule interval", async () => {
+		const app = buildAutoWorkRouter(fakeBridge([AVAILABLE_MODEL]), fakeConfig());
+
+		const res = await app.request("/auto-work/global-config", {
+			method: "PUT",
+			body: JSON.stringify(globalConfigBody({ scheduleIntervalMinutes: 0 })),
+		});
+
+		expect(res.status).toBe(400);
+		expect(await res.json()).toEqual({ error: "scheduleIntervalMinutes must be a positive integer" });
+	});
+
+	test("PUT rejects an unknown task-selection model", async () => {
+		const app = buildAutoWorkRouter(fakeBridge([AVAILABLE_MODEL]), fakeConfig());
+
+		const res = await app.request("/auto-work/global-config", {
+			method: "PUT",
+			body: JSON.stringify(globalConfigBody({ taskSelectionModel: { provider: "unknown", id: "missing" } })),
+		});
+
+		expect(res.status).toBe(400);
+		expect(await res.json()).toEqual({ error: "taskSelectionModel: unknown model: unknown/missing" });
+	});
+
+	test("PUT rejects a task-selection model without configured auth", async () => {
+		const app = buildAutoWorkRouter(fakeBridge([UNAUTHED_MODEL]), fakeConfig());
+
+		const res = await app.request("/auto-work/global-config", {
+			method: "PUT",
+			body: JSON.stringify(globalConfigBody({ taskSelectionModel: { provider: "anthropic", id: "claude-noauth" } })),
+		});
+
+		expect(res.status).toBe(400);
+		expect(await res.json()).toEqual({ error: "taskSelectionModel: no auth configured for anthropic/claude-noauth" });
+	});
 });
 
 describe("GET /auto-work/config", () => {
@@ -387,10 +470,8 @@ describe("GET /auto-work/cost-estimate", () => {
 });
 
 /**
- * `POST /auto-work/trigger` (T-64) — exercises the real route wired to the
- * real `runAutoWorkCycle` orchestrator, with a stub `AgentBridge` standing in
- * for a live agent session (no real session is ever spun up) and a real git
- * repo so `git worktree add` runs for real.
+ * `POST /auto-work/trigger` exercises the global orchestrator with a stub
+ * `AgentBridge` and a real git repository so worktree creation runs for real.
  */
 describe("POST /auto-work/trigger", () => {
 	class FakeSessionHandle {
@@ -399,26 +480,26 @@ describe("POST /auto-work/trigger", () => {
 
 		constructor(
 			sessionId: string,
-			private readonly terminalDelayMs: number | null,
+			private readonly emitsTerminal: boolean,
+			private readonly selectedTaskId?: string,
 		) {
 			this.sessionId = sessionId;
 		}
 
 		subscribe(listener: EventListener): () => void {
 			this.listeners.add(listener);
-			if (this.terminalDelayMs !== null) {
-				setTimeout(() => listener({ type: "turn_end" } as never), this.terminalDelayMs);
-			}
+			if (this.emitsTerminal) queueMicrotask(() => listener({ type: "turn_end" } as never));
 			return () => this.listeners.delete(listener);
+		}
+
+		snapshot() {
+			return { messages: [{ role: "assistant", content: this.selectedTaskId ?? "" }] };
 		}
 
 		async prompt(): Promise<void> {}
 	}
 
-	function triggerBridge(
-		handle: FakeSessionHandle,
-		opts: { liveSessions?: Map<string, FakeSessionHandle> } = {},
-	): AgentBridge {
+	function triggerBridge(handle: FakeSessionHandle): AgentBridge {
 		return {
 			async listModels() {
 				return [];
@@ -426,11 +507,14 @@ describe("POST /auto-work/trigger", () => {
 			async createSession() {
 				return handle as unknown as SessionHandle;
 			},
-			getSession(sessionId: string) {
-				return opts.liveSessions?.get(sessionId) as unknown as SessionHandle | undefined;
+			getSession() {
+				return undefined;
 			},
 			async listSessions() {
 				return [];
+			},
+			async deleteSession() {
+				return { deleted: true };
 			},
 			async resumeSession() {
 				throw new Error("no persisted session to resume in this fixture");
@@ -477,29 +561,15 @@ describe("POST /auto-work/trigger", () => {
 		fs.rmSync(homeDir, { recursive: true, force: true });
 	});
 
-
-	test("requires a cwd query param", async () => {
-		const app = buildAutoWorkRouter(triggerBridge(new FakeSessionHandle("s", 10)), fakeConfig());
-		expect((await app.request("/auto-work/trigger", { method: "POST" })).status).toBe(400);
-	});
-
-	test("rejects a cwd outside the allowed root", async () => {
-		const app = buildAutoWorkRouter(triggerBridge(new FakeSessionHandle("s", 10)), fakeConfig());
-		const res = await app.request(`/auto-work/trigger?cwd=${encodeURIComponent("/definitely/not/allowed")}`, {
-			method: "POST",
-		});
-		expect(res.status).toBe(400);
-	});
-
-	test("fires a cycle immediately, starting and completing a run for an eligible task", async () => {
+	test("runs enabled workspace work without requiring a cwd", async () => {
 		setAutoWorkConfig(repoCwd, { ...DEFAULT_AUTO_WORK_VALUES, enabled: true });
 		const task = createTask({ title: "Trigger me", cwd: repoCwd, priority: "P5", autoWork: true });
 
-		const app = buildAutoWorkRouter(triggerBridge(new FakeSessionHandle("sess_trigger", 10)), fakeConfig(), {
+		const app = buildAutoWorkRouter(triggerBridge(new FakeSessionHandle("sess_trigger", true, task.id)), fakeConfig(), {
 			createPullRequest: stubCreatePullRequest,
 			getSubscriptionUsage: async () => ({ available: true, weeklyPct: 5 }),
 		});
-		const res = await app.request(`/auto-work/trigger?cwd=${encodeURIComponent(repoCwd)}`, { method: "POST" });
+		const res = await app.request("/auto-work/trigger", { method: "POST" });
 		expect(res.status).toBe(200);
 		const body = (await res.json()) as { outcome: string; taskId?: string; runId?: string };
 		expect(body.outcome).toBe("completed");
@@ -509,34 +579,29 @@ describe("POST /auto-work/trigger", () => {
 		expect(listAutoWorkRuns({ taskId: task.id })[0]?.status).toBe("completed");
 	});
 
-	test("is safely callable a second time while a run is active — resumes instead of double-starting", async () => {
+	test("skips when every eligible workspace already has an active run", async () => {
 		setAutoWorkConfig(repoCwd, { ...DEFAULT_AUTO_WORK_VALUES, enabled: true });
 		const task = createTask({ title: "Already running", cwd: repoCwd, priority: "P5", autoWork: true });
-		const worktreePath = path.join(repoCwd, ".worktrees", "aw-in-flight");
-		fs.mkdirSync(worktreePath, { recursive: true });
 		const priorRunId = startAutoWorkRun({
 			taskId: task.id,
 			taskPriority: "P5",
 			sessionId: "in-flight",
-			worktreePath,
+			worktreePath: path.join(repoCwd, ".worktrees", "aw-in-flight"),
 		});
 
-		const liveHandle = new FakeSessionHandle("in-flight", 10);
-		const decoyHandle = new FakeSessionHandle("sess_2", 10);
-		const app = buildAutoWorkRouter(
-			triggerBridge(decoyHandle, { liveSessions: new Map([["in-flight", liveHandle]]) }),
-			fakeConfig(),
-			{ createPullRequest: stubCreatePullRequest, getSubscriptionUsage: async () => ({ available: true, weeklyPct: 5 }) },
-		);
-		const res = await app.request(`/auto-work/trigger?cwd=${encodeURIComponent(repoCwd)}`, { method: "POST" });
+		const app = buildAutoWorkRouter(triggerBridge(new FakeSessionHandle("sess_2", false)), fakeConfig(), {
+			createPullRequest: stubCreatePullRequest,
+			getSubscriptionUsage: async () => ({ available: true, weeklyPct: 5 }),
+		});
+		const res = await app.request("/auto-work/trigger", { method: "POST" });
 		expect(res.status).toBe(200);
-		const body = (await res.json()) as { outcome: string; taskId?: string; runId?: string; sessionId?: string };
-		expect(body.outcome).toBe("completed");
-		expect(body.taskId).toBe(task.id);
-		expect(body.runId).toBe(priorRunId);
-		expect(body.sessionId).toBe("in-flight");
+		expect((await res.json()) as { outcome: string; reason?: string }).toMatchObject({
+			outcome: "skipped",
+			reason: "another auto-work run is already active",
+		});
 
-		// The already-active run was resumed, not duplicated.
-		expect(listAutoWorkRuns({ taskId: task.id })).toHaveLength(1);
+		const runs = listAutoWorkRuns({ taskId: task.id });
+		expect(runs).toHaveLength(1);
+		expect(runs[0]).toMatchObject({ id: priorRunId, status: "running" });
 	});
 });

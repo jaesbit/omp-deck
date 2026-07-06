@@ -1,7 +1,14 @@
+import { memo } from "react";
 import type { UserMsg } from "@/lib/types";
 import { Markdown } from "@/lib/markdown";
 
-export function UserMessage({ msg }: { msg: UserMsg }) {
+/**
+ * Memoized: message objects are immutable in the store (the reducer only
+ * ever replaces the entry it changes), so identity equality is exact — and
+ * during streaming the chat list re-renders on every flush, which would
+ * otherwise re-run Markdown for every past message.
+ */
+export const UserMessage = memo(function UserMessage({ msg }: { msg: UserMsg }) {
 	return (
 		<div className="space-y-1.5">
 			<div className="meta">
@@ -23,4 +30,4 @@ export function UserMessage({ msg }: { msg: UserMsg }) {
 			{msg.text ? <Markdown>{msg.text}</Markdown> : null}
 		</div>
 	);
-}
+});

@@ -50,6 +50,10 @@ export interface UserMsg {
 	images?: ImageBlock[];
 	timestamp?: number;
 	synthetic?: boolean;
+	/** Index of this message in the server-side history, when known (messages
+	 * hydrated from a snapshot or a history page — not live-streamed ones).
+	 * Used as the paging/trim cursor. */
+	srcIndex?: number;
 }
 
 export interface AssistantMsg {
@@ -65,6 +69,8 @@ export interface AssistantMsg {
 	timestamp?: number;
 	durationMs?: number;
 	ttft?: number;
+	/** See {@link UserMsg.srcIndex}. */
+	srcIndex?: number;
 }
 
 export interface ToolResultMsg {
@@ -192,6 +198,14 @@ export interface SessionUi {
 	thinkingLevel?: string;
 
 	messages: ChatMessage[];
+	/**
+	 * Server-side history index of `messages[0]`'s underlying entry — the
+	 * `before` cursor for paging older messages. `0` means the full history
+	 * is loaded. Grows again when the tail window is trimmed.
+	 */
+	historyStartIndex?: number;
+	/** True while a history page fetch is in flight. */
+	historyLoading?: boolean;
 	/** Tool calls keyed by toolCallId for richer per-call rendering. */
 	toolCalls: Record<string, ToolCallStream>;
 	todoPhases: TodoPhase[];

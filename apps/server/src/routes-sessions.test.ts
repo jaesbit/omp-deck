@@ -17,7 +17,7 @@ import * as path from "node:path";
 import type { Config } from "./config.ts";
 import { closeDb, openDb } from "./db/index.ts";
 import { buildRouter } from "./routes.ts";
-import type { AgentBridge, CreateSessionOpts } from "./bridge/types.ts";
+import type { AgentBridge, CreateSessionOpts, SessionHandle } from "./bridge/types.ts";
 import { broadcastBus, type BroadcastFrame } from "./broadcast-bus.ts";
 import type { ModelInfo } from "@omp-deck/protocol";
 
@@ -310,5 +310,80 @@ describe("DELETE /sessions/:id — T-47", () => {
 		} finally {
 			unsub();
 		}
+	});
+});
+
+describe("GET /sessions/:id/history", () => {
+	/**
+	 * Bridge whose single live session records the (before, limit) pairs the
+	 * route forwards, following the T-47 spread-and-override pattern. The
+	 * handle fake is partial — the route only ever touches `getHistory`.
+	 */
+	function historyBridge(): { bridge: AgentBridge; calls: Array<{ before: number; limit: number }> } {
+		const calls: Array<{ before: number; limit: number }> = [];
+		const handle = {
+			getHistory(before: number, limit: number) {
+				calls.push({ before, limit });
+				return { messages: [{ role: "user", content: "m0" }], startIndex: 7 };
+			},
+		} as unknown as SessionHandle;
+		const bridge: AgentBridge = {
+			...fakeBridge([]),
+			getSession: (id: string) => (id === "sess-live" ? handle : undefined),
+		};
+		return { bridge, calls };
+	}
+
+	test("404s when the session is not active", async () => {
+		const { bridge } = historyBridge();
+		const app = buildTestApp(bridge, process.cwd());
+		const res = await app.request("/sessions/does-not-exist/history?before=5");
+		expect(res.status).toBe(404);
+	});
+
+	test("400s on a missing, negative, or non-numeric before index without touching the handle", async () => {
+		const { bridge, calls } = historyBridge();
+		const app = buildTestApp(bridge, process.cwd());
+		for (const query of ["", "?before=-1", "?before=abc"]) {
+			const res = await app.request(`/sessions/sess-live/history${query}`);
+			expect(res.status).toBe(400);
+		}
+		expect(calls).toEqual([]);
+	});
+
+	test("forwards before/limit to the live handle and returns its page as JSON", async () => {
+		const { bridge, calls } = historyBridge();
+		const app = buildTestApp(bridge, process.cwd());
+		const res = await app.request("/sessions/sess-live/history?before=42&limit=3");
+		expect(res.status).toBe(200);
+		expect(await res.json()).toEqual({ messages: [{ role: "user", content: "m0" }], startIndex: 7 });
+		expect(calls).toEqual([{ before: 42, limit: 3 }]);
+	});
+
+	test("before=0 is a valid cursor (empty page request, not an error)", async () => {
+		const { bridge, calls } = historyBridge();
+		const app = buildTestApp(bridge, process.cwd());
+		const res = await app.request("/sessions/sess-live/history?before=0");
+		expect(res.status).toBe(200);
+		expect(calls).toHaveLength(1);
+		expect(calls[0]?.before).toBe(0);
+	});
+
+	test("clamps limit into [1, 500] and never forwards a non-finite one", async () => {
+		const { bridge, calls } = historyBridge();
+		const app = buildTestApp(bridge, process.cwd());
+
+		await app.request("/sessions/sess-live/history?before=10&limit=9999");
+		await app.request("/sessions/sess-live/history?before=10&limit=0");
+		await app.request("/sessions/sess-live/history?before=10&limit=-3");
+		expect(calls.map((c) => c.limit)).toEqual([500, 1, 1]);
+
+		// Omitted limit: the default is a tunable, so pin only the contract —
+		// a finite value already inside the clamp range reaches the handle.
+		await app.request("/sessions/sess-live/history?before=10");
+		const forwarded = calls[3]?.limit ?? Number.NaN;
+		expect(Number.isFinite(forwarded)).toBe(true);
+		expect(forwarded).toBeGreaterThanOrEqual(1);
+		expect(forwarded).toBeLessThanOrEqual(500);
 	});
 });

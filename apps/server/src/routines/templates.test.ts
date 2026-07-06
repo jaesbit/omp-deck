@@ -12,6 +12,10 @@
  */
 
 import { describe, expect, test } from "bun:test";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { validateRoutineSpec } from "@omp-deck/protocol";
 
@@ -41,4 +45,41 @@ describe("routine templates", () => {
 			}
 		});
 	}
+
+	test("loads a template from the compiled layout when the source layout is absent", async () => {
+		const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), "omp-deck-compiled-templates-"));
+		try {
+			const compiledEntryDir = path.join(fixtureRoot, "dist");
+			const build = await Bun.build({
+				entrypoints: [fileURLToPath(new URL("./templates.ts", import.meta.url))],
+				outdir: compiledEntryDir,
+				target: "bun",
+			});
+			if (!build.success) throw new Error(`Could not compile the template loader:\n${build.logs.join("\n")}`);
+
+			fs.mkdirSync(path.join(compiledEntryDir, "templates"), { recursive: true });
+			fs.writeFileSync(
+				path.join(compiledEntryDir, "templates", "compiled-layout.yaml"),
+				"name: compiled-layout\ndescription: Available only beside the compiled entry\nsteps:\n  - id: emit\n    type: run\n    command: echo compiled\n",
+			);
+
+			// The loader must be imported from its generated, runtime-selected path.
+			const compiledLoader = await import(pathToFileURL(path.join(compiledEntryDir, "templates.js")).href);
+			expect(compiledLoader.listTemplates()).toEqual([
+				{
+					slug: "compiled-layout",
+					name: "compiled-layout",
+					description: "Available only beside the compiled entry",
+					steps: 1,
+					triggers: 0,
+				},
+			]);
+			expect(compiledLoader.loadTemplate("compiled-layout")).toMatchObject({
+				spec: { name: "compiled-layout" },
+				specYaml: expect.stringContaining("command: echo compiled"),
+			});
+		} finally {
+			fs.rmSync(fixtureRoot, { recursive: true, force: true });
+		}
+	});
 });

@@ -8,6 +8,7 @@ import type {
 	ListWorkspacesResponse,
 	ModelRef,
 	RestartServerResponse,
+	SessionHistoryResponse,
 	SetWorkspacePreferenceRequest,
 	WorkspaceEntry,
 } from "@omp-deck/protocol";
@@ -157,6 +158,28 @@ export function buildRouter(
 			log.error(`listSessions failed`, err);
 			return c.json({ error: String(err) }, 500);
 		}
+	});
+
+	/**
+	 * One page of message history older than `before` (a history index,
+	 * exclusive). Complements the tail-sliced subscribe snapshot: the web
+	 * client calls this as the user scrolls toward the top, walking `before`
+	 * backwards until `startIndex` reaches 0. Only answerable for active
+	 * sessions — the client is by construction subscribed (and thus the
+	 * session active) whenever it pages.
+	 */
+	app.get("/sessions/:id/history", (c) => {
+		const id = c.req.param("id");
+		const handle = bridge.getSession(id);
+		if (!handle) return c.json({ error: "session not active" }, 404);
+		const before = Number(c.req.query("before"));
+		if (!Number.isFinite(before) || before < 0) {
+			return c.json({ error: "invalid 'before' index" }, 400);
+		}
+		const limitRaw = Number(c.req.query("limit"));
+		const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(limitRaw, 1), 500) : 100;
+		const body: SessionHistoryResponse = handle.getHistory(before, limit);
+		return c.json(body);
 	});
 
 	app.post("/sessions", async (c) => {
