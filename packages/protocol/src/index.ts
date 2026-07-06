@@ -722,6 +722,67 @@ export interface ContextUsage {
 	percent: number | null;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Usage API (T-59): Anthropic subscription usage + per-session token usage.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * One reported usage window (e.g. "5 Hour", "7 Day").
+ * Returned as part of `SubscriptionUsageAvailable.limits`.
+ */
+export interface SubscriptionUsageLimit {
+	/** Human-readable label from the provider (e.g. "5 Hour", "7 Day"). */
+	label: string;
+	/** Percentage consumed in this window (0–100). */
+	pctUsed: number;
+	/** ISO-8601 timestamp when this window resets. */
+	resetAt: string;
+	/** Window duration in milliseconds, when the provider reports it. */
+	windowDurationMs?: number;
+}
+
+/**
+ * `GET /api/usage/subscription` success shape.
+ * All reported usage windows are in `limits`, sorted shortest-first.
+ * `pctUsed` / `resetAt` are a convenience alias for the most-constraining
+ * limit (highest pctUsed) — useful for simple budget checks.
+ */
+export interface SubscriptionUsageAvailable {
+	available: true;
+	/** All usage windows reported by the provider, shortest window first. */
+	limits: SubscriptionUsageLimit[];
+	/** pctUsed of the most-constraining limit (highest across all windows). */
+	pctUsed: number;
+	/** resetAt of the most-constraining limit. */
+	resetAt: string;
+}
+
+/** `GET /api/usage/subscription` graceful-degradation shape — never a 500. */
+export interface SubscriptionUsageUnavailable {
+	available: false;
+	reason: string;
+}
+
+export type SubscriptionUsageResponse = SubscriptionUsageAvailable | SubscriptionUsageUnavailable;
+
+/** One entry of `GET /api/usage/sessions` — token/cost totals for a single persisted session. */
+export interface SessionUsageSummary {
+	id: string;
+	path: string;
+	cwd: string;
+	title?: string;
+	updatedAt: string;
+	/** Sum of `usage.totalTokens` across every assistant message in the transcript. */
+	totalTokens: number;
+	/** Sum of `usage.cost.total` (USD) across every assistant message, when the transcript recorded cost. */
+	costUsd: number;
+	messageCount: number;
+}
+
+export interface ListSessionUsageResponse {
+	sessions: SessionUsageSummary[];
+}
+
 /**
  * Live plan-mode state for a session. Mirrors the SDK's `PlanModeState` shape
  * minus internal flags the deck UI never consumes (workflow / reentry).
