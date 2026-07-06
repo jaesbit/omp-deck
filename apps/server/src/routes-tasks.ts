@@ -75,6 +75,9 @@ export function buildTasksRouter(): Hono {
 		if (body.dependsOn !== undefined && !isStringArray(body.dependsOn)) {
 			return c.json({ error: "dependsOn must be string[]" }, 400);
 		}
+		if (body.autoWork !== undefined && typeof body.autoWork !== "boolean") {
+			return c.json({ error: "autoWork must be boolean" }, 400);
+		}
 		try {
 			const task = createTask(body);
 			notifyTasksChanged();
@@ -103,6 +106,9 @@ export function buildTasksRouter(): Hono {
 		}
 		if (body.dependsOn !== undefined && !isStringArray(body.dependsOn)) {
 			return c.json({ error: "dependsOn must be string[]" }, 400);
+		}
+		if (body.autoWork !== undefined && typeof body.autoWork !== "boolean") {
+			return c.json({ error: "autoWork must be boolean" }, 400);
 		}
 		try {
 			const updated = updateTask(c.req.param("id"), body);

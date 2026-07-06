@@ -24,6 +24,7 @@ interface TaskRow {
 	updated_at: string;
 	state_entered_at: string;
 	archived_at: string | null;
+	auto_work: number;
 }
 
 interface StateRow {
@@ -47,6 +48,7 @@ function rowToTask(r: TaskRow, dependsOn: string[]): Task {
 		updatedAt: r.updated_at,
 		stateEnteredAt: r.state_entered_at,
 		dependsOn,
+		autoWork: r.auto_work === 1,
 	};
 	if (r.cwd !== null) t.cwd = r.cwd;
 	if (r.archived_at !== null) t.archivedAt = r.archived_at;
@@ -283,7 +285,7 @@ export function listTasks(opts: { includeArchived?: boolean } = {}): Task[] {
 	const where = opts.includeArchived ? "" : "WHERE archived_at IS NULL";
 	const rows = getDb()
 		.query<TaskRow, []>(
-			`SELECT id, display_id, title, body, state_id, order_in_state, priority, cwd, created_at, updated_at, state_entered_at, archived_at
+			`SELECT id, display_id, title, body, state_id, order_in_state, priority, cwd, created_at, updated_at, state_entered_at, archived_at, auto_work
 			 FROM tasks
 			 ${where}
 			 ORDER BY state_id, state_entered_at DESC, order_in_state ASC`,
@@ -296,7 +298,7 @@ export function listTasks(opts: { includeArchived?: boolean } = {}): Task[] {
 export function getTask(taskId: string): Task | undefined {
 	const row = getDb()
 		.query<TaskRow, [string]>(
-			`SELECT id, display_id, title, body, state_id, order_in_state, priority, cwd, created_at, updated_at, state_entered_at, archived_at
+			`SELECT id, display_id, title, body, state_id, order_in_state, priority, cwd, created_at, updated_at, state_entered_at, archived_at, auto_work
 			 FROM tasks WHERE id = ?`,
 		)
 		.get(taskId) as TaskRow | null;
@@ -310,6 +312,7 @@ export function createTask(input: {
 	cwd?: string;
 	priority?: TaskPriority;
 	dependsOn?: string[];
+	autoWork?: boolean;
 }): Task {
 	const db = getDb();
 	const state = input.stateId ? getState(input.stateId) : getDefaultState();
@@ -333,10 +336,10 @@ export function createTask(input: {
 			.get() as { value: number } | null;
 		if (!seqRow) throw new Error("tasks sequence missing — migration 002 not applied");
 		displayId = seqRow.value;
-		db.prepare<unknown, [string, number, string, string, string, number, string, string | null, string, string, string]>(
-			`INSERT INTO tasks (id, display_id, title, body, state_id, order_in_state, priority, cwd, created_at, updated_at, state_entered_at)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		).run(taskId, displayId, input.title, input.body ?? "", state.id, maxOrder + 1000, input.priority ?? "P5", input.cwd ?? null, now, now, now);
+		db.prepare<unknown, [string, number, string, string, string, number, string, string | null, string, string, string, number]>(
+			`INSERT INTO tasks (id, display_id, title, body, state_id, order_in_state, priority, cwd, created_at, updated_at, state_entered_at, auto_work)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		).run(taskId, displayId, input.title, input.body ?? "", state.id, maxOrder + 1000, input.priority ?? "P5", input.cwd ?? null, now, now, now, input.autoWork ? 1 : 0);
 		if (dependsOn.length > 0) {
 			const insertDep = db.prepare<unknown, [string, string, string]>(
 				"INSERT INTO task_dependencies (task_id, depends_on_task_id, created_at) VALUES (?, ?, ?)",
@@ -360,6 +363,7 @@ export function updateTask(
 		archived?: boolean;
 		priority?: TaskPriority;
 		dependsOn?: string[];
+		autoWork?: boolean;
 	},
 ): Task | undefined {
 	const existing = getTask(taskId);
@@ -382,11 +386,11 @@ export function updateTask(
 	}
 	db.prepare<
 		unknown,
-		[string, string, string, number, string, string | null, string, string, string | null, string]
+		[string, string, string, number, string, string | null, string, string, string | null, number, string]
 	>(
 		`UPDATE tasks
 		   SET title = ?, body = ?, state_id = ?, order_in_state = ?, priority = ?, cwd = ?,
-		       updated_at = ?, state_entered_at = ?, archived_at = ?
+		       updated_at = ?, state_entered_at = ?, archived_at = ?, auto_work = ?
 		 WHERE id = ?`,
 	).run(
 		next.title,
@@ -398,6 +402,7 @@ export function updateTask(
 		nowIso(),
 		stateEnteredAt,
 		archivedAt,
+		next.autoWork ? 1 : 0,
 		taskId,
 	);
 	if (nextDependsOn !== undefined) applyDependencies(db, taskId, nextDependsOn);
@@ -485,7 +490,7 @@ export function findTaskByDisplayOrId(ref: string): Task | undefined {
 		if (!Number.isFinite(num)) return undefined;
 		const row = getDb()
 			.query<TaskRow, [number]>(
-				`SELECT id, display_id, title, body, state_id, order_in_state, priority, cwd, created_at, updated_at, state_entered_at, archived_at
+				`SELECT id, display_id, title, body, state_id, order_in_state, priority, cwd, created_at, updated_at, state_entered_at, archived_at, auto_work
 				 FROM tasks WHERE display_id = ?`,
 			)
 			.get(num) as TaskRow | null;

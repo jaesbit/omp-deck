@@ -1209,6 +1209,13 @@ export interface Task {
 	 * while any entry here refers to a task not in a `done`-flavored state.
 	 */
 	dependsOn: string[];
+	/**
+	 * Opt-in flag for the auto-work engine (T-58). Always present, defaults
+	 * to `false` on create — a task is never picked up by auto-work unless
+	 * the user explicitly marks it eligible. Auto-work (T-64) is the only
+	 * consumer; this field carries no scheduling logic on its own.
+	 */
+	autoWork: boolean;
 }
 
 export interface CreateTaskRequest {
@@ -1218,6 +1225,8 @@ export interface CreateTaskRequest {
 	cwd?: string;
 	priority?: TaskPriority;
 	dependsOn?: string[];
+	/** Defaults to `false` server-side when omitted (T-58). */
+	autoWork?: boolean;
 }
 
 export interface UpdateTaskRequest {
@@ -1230,6 +1239,7 @@ export interface UpdateTaskRequest {
 	priority?: TaskPriority;
 	/** Replaces the full dependency set when present (T-57). */
 	dependsOn?: string[];
+	autoWork?: boolean;
 }
 
 export interface ListTasksResponse {

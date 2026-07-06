@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Archive, Bot, CheckCircle2, Circle, Link2, MessageSquarePlus, RotateCcw, Trash2, X } from "lucide-react";
+import { Archive, Bot, CheckCircle2, Circle, Link2, MessageSquarePlus, RotateCcw, Trash2, X, Zap } from "lucide-react";
 import type { Task, TaskPriority, TaskState } from "@omp-deck/protocol";
 
 import { MarkdownEdit } from "@/components/MarkdownEdit";
@@ -22,6 +22,7 @@ interface Props {
 		cwd?: string;
 		priority?: TaskPriority;
 		dependsOn?: string[];
+		autoWork?: boolean;
 	}) => void;
 	onDelete: () => void;
 	onArchive: () => void;
@@ -206,6 +207,19 @@ export function TaskModal({
 							placeholder="(defaults to server cwd)"
 							className="w-full bg-transparent font-mono text-2xs text-ink placeholder:text-ink-4 focus:outline-none"
 						/>
+					</span>
+					<span className="text-ink-4">auto work</span>
+					<span className="col-span-3">
+						<label className="inline-flex cursor-pointer items-center gap-1.5 text-ink-2">
+							<input
+								type="checkbox"
+								checked={task.autoWork}
+								onChange={(e) => onSave({ autoWork: e.target.checked })}
+								className="h-3.5 w-3.5 rounded-sm border-line accent-accent"
+							/>
+							<Zap className="h-3.5 w-3.5 shrink-0 text-accent" />
+							<span>Eligible for Auto Work</span>
+						</label>
 					</span>
 					{isArchived ? (
 						<>
