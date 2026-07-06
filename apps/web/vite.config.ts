@@ -6,10 +6,12 @@ import path from "node:path";
 const SERVER_PORT = process.env.OMP_DECK_PORT ?? "8787";
 const SERVER_HOST = process.env.OMP_DECK_HOST ?? "127.0.0.1";
 const WEB_PORT = Number(process.env.OMP_DECK_WEB_PORT ?? "5173");
+// Set OMP_DECK_NO_MINIFY=1 (or run `bun run build:debug`) to produce an
+// unminified build for debugging React/runtime errors.
+const NO_MINIFY = !!process.env.OMP_DECK_NO_MINIFY;
 
 const SERVER_HTTP = `http://${SERVER_HOST}:${SERVER_PORT}`;
 const SERVER_WS = `ws://${SERVER_HOST}:${SERVER_PORT}`;
-
 export default defineConfig({
 	plugins: [react(), tailwindcss()],
 	// Expose `OMP_DECK_*` env vars (in addition to Vite's default `VITE_*`) so
@@ -33,5 +35,6 @@ export default defineConfig({
 	build: {
 		outDir: "dist",
 		sourcemap: true,
+		...(NO_MINIFY && { minify: false }),
 	},
 });

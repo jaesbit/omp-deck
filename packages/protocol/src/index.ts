@@ -1081,8 +1081,10 @@ export type ServerFrame =
 			kind: "select" | "editor" | "confirm" | "input";
 			/** Title / prompt line shown above the controls. */
 			prompt: string;
-			/** select: option labels in display order. */
-			options?: string[];
+			/** select: option labels in display order. Each item is either a plain
+			 *  string label or an object with a `label` and optional `description`
+			 *  (mirrors `ExtensionUISelectOption` from the SDK). */
+			options?: Array<string | { label: string; description?: string }>;
 			/** select: hint that the dialog allows multiple selections. */
 			multi?: boolean;
 			/** select: index of the option pre-focused on open. */

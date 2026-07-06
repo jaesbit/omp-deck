@@ -115,12 +115,17 @@ interface SelectBodyProps {
  * "Other (type your own)" input. Mirrors the TUI's `ask` UX so users coming
  * from `omp` see the same options.
  */
+
 function SelectBody({ dialog, onSubmit, onCancel }: SelectBodyProps): JSX.Element {
 	const options = dialog.options ?? [];
 	const initial = useMemo(() => {
-		if (typeof dialog.initialIndex === "number") return options[dialog.initialIndex];
-		if (typeof dialog.recommended === "number") return options[dialog.recommended];
-		return options[0];
+		const raw =
+			typeof dialog.initialIndex === "number"
+				? options[dialog.initialIndex]
+				: typeof dialog.recommended === "number"
+					? options[dialog.recommended]
+					: options[0];
+		return raw !== undefined ? (typeof raw === "string" ? raw : raw.label) : undefined;
 	}, [dialog.initialIndex, dialog.recommended, options]);
 
 	const [selection, setSelection] = useState<string | undefined>(initial);
@@ -154,22 +159,30 @@ function SelectBody({ dialog, onSubmit, onCancel }: SelectBodyProps): JSX.Elemen
 		>
 			<div className="flex flex-col gap-1.5">
 				{options.map((opt, idx) => {
+					const label = typeof opt === "string" ? opt : opt.label;
+					const desc = typeof opt === "string" ? undefined : opt.description;
 					const isRecommended = idx === dialog.recommended;
 					return (
 						<label
-							key={opt}
-							className="flex cursor-pointer items-center gap-2 rounded border border-line/60 px-2.5 py-1.5 text-sm text-ink hover:border-line"
+							key={label}
+							className="flex cursor-pointer items-start gap-2 rounded border border-line/60 px-2.5 py-1.5 text-sm text-ink hover:border-line"
 						>
 							<input
 								type="radio"
 								name="ext-ui-select"
-								value={opt}
-								checked={selection === opt}
-								onChange={() => setSelection(opt)}
+								value={label}
+								checked={selection === label}
+								onChange={() => setSelection(label)}
+								className="mt-0.5 shrink-0"
 							/>
-							<span className="flex-1">{opt}</span>
+							<span className="flex min-w-0 flex-1 flex-col gap-0.5">
+								<span>{label}</span>
+								{desc ? (
+									<span className="text-xs text-ink-3">{desc}</span>
+								) : null}
+							</span>
 							{isRecommended ? (
-								<span className="font-mono text-2xs uppercase tracking-meta text-accent">
+								<span className="mt-0.5 font-mono text-2xs uppercase tracking-meta text-accent">
 									Recommended
 								</span>
 							) : null}

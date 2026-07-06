@@ -23,6 +23,7 @@ import type {
 	ExtensionUIContext,
 	ExtensionUIDialogOptions,
 	ExtensionUiComponentFactory,
+	ExtensionUISelectItem,
 	ExtensionWidgetContent,
 	ExtensionWidgetOptions,
 	TerminalInputHandler,
@@ -113,7 +114,7 @@ export class ExtensionUIBridge implements ExtensionUIContext {
 
 	select(
 		prompt: string,
-		options: string[],
+		options: ExtensionUISelectItem[],
 		dialogOptions?: ExtensionUIDialogOptions,
 	): Promise<string | undefined> {
 		const fields: Pick<DialogOpenFrame, "options"> = { options };
