@@ -53,6 +53,8 @@ function fullConfigBody(overrides: Partial<SetAutoWorkConfigRequest> = {}): SetA
 		timeWindows: [{ start: 9, end: 17 }],
 		sessionPctLimit: 25,
 		weeklyPctLimit: 60,
+		defaultEstimatePctByPriority: { P0: 20, P1: 15, P2: 10, P3: 8, P4: 5, P5: 3 },
+		estimationBuffer: 1.3,
 		...overrides,
 	};
 }

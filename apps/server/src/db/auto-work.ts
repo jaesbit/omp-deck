@@ -17,13 +17,28 @@ import { getDb, nowIso } from "./index.ts";
 
 const TASK_PRIORITIES: TaskPriority[] = ["P0", "P1", "P2", "P3", "P4", "P5"];
 
-/** Disabled, no model overrides, full-day window, unrestricted spend. */
+/** Default per-priority cost estimate (% of a session budget), used when no run history exists yet (T-63). */
+export const DEFAULT_ESTIMATE_PCT_BY_PRIORITY: Record<TaskPriority, number> = {
+	P0: 20,
+	P1: 15,
+	P2: 10,
+	P3: 8,
+	P4: 5,
+	P5: 3,
+};
+
+/** Default safety-buffer multiplier applied to every cost estimate (T-63) — 30% headroom. */
+export const DEFAULT_ESTIMATION_BUFFER = 1.3;
+
+/** Disabled, no model overrides, full-day window, unrestricted spend, default cost estimates. */
 export const DEFAULT_AUTO_WORK_VALUES: Omit<AutoWorkConfig, "workspaceCwd" | "updatedAt"> = {
 	enabled: false,
 	modelByPriority: Object.fromEntries(TASK_PRIORITIES.map((p) => [p, null])) as AutoWorkModelByPriority,
 	timeWindows: [{ start: 0, end: 24 }],
 	sessionPctLimit: 100,
 	weeklyPctLimit: 100,
+	defaultEstimatePctByPriority: DEFAULT_ESTIMATE_PCT_BY_PRIORITY,
+	estimationBuffer: DEFAULT_ESTIMATION_BUFFER,
 };
 
 interface Row {
@@ -33,6 +48,8 @@ interface Row {
 	time_windows: string; // JSON: AutoWorkTimeWindow[]
 	session_pct_limit: number;
 	weekly_pct_limit: number;
+	default_estimate_pct_by_priority: string;
+	estimation_buffer: number;
 	updated_at: string;
 }
 
@@ -67,6 +84,15 @@ function rowToConfig(r: Row): AutoWorkConfig {
 	} catch {
 		modelByPriority = DEFAULT_AUTO_WORK_VALUES.modelByPriority;
 	}
+	let defaultEstimatePctByPriority: Record<TaskPriority, number>;
+	try {
+		const parsed = JSON.parse(r.default_estimate_pct_by_priority) as Partial<Record<TaskPriority, number>>;
+		defaultEstimatePctByPriority = Object.fromEntries(
+			TASK_PRIORITIES.map((p) => [p, parsed[p] ?? DEFAULT_ESTIMATE_PCT_BY_PRIORITY[p]]),
+		) as Record<TaskPriority, number>;
+	} catch {
+		defaultEstimatePctByPriority = DEFAULT_ESTIMATE_PCT_BY_PRIORITY;
+	}
 	return {
 		workspaceCwd: r.workspace_cwd,
 		enabled: r.enabled !== 0,
@@ -74,6 +100,8 @@ function rowToConfig(r: Row): AutoWorkConfig {
 		timeWindows: parseTimeWindows(r.time_windows),
 		sessionPctLimit: r.session_pct_limit,
 		weeklyPctLimit: r.weekly_pct_limit,
+		defaultEstimatePctByPriority,
+		estimationBuffer: r.estimation_buffer,
 		updatedAt: r.updated_at,
 	};
 }
@@ -83,7 +111,8 @@ export function getAutoWorkConfig(cwd: string): AutoWorkConfig {
 	const row = getDb()
 		.query<Row, [string]>(
 			`SELECT workspace_cwd, enabled, model_by_priority, time_windows,
-			        session_pct_limit, weekly_pct_limit, updated_at
+			        session_pct_limit, weekly_pct_limit, default_estimate_pct_by_priority,
+			        estimation_buffer, updated_at
 			 FROM auto_work_config WHERE workspace_cwd = ?`,
 		)
 		.get(cwd) as Row | null;
@@ -98,17 +127,20 @@ export function setAutoWorkConfig(
 ): AutoWorkConfig {
 	const db = getDb();
 	const now = nowIso();
-	db.prepare<unknown, [string, number, string, string, number, number, string]>(
+	db.prepare<unknown, [string, number, string, string, number, number, string, number, string]>(
 		`INSERT INTO auto_work_config
 		   (workspace_cwd, enabled, model_by_priority, time_windows,
-		    session_pct_limit, weekly_pct_limit, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)
+		    session_pct_limit, weekly_pct_limit, default_estimate_pct_by_priority,
+		    estimation_buffer, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(workspace_cwd) DO UPDATE SET
 		   enabled = excluded.enabled,
 		   model_by_priority = excluded.model_by_priority,
 		   time_windows = excluded.time_windows,
 		   session_pct_limit = excluded.session_pct_limit,
 		   weekly_pct_limit = excluded.weekly_pct_limit,
+		   default_estimate_pct_by_priority = excluded.default_estimate_pct_by_priority,
+		   estimation_buffer = excluded.estimation_buffer,
 		   updated_at = excluded.updated_at`,
 	).run(
 		cwd,
@@ -117,6 +149,8 @@ export function setAutoWorkConfig(
 		JSON.stringify(values.timeWindows),
 		values.sessionPctLimit,
 		values.weeklyPctLimit,
+		JSON.stringify(values.defaultEstimatePctByPriority),
+		values.estimationBuffer,
 		now,
 	);
 	return getAutoWorkConfig(cwd);
