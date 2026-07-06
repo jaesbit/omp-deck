@@ -53,6 +53,7 @@ import { notify as sendAutoWorkNotification } from "./notify.ts";
 import type { AutoWorkNotificationEvent } from "./notify.ts";
 import { getSubscriptionUsage } from "../usage-subscription.ts";
 import { estimateTaskCostPct } from "./estimate.ts";
+import { broadcastBus } from "../broadcast-bus.ts";
 
 const log = logger("auto-work:engine");
 
@@ -372,6 +373,7 @@ export async function runAutoWorkCycle(
 		worktreePath,
 	});
 	log.info(`run ${runId} started for T-${task.displayId}, session ${session.sessionId}, worktree ${worktreePath}`);
+	broadcastBus.broadcast({ type: "auto_work_runs_changed" });
 	await notify({
 		kind: "task_started",
 		displayId: task.displayId,
@@ -428,6 +430,7 @@ async function finalizeAutoWorkRun(params: {
 	if (terminal === "timed_out") {
 		const failureReason = `exceeded ${timeoutMinutes}min timeout for priority ${task.priority}`;
 		completeAutoWorkRun(runId, { status: "timed_out", failureReason });
+		broadcastBus.broadcast({ type: "auto_work_runs_changed" });
 		const blockedState = findStateByName("blocked");
 		if (blockedState) moveTask(task.id, blockedState.id, 0);
 		updateTask(task.id, {
@@ -466,6 +469,7 @@ async function finalizeAutoWorkRun(params: {
 	else log.error(`run ${runId}: "validate" task state not found — T-${task.displayId} left in its current state`);
 
 	completeAutoWorkRun(runId, { status: "completed" });
+	broadcastBus.broadcast({ type: "auto_work_runs_changed" });
 	log.info(`run ${runId} completed for T-${task.displayId} — moved to validate`);
 	// Only announces completion once a PR actually exists — a fallback
 	// "open manually" note (PR creation failure, above) isn't a state the
@@ -569,6 +573,7 @@ async function resumeOrRetireAutoWorkRun(
 			`run ${run.id} (session ${run.sessionId}) has no live or persisted session to resume — marking failed and returning the task to backlog`,
 		);
 		completeAutoWorkRun(run.id, { status: "failed", failureReason: "session_lost" });
+		broadcastBus.broadcast({ type: "auto_work_runs_changed" });
 		const backlogState = findStateByName("backlog");
 		if (backlogState) moveTask(run.taskId, backlogState.id, 0);
 		await removeAutoWorkWorktree(cwd, run.worktreePath);
@@ -579,6 +584,7 @@ async function resumeOrRetireAutoWorkRun(
 	if (!task) {
 		log.warn(`run ${run.id}: task ${run.taskId} no longer exists — closing the run as failed`);
 		completeAutoWorkRun(run.id, { status: "failed", failureReason: "session_lost" });
+		broadcastBus.broadcast({ type: "auto_work_runs_changed" });
 		await removeAutoWorkWorktree(cwd, run.worktreePath);
 		return undefined;
 	}

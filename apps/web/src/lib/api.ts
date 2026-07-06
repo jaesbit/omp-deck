@@ -1,18 +1,23 @@
 import type {
 	AutoWorkConfig,
+	AutoWorkCycleResult,
+	AutoWorkRunStatus,
 	CreateSessionRequest,
 	CreateSessionResponse,
 	DeckBaseUrlResponse,
+	ListAutoWorkRunsResponse,
 	ListDirResponse,
 	ListFilePathsResponse,
 	ListModelsResponse,
 	ListSessionsResponse,
 	ListSlashCommandsResponse,
+	ListTasksResponse,
 	ListWorkspacePreferencesResponse,
 	ListWorkspacesResponse,
 	ModelRef,
 	SetAutoWorkConfigRequest,
 	SetDeckBaseUrlRequest,
+	TaskPriority,
 	WorkspacePreference,
 } from "@omp-deck/protocol";
 
@@ -122,5 +127,27 @@ export const api = {
 			method: "PUT",
 			body: JSON.stringify({ deckBaseUrl } satisfies SetDeckBaseUrlRequest),
 		});
+	},
+	listAutoWorkRuns(filter: {
+		limit?: number;
+		taskId?: string;
+		priority?: TaskPriority;
+		status?: AutoWorkRunStatus;
+	} = {}): Promise<ListAutoWorkRunsResponse> {
+		const params = new URLSearchParams();
+		if (filter.limit !== undefined) params.set("limit", String(filter.limit));
+		if (filter.taskId) params.set("taskId", filter.taskId);
+		if (filter.priority) params.set("priority", filter.priority);
+		if (filter.status) params.set("status", filter.status);
+		const qs = params.toString();
+		return request<ListAutoWorkRunsResponse>(`/auto-work/runs${qs ? `?${qs}` : ""}`);
+	},
+	triggerAutoWork(cwd: string): Promise<AutoWorkCycleResult> {
+		return request<AutoWorkCycleResult>(`/auto-work/trigger?cwd=${encodeURIComponent(cwd)}`, {
+			method: "POST",
+		});
+	},
+	listTasks(): Promise<ListTasksResponse> {
+		return request<ListTasksResponse>("/tasks");
 	},
 };
