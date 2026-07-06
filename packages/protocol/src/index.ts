@@ -1868,3 +1868,53 @@ export interface OAuthPromptReplyRequest {
 	promptId: string;
 	answer: string;
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Auto Work configuration (T-60) — per-workspace unattended-run settings
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Per-priority model override for auto-work runs. `null` (or an absent key)
+ * means "use the workspace default model" (see `WorkspacePreference`).
+ */
+export type AutoWorkModelByPriority = Record<TaskPriority, ModelRef | null>;
+
+/** One auto-work execution window — a half-open hour range [start, end). */
+export interface AutoWorkTimeWindow {
+	/** Opening hour, 0–23 inclusive. */
+	start: number;
+	/** Closing hour, 1–24 inclusive (24 = runs until midnight). */
+	end: number;
+}
+
+/**
+ * Auto Work configuration for one workspace (`workspaceCwd`). Always
+ * resolvable — `GET /api/auto-work/config?cwd=` returns computed defaults
+ * (disabled, no model overrides, full-day window, 100% limits) when no row
+ * exists yet, so callers never have to special-case "unconfigured".
+ */
+export interface AutoWorkConfig {
+	workspaceCwd: string;
+	enabled: boolean;
+	modelByPriority: AutoWorkModelByPriority;
+	/**
+	 * Non-overlapping time windows (hour-of-day) during which auto-work may
+	 * run. Empty array = never run. Sorted by `start` for display.
+	 * Example: `[{start:0,end:6},{start:13,end:15},{start:20,end:24}]`
+	 */
+	timeWindows: AutoWorkTimeWindow[];
+	/** Max % of the current session budget an auto-work run may consume, 0–100. */
+	sessionPctLimit: number;
+	/** Ceiling on cumulative weekly auto-work spend, as % of the weekly budget, 0–100. */
+	weeklyPctLimit: number;
+	updatedAt: string;
+}
+
+/** `PUT /api/auto-work/config?cwd=` body — replaces the full config. */
+export interface SetAutoWorkConfigRequest {
+	enabled: boolean;
+	modelByPriority: AutoWorkModelByPriority;
+	timeWindows: AutoWorkTimeWindow[];
+	sessionPctLimit: number;
+	weeklyPctLimit: number;
+}

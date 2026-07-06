@@ -39,6 +39,7 @@ import { buildOrientationRouter } from "./routes-orientation.ts";
 import { buildAuthOAuthRouter } from "./routes-auth-oauth.ts";
 import { buildOnboardingRouter } from "./routes-onboarding.ts";
 import { buildUsageRouter } from "./routes-usage.ts";
+import { buildAutoWorkRouter } from "./routes-auto-work.ts";
 import type { RoutinesRunner } from "./routines-runner.ts";
 import type { BridgeSupervisor } from "./bridge-supervisor.ts";
 import type { MarketplaceService } from "./marketplace-service.ts";
@@ -337,6 +338,7 @@ export function buildRouter(
 	app.route("/auth/oauth", buildAuthOAuthRouter());
 	app.route("/onboarding", buildOnboardingRouter());
 	app.route("/", buildUsageRouter(bridge));
+	app.route("/", buildAutoWorkRouter(bridge));
 
 	return app;
 }

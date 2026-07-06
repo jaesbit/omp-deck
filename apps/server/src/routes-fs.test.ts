@@ -1,7 +1,7 @@
 /**
  * `isCwdAllowed` gates both `/fs/complete` and the cwd a caller supplies to
  * `POST /sessions`. It must fail closed: only existing directories that
- * resolve under $HOME are acceptable.
+ * resolve under $HOME or a configured OMP_DECK_WORKSPACES root are acceptable.
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -62,6 +62,58 @@ describe("isCwdAllowed", () => {
 		delete process.env.HOME;
 		delete process.env.USERPROFILE;
 		expect(isCwdAllowed(dirUnderHome)).toBe(false);
+	});
+
+	test("accepts an existing directory under an OMP_DECK_WORKSPACES root", () => {
+		const nfsRoot = mkdtempSync(path.join(os.tmpdir(), "omp-deck-nfs-"));
+		const dir = path.join(nfsRoot, "project", "src");
+		mkdirSync(dir, { recursive: true });
+		const original = process.env.OMP_DECK_WORKSPACES;
+		try {
+			process.env.OMP_DECK_WORKSPACES = nfsRoot;
+			expect(isCwdAllowed(dir)).toBe(true);
+		} finally {
+			if (original === undefined) delete process.env.OMP_DECK_WORKSPACES;
+			else process.env.OMP_DECK_WORKSPACES = original;
+			rmSync(nfsRoot, { recursive: true, force: true });
+		}
+	});
+
+	test("accepts the OMP_DECK_WORKSPACES root itself as a cwd", () => {
+		const nfsRoot = mkdtempSync(path.join(os.tmpdir(), "omp-deck-nfs-"));
+		const original = process.env.OMP_DECK_WORKSPACES;
+		try {
+			process.env.OMP_DECK_WORKSPACES = nfsRoot;
+			expect(isCwdAllowed(nfsRoot)).toBe(true);
+		} finally {
+			if (original === undefined) delete process.env.OMP_DECK_WORKSPACES;
+			else process.env.OMP_DECK_WORKSPACES = original;
+			rmSync(nfsRoot, { recursive: true, force: true });
+		}
+	});
+
+	test("rejects a path outside $HOME when OMP_DECK_WORKSPACES is unset", () => {
+		const outside = mkdtempSync(path.join(os.tmpdir(), "omp-deck-outside-"));
+		const original = process.env.OMP_DECK_WORKSPACES;
+		try {
+			delete process.env.OMP_DECK_WORKSPACES;
+			expect(isCwdAllowed(outside)).toBe(false);
+		} finally {
+			if (original !== undefined) process.env.OMP_DECK_WORKSPACES = original;
+			rmSync(outside, { recursive: true, force: true });
+		}
+	});
+
+	test("fails closed when both $HOME and OMP_DECK_WORKSPACES are unset", () => {
+		const originalWorkspaces = process.env.OMP_DECK_WORKSPACES;
+		delete process.env.HOME;
+		delete process.env.USERPROFILE;
+		delete process.env.OMP_DECK_WORKSPACES;
+		try {
+			expect(isCwdAllowed(dirUnderHome)).toBe(false);
+		} finally {
+			if (originalWorkspaces !== undefined) process.env.OMP_DECK_WORKSPACES = originalWorkspaces;
+		}
 	});
 });
 

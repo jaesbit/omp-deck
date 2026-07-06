@@ -1,4 +1,5 @@
 import type {
+	AutoWorkConfig,
 	CreateSessionRequest,
 	CreateSessionResponse,
 	ListDirResponse,
@@ -9,6 +10,7 @@ import type {
 	ListWorkspacePreferencesResponse,
 	ListWorkspacesResponse,
 	ModelRef,
+	SetAutoWorkConfigRequest,
 	WorkspacePreference,
 } from "@omp-deck/protocol";
 
@@ -99,6 +101,15 @@ export const api = {
 		return request<WorkspacePreference>(`/workspace-preferences?cwd=${encodeURIComponent(cwd)}`, {
 			method: "PUT",
 			body: JSON.stringify({ model }),
+		});
+	},
+	getAutoWorkConfig(cwd: string): Promise<AutoWorkConfig> {
+		return request<AutoWorkConfig>(`/auto-work/config?cwd=${encodeURIComponent(cwd)}`);
+	},
+	setAutoWorkConfig(cwd: string, config: SetAutoWorkConfigRequest): Promise<AutoWorkConfig> {
+		return request<AutoWorkConfig>(`/auto-work/config?cwd=${encodeURIComponent(cwd)}`, {
+			method: "PUT",
+			body: JSON.stringify(config),
 		});
 	},
 };
