@@ -14,6 +14,7 @@ const log = logger("ws");
 export interface ConnectionData {
 	connectionId: string;
 	subscriptions: Map<string, () => void>;
+	tasksSubscribed: boolean;
 }
 
 /**
@@ -86,6 +87,7 @@ export class WsHub {
 		return {
 			connectionId: crypto.randomUUID(),
 			subscriptions: new Map(),
+			tasksSubscribed: false,
 		};
 	}
 
@@ -115,6 +117,14 @@ export class WsHub {
 
 			case "unsubscribe":
 				this.handleUnsubscribe(ws, frame.sessionId);
+				return;
+
+			case "subscribe_tasks":
+				ws.data.tasksSubscribed = true;
+				return;
+
+			case "unsubscribe_tasks":
+				ws.data.tasksSubscribed = false;
 				return;
 
 			case "prompt":
@@ -176,6 +186,7 @@ export class WsHub {
 	private broadcast(frame: ServerFrame): void {
 		const payload = JSON.stringify(frame);
 		for (const ws of this.connections) {
+			if (frame.type === "tasks_changed" && !ws.data.tasksSubscribed) continue;
 			try {
 				ws.send(payload);
 			} catch (err) {

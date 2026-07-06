@@ -41,6 +41,8 @@ export function TasksView() {
 	const createSession = useStore((s) => s.createSession);
 	const defaultCwd = useStore((s) => s.defaultCwd);
 	const setInspectorOpen = useStore((s) => s.setInspectorOpen);
+	const subscribeTasks = useStore((s) => s.subscribeTasks);
+	const unsubscribeTasks = useStore((s) => s.unsubscribeTasks);
 
 	const [tasks, setTasks] = useState<Task[]>([]);
 	const [states, setStates] = useState<TaskState[]>([]);
@@ -76,6 +78,13 @@ export function TasksView() {
 	useEffect(() => {
 		void refresh();
 	}, [refresh]);
+
+	// Task-change broadcasts are scoped to this mounted view. Leaving the
+	// kanban releases the server-side event subscription immediately.
+	useEffect(() => {
+		subscribeTasks();
+		return unsubscribeTasks;
+	}, [subscribeTasks, unsubscribeTasks]);
 
 	// Live updates: any kanban mutation anywhere (UI, deck slash, agent REST)
 	// bumps `tasksChangeCounter` in the store. Refetch when it changes so the

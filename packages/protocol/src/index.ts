@@ -917,6 +917,8 @@ export type ClientFrame =
 	| { type: "ping" }
 	| { type: "subscribe"; sessionId: string }
 	| { type: "unsubscribe"; sessionId: string }
+	| { type: "subscribe_tasks" }
+	| { type: "unsubscribe_tasks" }
 	| {
 			type: "prompt";
 			sessionId: string;

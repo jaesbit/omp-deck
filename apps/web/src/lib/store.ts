@@ -106,6 +106,8 @@ interface StoreState {
 
 	// Track subscriptions to avoid duplicate subscribe messages.
 	subscribed: Set<string>;
+	/** Number of Auto Work monitors retaining each session subscription. */
+	watchingSessionCounts: Map<string, number>;
 
 	/**
 	 * Tool-card view state. `allCollapsed` is the bulk default; `perCard` holds
@@ -148,6 +150,8 @@ interface StoreState {
 	 * changes — keeps the kanban view live without polling.
 	 */
 	tasksChangeCounter: number;
+	/** True only while the Tasks view owns the task-change event stream. */
+	tasksSubscribed: boolean;
 
 	/**
 	 * Mirror of {@link tasksChangeCounter} for the skill catalog. Bumped on every
@@ -228,15 +232,18 @@ interface StoreState {
 		suppressAutoStart?: boolean;
 	}): Promise<string>;
 	selectSession(id: string): void;
-	/** Subscribe to a session for read-only monitoring without making it the
-	 *  active session (used by the Auto-Work monitor panel). Idempotent. */
-	watchSession(id: string): void;
+	/** Retain a session for read-only monitoring. The returned cleanup releases
+	 *  this watcher; the wire subscription stays alive while another owner needs it. */
+	watchSession(id: string): () => void;
 	/** Detach the current tab's view from the active session — clears
 	 *  `activeId` only. Unlike `disposeSession`, the underlying server-side
 	 *  session keeps running in the background (T-52) and any other tab
 	 *  still subscribed to it is unaffected; re-selecting the same id later
 	 *  just resumes viewing it via `selectSession`'s idempotent subscribe. */
 	closeActiveSession(): void;
+	/** Start or stop receiving task-change broadcasts for the mounted Tasks view. */
+	subscribeTasks(): void;
+	unsubscribeTasks(): void;
 	sendPrompt(text: string, images?: import("@omp-deck/protocol").ImageAttachment[]): void;
 	abort(): void;
 	/** Drop every queued (followUp / steering) prompt for the active session.
@@ -296,6 +303,17 @@ interface StoreState {
 	dismissNotification(id: string): void;
 }
 
+function ensureSessionSubscription(id: string, get: () => StoreState): void {
+	if (get().subscribed.has(id)) return;
+	get().subscribed.add(id);
+	get().ws?.send({ type: "subscribe", sessionId: id });
+}
+
+function releaseSessionSubscription(id: string, get: () => StoreState): void {
+	if (!get().subscribed.delete(id)) return;
+	get().ws?.send({ type: "unsubscribe", sessionId: id });
+}
+
 export const useStore = create<StoreState>()(
 	subscribeWithSelector((set, get) => ({
 		ws: null,
@@ -305,10 +323,12 @@ export const useStore = create<StoreState>()(
 		sessions: [],
 		sessionsById: {},
 		activeId: readLastSessionId(),
+		watchingSessionCounts: new Map(),
 		subscribed: new Set<string>(),
 		toolView: { allCollapsed: false, perCard: {} },
 		todoPanelOpen: false,
 		tasksChangeCounter: 0,
+		tasksSubscribed: false,
 		skillsChangeCounter: 0,
 		kbChangeCounter: 0,
 		sessionsChangeCounter: 0,
@@ -384,10 +404,12 @@ export const useStore = create<StoreState>()(
 				...(opts.planMode ? { planMode: true } : {}),
 				...(opts.suppressAutoStart ? { suppressAutoStart: true } : {}),
 			});
-			// Subscribe immediately; reducer will hydrate from the `subscribed` snapshot.
-			get().ws?.send({ type: "subscribe", sessionId: created.sessionId });
-			get().subscribed.add(created.sessionId);
+			const previousActiveId = get().activeId;
+			if (previousActiveId && previousActiveId !== created.sessionId && !get().watchingSessionCounts.has(previousActiveId)) {
+				releaseSessionSubscription(previousActiveId, get);
+			}
 			set({ activeId: created.sessionId });
+			ensureSessionSubscription(created.sessionId, get);
 			// Background-refresh sidebar to reflect the new entry.
 			void get().refreshSessions();
 			void get().refreshWorkspaces();
@@ -395,17 +417,44 @@ export const useStore = create<StoreState>()(
 		},
 
 		selectSession(id: string) {
-			set({ activeId: id });
-			if (!get().subscribed.has(id)) {
-				get().ws?.send({ type: "subscribe", sessionId: id });
-				get().subscribed.add(id);
+			const previousActiveId = get().activeId;
+			if (previousActiveId && previousActiveId !== id && !get().watchingSessionCounts.has(previousActiveId)) {
+				releaseSessionSubscription(previousActiveId, get);
 			}
+			set({ activeId: id });
+			ensureSessionSubscription(id, get);
 		},
 		watchSession(id: string) {
-			if (!get().subscribed.has(id)) {
-				get().ws?.send({ type: "subscribe", sessionId: id });
-				get().subscribed.add(id);
-			}
+			const count = get().watchingSessionCounts.get(id) ?? 0;
+			set((s) => ({ watchingSessionCounts: new Map(s.watchingSessionCounts).set(id, count + 1) }));
+			ensureSessionSubscription(id, get);
+			let released = false;
+			return () => {
+				if (released) return;
+				released = true;
+				const current = get().watchingSessionCounts.get(id) ?? 0;
+				if (current <= 1) {
+					set((s) => {
+						const next = new Map(s.watchingSessionCounts);
+						next.delete(id);
+						return { watchingSessionCounts: next };
+					});
+					if (get().activeId !== id) releaseSessionSubscription(id, get);
+					return;
+				}
+				set((s) => ({ watchingSessionCounts: new Map(s.watchingSessionCounts).set(id, current - 1) }));
+			};
+		},
+
+		subscribeTasks() {
+			if (get().tasksSubscribed) return;
+			set({ tasksSubscribed: true });
+			get().ws?.send({ type: "subscribe_tasks" });
+		},
+		unsubscribeTasks() {
+			if (!get().tasksSubscribed) return;
+			set({ tasksSubscribed: false });
+			get().ws?.send({ type: "unsubscribe_tasks" });
 		},
 
 
@@ -446,6 +495,14 @@ export const useStore = create<StoreState>()(
 		},
 
 		async deleteSession(id: string) {
+			const wasActive = get().activeId === id;
+			if (wasActive) set({ activeId: undefined });
+			set((s) => {
+				const next = new Map(s.watchingSessionCounts);
+				next.delete(id);
+				return { watchingSessionCounts: next };
+			});
+			releaseSessionSubscription(id, get);
 			try {
 				await api.disposeSession(id);
 			} catch (err) {
@@ -463,7 +520,10 @@ export const useStore = create<StoreState>()(
 		},
 
 		closeActiveSession() {
+			const id = get().activeId;
+			if (!id) return;
 			set({ activeId: undefined });
+			if (!get().watchingSessionCounts.has(id)) releaseSessionSubscription(id, get);
 		},
 
 		async resumeIfKnown(id: string) {
@@ -670,6 +730,7 @@ function handleFrame(
 			for (const id of get().subscribed) {
 				get().ws?.send({ type: "subscribe", sessionId: id });
 			}
+			if (get().tasksSubscribed) get().ws?.send({ type: "subscribe_tasks" });
 			return;
 
 		case "subscribed":
@@ -682,7 +743,8 @@ function handleFrame(
 			return;
 
 		case "unsubscribed":
-			get().subscribed.delete(frame.sessionId);
+			// Desired subscriptions are released synchronously before the server
+			// acknowledgement arrives. Do not clear a newer re-subscription here.
 			return;
 
 		case "session_event": {
@@ -786,14 +848,18 @@ function handleFrame(
 			return;
 
 		case "session_disposed":
+			get().subscribed.delete(frame.sessionId);
 			set((s) => {
 				const nextSessions = { ...s.sessionsById };
 				delete nextSessions[frame.sessionId];
 				const nextDialogs = { ...s.pendingDialogs };
 				delete nextDialogs[frame.sessionId];
+				const nextWatchingSessionCounts = new Map(s.watchingSessionCounts);
+				nextWatchingSessionCounts.delete(frame.sessionId);
 				return {
 					sessionsById: nextSessions,
 					pendingDialogs: nextDialogs,
+					watchingSessionCounts: nextWatchingSessionCounts,
 					activeId: s.activeId === frame.sessionId ? undefined : s.activeId,
 				};
 			});

@@ -163,11 +163,10 @@ function DetailPane({ run, task }: DetailPaneProps) {
 	const [elapsedStr, setElapsedStr] = useState(() => elapsed(run.startedAt, run.completedAt));
 	const msgsEndRef = useRef<HTMLDivElement>(null);
 
-	// Subscribe to the session for live updates (running only)
+	// Retain this live session only while its detail pane is mounted.
 	useEffect(() => {
-		if (run.status === "running") {
-			watchSession(run.sessionId);
-		}
+		if (run.status !== "running") return;
+		return watchSession(run.sessionId);
 	}, [run.sessionId, run.status, watchSession]);
 
 	// Tick elapsed timer for running sessions
@@ -350,7 +349,6 @@ function DetailPane({ run, task }: DetailPaneProps) {
 
 export function AutoWorkView() {
 	const autoWorkRunsChangeCounter = useStore((s) => s.autoWorkRunsChangeCounter);
-	const tasksChangeCounter = useStore((s) => s.tasksChangeCounter);
 	const workspaces = useStore((s) => s.workspaces);
 	const defaultCwd = useStore((s) => s.defaultCwd);
 
@@ -406,7 +404,7 @@ export function AutoWorkView() {
 		}
 	}, []);
 
-	useEffect(() => { void refresh(); }, [refresh, autoWorkRunsChangeCounter, tasksChangeCounter]);
+	useEffect(() => { void refresh(); }, [refresh, autoWorkRunsChangeCounter]);
 	useEffect(() => { void refreshScheduleStatus(); }, [refreshScheduleStatus, autoWorkRunsChangeCounter]);
 
 	// Runs visible in the left panel: filtered by selected workspace.
