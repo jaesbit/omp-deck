@@ -43,26 +43,27 @@ function bootDb(): void {
 describe("reorderStates", () => {
 	test("renumbers positions in the supplied order with 100-unit gaps", () => {
 		bootDb();
-		// Add a fifth column on top of the four seeded by 001-init.sql.
+		// Add a sixth column on top of the five seeded by 001-init.sql/014-validate-state.sql.
 		const upNext = createState({ name: "up-next", color: "#888888" });
 		const before = listStates().map((s) => s.id);
-		expect(before).toEqual(["s_backlog", "s_active", "s_blocked", "s_done", upNext.id]);
+		expect(before).toEqual(["s_backlog", "s_active", "s_validate", "s_blocked", "s_done", upNext.id]);
 
-		const after = reorderStates(["s_done", "s_blocked", "s_active", "s_backlog", upNext.id]);
+		const after = reorderStates(["s_done", "s_blocked", "s_validate", "s_active", "s_backlog", upNext.id]);
 		expect(after.map((s) => s.id)).toEqual([
 			"s_done",
 			"s_blocked",
+			"s_validate",
 			"s_active",
 			"s_backlog",
 			upNext.id,
 		]);
-		expect(after.map((s) => s.position)).toEqual([100, 200, 300, 400, 500]);
+		expect(after.map((s) => s.position)).toEqual([100, 200, 300, 400, 500, 600]);
 	});
 
 	test("rejects a missing id without mutating task_states", () => {
 		bootDb();
 		const original = listStates();
-		expect(() => reorderStates(["s_done", "s_blocked", "s_active"])).toThrow(/expected 4 ids/);
+		expect(() => reorderStates(["s_done", "s_blocked", "s_active"])).toThrow(/expected 5 ids/);
 		expect(listStates()).toEqual(original);
 	});
 
@@ -70,7 +71,7 @@ describe("reorderStates", () => {
 		bootDb();
 		const original = listStates();
 		expect(() =>
-			reorderStates(["s_done", "s_blocked", "s_active", "s_does_not_exist"]),
+			reorderStates(["s_done", "s_blocked", "s_active", "s_validate", "s_does_not_exist"]),
 		).toThrow(/unknown state id/);
 		expect(listStates()).toEqual(original);
 	});
@@ -78,13 +79,12 @@ describe("reorderStates", () => {
 	test("rejects a duplicate id", () => {
 		bootDb();
 		const original = listStates();
-		expect(() => reorderStates(["s_done", "s_done", "s_blocked", "s_active"])).toThrow(
+		expect(() => reorderStates(["s_done", "s_done", "s_blocked", "s_active", "s_validate"])).toThrow(
 			/duplicate state id/,
 		);
 		expect(listStates()).toEqual(original);
 	});
 });
-
 describe("state_entered_at + recency sort", () => {
 	test("createTask stamps state_entered_at to the creation timestamp", () => {
 		bootDb();

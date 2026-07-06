@@ -481,6 +481,13 @@ function fakeBridge(
 	} as unknown as AgentBridge;
 }
 
+// Stubs `gh pr create` for every `runAutoWorkCycle` test that reaches the
+// success path (T-66) — a test must NEVER let the real default run, since
+// that would shell out to `gh` and attempt to open an actual GitHub PR.
+async function stubCreatePullRequest(): Promise<{ url: string; number: number }> {
+	return { url: "https://github.com/jaesbit/omp-deck/pull/321", number: 321 };
+}
+
 let dbDir: string;
 let homeDir: string;
 let repoCwd: string;
@@ -532,6 +539,8 @@ describe("runAutoWorkCycle", () => {
 		const handle = new FakeSessionHandle("sess_1", 10);
 		const result = await runAutoWorkCycle(repoCwd, fakeBridge(handle), {
 			getSubscriptionUsage: async () => ({ available: true, weeklyPct: 5 }),
+			getDeckBaseUrl: () => "https://deck.example.com",
+			createPullRequest: stubCreatePullRequest,
 		});
 
 		expect(result.outcome).toBe("completed");
@@ -542,7 +551,10 @@ describe("runAutoWorkCycle", () => {
 		expect(result.worktreePath).toContain(`aw-T${task.displayId}`);
 
 		const updated = getTask(task.id);
-		expect(updated?.stateId).toBe("s_active");
+		expect(updated?.stateId).toBe("s_validate");
+		expect(updated?.body).toContain("**Auto Work**");
+		expect(updated?.body).toContain("[session sess_1](https://deck.example.com/c/sess_1)");
+		expect(updated?.body).toContain("PR #321");
 
 		const runs = listAutoWorkRuns({ taskId: task.id });
 		expect(runs).toHaveLength(1);
@@ -560,8 +572,13 @@ describe("runAutoWorkCycle", () => {
 		const task = createTask({ title: "Slow task", cwd: repoCwd, priority: "P5", autoWork: true });
 
 		const handle = new FakeSessionHandle("sess_timeout", null); // never emits turn_end
+		let prCreateCalls = 0;
 		const result = await runAutoWorkCycle(repoCwd, fakeBridge(handle), {
 			getSubscriptionUsage: async () => ({ available: true, weeklyPct: 5 }),
+			createPullRequest: async () => {
+				prCreateCalls += 1;
+				return stubCreatePullRequest();
+			},
 		});
 
 		expect(result.outcome).toBe("timed_out");
@@ -575,6 +592,37 @@ describe("runAutoWorkCycle", () => {
 		const runs = listAutoWorkRuns({ taskId: task.id });
 		expect(runs[0]?.status).toBe("timed_out");
 		expect(runs[0]?.failureReason).toContain("timeout");
+
+		// A timed-out/failed run never opens a PR — nothing to review (T-66).
+		expect(prCreateCalls).toBe(0);
+	});
+
+	test("on PR creation failure, still moves the completed task to validate with a fallback note (T-66)", async () => {
+		setAutoWorkConfig(repoCwd, { ...DEFAULT_AUTO_WORK_VALUES, enabled: true });
+		const task = createTask({ title: "PR step fails", cwd: repoCwd, priority: "P5", autoWork: true });
+
+		const handle = new FakeSessionHandle("sess_pr_fail", 10);
+		const result = await runAutoWorkCycle(repoCwd, fakeBridge(handle), {
+			getSubscriptionUsage: async () => ({ available: true, weeklyPct: 5 }),
+			getDeckBaseUrl: () => "https://deck.example.com",
+			createPullRequest: async () => {
+				throw new Error("gh pr create failed (exit 1): no git remotes found");
+			},
+		});
+
+		expect(result.outcome).toBe("completed");
+		if (result.outcome !== "completed") throw new Error("expected completed");
+
+		// The agent's work did complete — losing the PR step shouldn't silently
+		// discard that behind an unrelated `gh` error, so the task still moves
+		// to validate with a note that the PR needs to be opened by hand.
+		const updated = getTask(task.id);
+		expect(updated?.stateId).toBe("s_validate");
+		expect(updated?.body).toContain("[session sess_pr_](https://deck.example.com/c/sess_pr_fail)");
+		expect(updated?.body).toContain("PR creation failed");
+
+		const runs = listAutoWorkRuns({ taskId: task.id });
+		expect(runs[0]?.status).toBe("completed");
 	});
 
 	test("resumes the active run instead of starting new work when another run is already active for the workspace (mutex)", async () => {
@@ -599,7 +647,7 @@ describe("runAutoWorkCycle", () => {
 		const result = await runAutoWorkCycle(
 			repoCwd,
 			fakeBridge(decoyHandle, { liveSessions: new Map([["already-running", liveHandle]]) }),
-			{ getSubscriptionUsage: async () => ({ available: true, weeklyPct: 5 }) },
+			{ getSubscriptionUsage: async () => ({ available: true, weeklyPct: 5 }), createPullRequest: stubCreatePullRequest },
 		);
 
 		expect(result.outcome).toBe("completed");
@@ -685,7 +733,7 @@ describe("runAutoWorkCycle session continuation (T-65)", () => {
 		const result = await runAutoWorkCycle(
 			repoCwd,
 			fakeBridge(decoyHandle, { liveSessions: new Map([["sess_prev", liveHandle]]) }),
-			{ getSubscriptionUsage: async () => ({ available: true, weeklyPct: 5 }) },
+			{ getSubscriptionUsage: async () => ({ available: true, weeklyPct: 5 }), createPullRequest: stubCreatePullRequest },
 		);
 
 		expect(result.outcome).toBe("completed");
@@ -723,7 +771,7 @@ describe("runAutoWorkCycle session continuation (T-65)", () => {
 		const result = await runAutoWorkCycle(
 			repoCwd,
 			fakeBridge(decoyHandle, { liveSessions: new Map([["sess_alive", liveHandle]]) }),
-			{ getSubscriptionUsage: async () => ({ available: true, weeklyPct: 5 }) },
+			{ getSubscriptionUsage: async () => ({ available: true, weeklyPct: 5 }), createPullRequest: stubCreatePullRequest },
 		);
 
 		expect(result.outcome).toBe("completed");
@@ -786,6 +834,7 @@ describe("runAutoWorkCycle session continuation (T-65)", () => {
 		const handle = new FakeSessionHandle("sess_new", 10);
 		const result = await runAutoWorkCycle(repoCwd, fakeBridge(handle), {
 			getSubscriptionUsage: async () => ({ available: true, weeklyPct: 5 }),
+			createPullRequest: stubCreatePullRequest,
 		});
 
 		expect(result.outcome).toBe("completed");

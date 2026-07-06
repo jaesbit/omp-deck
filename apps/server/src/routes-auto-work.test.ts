@@ -25,28 +25,15 @@ import { completeAutoWorkRun, listAutoWorkRuns, startAutoWorkRun } from "./db/au
 import { createTask, getTask } from "./db/tasks.ts";
 import { buildAutoWorkRouter } from "./routes-auto-work.ts";
 import type { AgentBridge, EventListener, SessionHandle } from "./bridge/types.ts";
-import { resetSubscriptionUsageCacheForTests, type UsageReportsFetcher } from "./usage-subscription.ts";
-
-/** Synthetic single-window usage report fixing pctUsed at `usedFraction * 100`. */
-function stubUsageFetcher(usedFraction: number): UsageReportsFetcher {
-	const report: UsageReport = {
-		provider: "anthropic",
-		fetchedAt: Date.now(),
-		limits: [
-			{
-				id: "5h",
-				label: "5 Hour",
-				scope: { provider: "anthropic" },
-				amount: { usedFraction, unit: "percent" },
-				window: { id: "5h", label: "5 Hour", durationMs: 5 * 3600_000 },
-			},
-		],
-	};
-	return async () => [report];
-}
+import type { Config } from "./config.ts";
+import { resetSubscriptionUsageCacheForTests } from "./usage-subscription.ts";
 
 let dbDir: string;
 let dbPath: string;
+
+function fakeConfig(): Config {
+	return { port: 8787 } as Config;
+}
 
 const AVAILABLE_MODEL: ModelInfo = {
 	provider: "anthropic",
@@ -100,13 +87,13 @@ afterEach(() => {
 
 describe("GET /auto-work/config", () => {
 	test("requires a cwd query param", async () => {
-		const app = buildAutoWorkRouter(fakeBridge([]));
+		const app = buildAutoWorkRouter(fakeBridge([]), fakeConfig());
 		const res = await app.request("/auto-work/config");
 		expect(res.status).toBe(400);
 	});
 
 	test("accepts any absolute path (NFS, outside $HOME) — config is a pure DB key", async () => {
-		const app = buildAutoWorkRouter(fakeBridge([]));
+		const app = buildAutoWorkRouter(fakeBridge([]), fakeConfig());
 		const res = await app.request(`/auto-work/config?cwd=${encodeURIComponent("/mnt/nas/Public/openscad")}`);
 		expect(res.status).toBe(200);
 		const body = (await res.json()) as AutoWorkConfig;
@@ -115,7 +102,7 @@ describe("GET /auto-work/config", () => {
 	});
 
 	test("returns computed defaults when no config exists", async () => {
-		const app = buildAutoWorkRouter(fakeBridge([]));
+		const app = buildAutoWorkRouter(fakeBridge([]), fakeConfig());
 		const cwd = process.cwd();
 		const res = await app.request(`/auto-work/config?cwd=${encodeURIComponent(cwd)}`);
 		expect(res.status).toBe(200);
@@ -131,7 +118,7 @@ describe("GET /auto-work/config", () => {
 
 describe("PUT /auto-work/config — validation", () => {
 	test("rejects a missing cwd", async () => {
-		const app = buildAutoWorkRouter(fakeBridge([]));
+		const app = buildAutoWorkRouter(fakeBridge([]), fakeConfig());
 		const res = await app.request("/auto-work/config", {
 			method: "PUT",
 			body: JSON.stringify(fullConfigBody()),
@@ -140,7 +127,7 @@ describe("PUT /auto-work/config — validation", () => {
 	});
 
 	test("rejects invalid json", async () => {
-		const app = buildAutoWorkRouter(fakeBridge([]));
+		const app = buildAutoWorkRouter(fakeBridge([]), fakeConfig());
 		const cwd = process.cwd();
 		const res = await app.request(`/auto-work/config?cwd=${encodeURIComponent(cwd)}`, {
 			method: "PUT",
@@ -150,7 +137,7 @@ describe("PUT /auto-work/config — validation", () => {
 	});
 
 	test("rejects a missing priority key in modelByPriority", async () => {
-		const app = buildAutoWorkRouter(fakeBridge([]));
+		const app = buildAutoWorkRouter(fakeBridge([]), fakeConfig());
 		const cwd = process.cwd();
 		const bad = fullConfigBody();
 		delete (bad.modelByPriority as Record<string, unknown>).P3;
@@ -162,7 +149,7 @@ describe("PUT /auto-work/config — validation", () => {
 	});
 
 	test("rejects overlapping timeWindows", async () => {
-		const app = buildAutoWorkRouter(fakeBridge([]));
+		const app = buildAutoWorkRouter(fakeBridge([]), fakeConfig());
 		const cwd = process.cwd();
 		const res = await app.request(`/auto-work/config?cwd=${encodeURIComponent(cwd)}`, {
 			method: "PUT",
@@ -172,7 +159,7 @@ describe("PUT /auto-work/config — validation", () => {
 	});
 
 	test("accepts multiple non-overlapping timeWindows", async () => {
-		const app = buildAutoWorkRouter(fakeBridge([]));
+		const app = buildAutoWorkRouter(fakeBridge([]), fakeConfig());
 		const cwd = process.cwd();
 		const res = await app.request(`/auto-work/config?cwd=${encodeURIComponent(cwd)}`, {
 			method: "PUT",
@@ -182,7 +169,7 @@ describe("PUT /auto-work/config — validation", () => {
 	});
 
 	test("rejects an out-of-range pct limit", async () => {
-		const app = buildAutoWorkRouter(fakeBridge([]));
+		const app = buildAutoWorkRouter(fakeBridge([]), fakeConfig());
 		const cwd = process.cwd();
 		const res = await app.request(`/auto-work/config?cwd=${encodeURIComponent(cwd)}`, {
 			method: "PUT",
@@ -192,7 +179,7 @@ describe("PUT /auto-work/config — validation", () => {
 	});
 
 	test("rejects an unknown model override", async () => {
-		const app = buildAutoWorkRouter(fakeBridge([AVAILABLE_MODEL]));
+		const app = buildAutoWorkRouter(fakeBridge([AVAILABLE_MODEL]), fakeConfig());
 		const cwd = process.cwd();
 		const res = await app.request(`/auto-work/config?cwd=${encodeURIComponent(cwd)}`, {
 			method: "PUT",
@@ -204,7 +191,7 @@ describe("PUT /auto-work/config — validation", () => {
 	});
 
 	test("rejects a model override with no configured auth", async () => {
-		const app = buildAutoWorkRouter(fakeBridge([UNAUTHED_MODEL]));
+		const app = buildAutoWorkRouter(fakeBridge([UNAUTHED_MODEL]), fakeConfig());
 		const cwd = process.cwd();
 		const res = await app.request(`/auto-work/config?cwd=${encodeURIComponent(cwd)}`, {
 			method: "PUT",
@@ -227,7 +214,7 @@ describe("PUT /auto-work/config — validation", () => {
 
 describe("PUT /auto-work/config — persistence", () => {
 	test("round-trips a full config through GET", async () => {
-		const app = buildAutoWorkRouter(fakeBridge([AVAILABLE_MODEL]));
+		const app = buildAutoWorkRouter(fakeBridge([AVAILABLE_MODEL]), fakeConfig());
 		const cwd = process.cwd();
 		const putRes = await app.request(`/auto-work/config?cwd=${encodeURIComponent(cwd)}`, {
 			method: "PUT",
@@ -258,7 +245,7 @@ describe("PUT /auto-work/config — persistence", () => {
 
 	test("persists across a simulated server restart (close + reopen the DB file)", async () => {
 		const cwd = process.cwd();
-		const app1 = buildAutoWorkRouter(fakeBridge([]));
+		const app1 = buildAutoWorkRouter(fakeBridge([]), fakeConfig());
 		await app1.request(`/auto-work/config?cwd=${encodeURIComponent(cwd)}`, {
 			method: "PUT",
 			body: JSON.stringify(fullConfigBody()),
@@ -267,7 +254,7 @@ describe("PUT /auto-work/config — persistence", () => {
 		closeDb();
 		openDb({ path: dbPath });
 
-		const app2 = buildAutoWorkRouter(fakeBridge([]));
+		const app2 = buildAutoWorkRouter(fakeBridge([]), fakeConfig());
 		const res = await app2.request(`/auto-work/config?cwd=${encodeURIComponent(cwd)}`);
 		const body = (await res.json()) as AutoWorkConfig;
 		expect(body.enabled).toBe(true);
@@ -277,7 +264,7 @@ describe("PUT /auto-work/config — persistence", () => {
 	});
 
 	test("a second PUT replaces the prior config (upsert, not insert)", async () => {
-		const app = buildAutoWorkRouter(fakeBridge([]));
+		const app = buildAutoWorkRouter(fakeBridge([]), fakeConfig());
 		const cwd = process.cwd();
 		await app.request(`/auto-work/config?cwd=${encodeURIComponent(cwd)}`, {
 			method: "PUT",
@@ -296,7 +283,7 @@ describe("PUT /auto-work/config — persistence", () => {
 
 describe("GET /auto-work/runs", () => {
 	test("returns an empty list when no runs exist", async () => {
-		const app = buildAutoWorkRouter(fakeBridge([]));
+		const app = buildAutoWorkRouter(fakeBridge([]), fakeConfig());
 		const res = await app.request("/auto-work/runs");
 		expect(res.status).toBe(200);
 		const body = (await res.json()) as ListAutoWorkRunsResponse;
@@ -312,7 +299,7 @@ describe("GET /auto-work/runs", () => {
 		});
 		completeAutoWorkRun(runId, { status: "completed", inputTokens: 100, outputTokens: 50, pctConsumed: 1.5 });
 
-		const app = buildAutoWorkRouter(fakeBridge([]));
+		const app = buildAutoWorkRouter(fakeBridge([]), fakeConfig());
 		const res = await app.request("/auto-work/runs");
 		const body = (await res.json()) as ListAutoWorkRunsResponse;
 		expect(body.runs.length).toBe(1);
@@ -328,7 +315,7 @@ describe("GET /auto-work/runs", () => {
 		completeAutoWorkRun(a, { status: "completed", pctConsumed: 1 });
 		startAutoWorkRun({ taskId: "t-b", taskPriority: "P3", sessionId: "s-b", worktreePath: "/tmp/b" });
 
-		const app = buildAutoWorkRouter(fakeBridge([]));
+		const app = buildAutoWorkRouter(fakeBridge([]), fakeConfig());
 
 		const byTask = (await (await app.request("/auto-work/runs?taskId=t-a")).json()) as ListAutoWorkRunsResponse;
 		expect(byTask.runs.map((r) => r.id)).toEqual([a]);
@@ -346,7 +333,7 @@ describe("GET /auto-work/runs", () => {
 	});
 
 	test("rejects an invalid priority or status filter", async () => {
-		const app = buildAutoWorkRouter(fakeBridge([]));
+		const app = buildAutoWorkRouter(fakeBridge([]), fakeConfig());
 		expect((await app.request("/auto-work/runs?priority=P9")).status).toBe(400);
 		expect((await app.request("/auto-work/runs?status=bogus")).status).toBe(400);
 		expect((await app.request("/auto-work/runs?limit=0")).status).toBe(400);
@@ -356,13 +343,13 @@ describe("GET /auto-work/runs", () => {
 
 describe("GET /auto-work/cost-estimate", () => {
 	test("requires a valid priority query param", async () => {
-		const app = buildAutoWorkRouter(fakeBridge([]));
+		const app = buildAutoWorkRouter(fakeBridge([]), fakeConfig());
 		expect((await app.request("/auto-work/cost-estimate")).status).toBe(400);
 		expect((await app.request("/auto-work/cost-estimate?priority=nope")).status).toBe(400);
 	});
 
 	test("returns null average with zero sample size when no history exists", async () => {
-		const app = buildAutoWorkRouter(fakeBridge([]));
+		const app = buildAutoWorkRouter(fakeBridge([]), fakeConfig());
 		const res = await app.request("/auto-work/cost-estimate?priority=P4");
 		expect(res.status).toBe(200);
 		const body = (await res.json()) as AutoWorkCostEstimateResponse;
@@ -380,7 +367,7 @@ describe("GET /auto-work/cost-estimate", () => {
 			completeAutoWorkRun(runId, { status: "completed", pctConsumed: i });
 		}
 
-		const app = buildAutoWorkRouter(fakeBridge([]));
+		const app = buildAutoWorkRouter(fakeBridge([]), fakeConfig());
 		const res = await app.request("/auto-work/cost-estimate?priority=P2");
 		const body = (await res.json()) as AutoWorkCostEstimateResponse;
 		expect(body.sampleSize).toBe(10);
@@ -440,6 +427,13 @@ describe("POST /auto-work/trigger", () => {
 		} as unknown as AgentBridge;
 	}
 
+	// Stubs `gh pr create` for the route-level trigger tests below — a real
+	// invocation is never wanted here (this router doesn't own the PR
+	// mechanics; that's covered by `auto-work/engine.test.ts`).
+	async function stubCreatePullRequest() {
+		return { url: "https://github.com/jaesbit/omp-deck/pull/999", number: 999 };
+	}
+
 	function runGit(args: string[], cwd: string): void {
 		const result = Bun.spawnSync({ cmd: ["git", ...args], cwd, stdout: "pipe", stderr: "pipe" });
 		if (result.exitCode !== 0) throw new Error(`git ${args.join(" ")} failed: ${result.stderr.toString()}`);
@@ -474,12 +468,12 @@ describe("POST /auto-work/trigger", () => {
 
 
 	test("requires a cwd query param", async () => {
-		const app = buildAutoWorkRouter(triggerBridge(new FakeSessionHandle("s", 10)));
+		const app = buildAutoWorkRouter(triggerBridge(new FakeSessionHandle("s", 10)), fakeConfig());
 		expect((await app.request("/auto-work/trigger", { method: "POST" })).status).toBe(400);
 	});
 
 	test("rejects a cwd outside the allowed root", async () => {
-		const app = buildAutoWorkRouter(triggerBridge(new FakeSessionHandle("s", 10)));
+		const app = buildAutoWorkRouter(triggerBridge(new FakeSessionHandle("s", 10)), fakeConfig());
 		const res = await app.request(`/auto-work/trigger?cwd=${encodeURIComponent("/definitely/not/allowed")}`, {
 			method: "POST",
 		});
@@ -490,8 +484,9 @@ describe("POST /auto-work/trigger", () => {
 		setAutoWorkConfig(repoCwd, { ...DEFAULT_AUTO_WORK_VALUES, enabled: true });
 		const task = createTask({ title: "Trigger me", cwd: repoCwd, priority: "P5", autoWork: true });
 
-		const app = buildAutoWorkRouter(triggerBridge(new FakeSessionHandle("sess_trigger", 10)), {
-			fetcherOverride: stubUsageFetcher(0.05),
+		const app = buildAutoWorkRouter(triggerBridge(new FakeSessionHandle("sess_trigger", 10)), fakeConfig(), {
+			createPullRequest: stubCreatePullRequest,
+			getSubscriptionUsage: async () => ({ available: true, weeklyPct: 5 }),
 		});
 		const res = await app.request(`/auto-work/trigger?cwd=${encodeURIComponent(repoCwd)}`, { method: "POST" });
 		expect(res.status).toBe(200);
@@ -499,7 +494,7 @@ describe("POST /auto-work/trigger", () => {
 		expect(body.outcome).toBe("completed");
 		expect(body.taskId).toBe(task.id);
 
-		expect(getTask(task.id)?.stateId).toBe("s_active");
+		expect(getTask(task.id)?.stateId).toBe("s_validate");
 		expect(listAutoWorkRuns({ taskId: task.id })[0]?.status).toBe("completed");
 	});
 
@@ -517,9 +512,11 @@ describe("POST /auto-work/trigger", () => {
 
 		const liveHandle = new FakeSessionHandle("in-flight", 10);
 		const decoyHandle = new FakeSessionHandle("sess_2", 10);
-		const app = buildAutoWorkRouter(triggerBridge(decoyHandle, { liveSessions: new Map([["in-flight", liveHandle]]) }), {
-			fetcherOverride: stubUsageFetcher(0.05),
-		});
+		const app = buildAutoWorkRouter(
+			triggerBridge(decoyHandle, { liveSessions: new Map([["in-flight", liveHandle]]) }),
+			fakeConfig(),
+			{ createPullRequest: stubCreatePullRequest, getSubscriptionUsage: async () => ({ available: true, weeklyPct: 5 }) },
+		);
 		const res = await app.request(`/auto-work/trigger?cwd=${encodeURIComponent(repoCwd)}`, { method: "POST" });
 		expect(res.status).toBe(200);
 		const body = (await res.json()) as { outcome: string; taskId?: string; runId?: string; sessionId?: string };

@@ -36,11 +36,13 @@ import type {
 } from "@omp-deck/protocol";
 
 import type { AgentBridge } from "./bridge/types.ts";
+import type { Config } from "./config.ts";
 import { isCwdAllowed } from "./routes-fs.ts";
 import { getAutoWorkConfig, setAutoWorkConfig } from "./db/auto-work.ts";
 import { getAutoWorkCostEstimate, listAutoWorkRuns } from "./db/auto-work-runs.ts";
+import { getDeckBaseUrl } from "./db/server-settings.ts";
 import { runAutoWorkCycle } from "./auto-work/engine.ts";
-import { getSubscriptionUsage, type UsageReportsFetcher } from "./usage-subscription.ts";
+import type { RunAutoWorkCycleOptions } from "./auto-work/engine.ts";
 import { logger } from "./log.ts";
 
 const log = logger("routes:auto-work");
@@ -48,17 +50,7 @@ const log = logger("routes:auto-work");
 const TASK_PRIORITIES: TaskPriority[] = ["P0", "P1", "P2", "P3", "P4", "P5"];
 const RUN_STATUSES: AutoWorkRunStatus[] = ["running", "completed", "failed", "timed_out"];
 
-export interface BuildAutoWorkRouterOptions {
-	/**
-	 * Test-only: override the usage-reports fetcher injected into the
-	 * `/auto-work/trigger` cycle's subscription-usage pre-flight check,
-	 * avoiding the real `getDeckAuthStorage()` call. Mirrors
-	 * `BuildUsageRouterOptions` in `routes-usage.ts`.
-	 */
-	fetcherOverride?: UsageReportsFetcher;
-}
-
-export function buildAutoWorkRouter(bridge: AgentBridge, options: BuildAutoWorkRouterOptions = {}): Hono {
+export function buildAutoWorkRouter(bridge: AgentBridge, config: Config, cycleOptions: RunAutoWorkCycleOptions = {}): Hono {
 	const app = new Hono();
 
 	app.get("/auto-work/config", (c) => {
@@ -172,7 +164,8 @@ export function buildAutoWorkRouter(bridge: AgentBridge, options: BuildAutoWorkR
 		}
 		try {
 			const result: AutoWorkCycleResult = await runAutoWorkCycle(cwd, bridge, {
-				getSubscriptionUsage: () => getSubscriptionUsage(options.fetcherOverride),
+				getDeckBaseUrl: () => getDeckBaseUrl(config).deckBaseUrl,
+				...cycleOptions,
 			});
 			return c.json(result);
 		} catch (err) {

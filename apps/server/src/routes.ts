@@ -338,7 +338,7 @@ export function buildRouter(
 	app.route("/auth/oauth", buildAuthOAuthRouter());
 	app.route("/onboarding", buildOnboardingRouter());
 	app.route("/", buildUsageRouter(bridge));
-	app.route("/", buildAutoWorkRouter(bridge));
+	app.route("/", buildAutoWorkRouter(bridge, config));
 
 	return app;
 }
