@@ -94,6 +94,7 @@ export function buildAutoWorkRouter(bridge: AgentBridge, config: Config, cycleOp
 				timeWindows: body.timeWindows,
 				sessionPctLimit: body.sessionPctLimit,
 				weeklyPctLimit: body.weeklyPctLimit,
+				weeklyPctThreshold: body.weeklyPctThreshold,
 				defaultEstimatePctByPriority: body.defaultEstimatePctByPriority,
 				estimationBuffer: body.estimationBuffer,
 				timeoutMinutesByPriority: body.timeoutMinutesByPriority,
@@ -216,6 +217,10 @@ function validateShape(body: SetAutoWorkConfigRequest): string | undefined {
 	}
 	if (typeof body.weeklyPctLimit !== "number" || body.weeklyPctLimit < 0 || body.weeklyPctLimit > 100) {
 		return "weeklyPctLimit must be a number between 0 and 100";
+	}
+
+	if (typeof body.weeklyPctThreshold !== "number" || body.weeklyPctThreshold < 0 || body.weeklyPctThreshold > 100) {
+		return "weeklyPctThreshold must be a number between 0 and 100";
 	}
 
 	if (typeof body.defaultEstimatePctByPriority !== "object" || body.defaultEstimatePctByPriority === null) {

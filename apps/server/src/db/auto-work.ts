@@ -40,6 +40,9 @@ export const DEFAULT_TIMEOUT_MINUTES_BY_PRIORITY: Record<TaskPriority, number> =
 	P5: 45,
 };
 
+/** Default weekly-usage % at which the once-per-day Telegram budget warning fires (T-67). */
+export const DEFAULT_WEEKLY_PCT_THRESHOLD = 80;
+
 /** Disabled, no model overrides, full-day window, unrestricted spend, default cost estimates. */
 export const DEFAULT_AUTO_WORK_VALUES: Omit<AutoWorkConfig, "workspaceCwd" | "updatedAt"> = {
 	enabled: false,
@@ -47,6 +50,7 @@ export const DEFAULT_AUTO_WORK_VALUES: Omit<AutoWorkConfig, "workspaceCwd" | "up
 	timeWindows: [{ start: 0, end: 24 }],
 	sessionPctLimit: 100,
 	weeklyPctLimit: 100,
+	weeklyPctThreshold: DEFAULT_WEEKLY_PCT_THRESHOLD,
 	defaultEstimatePctByPriority: DEFAULT_ESTIMATE_PCT_BY_PRIORITY,
 	estimationBuffer: DEFAULT_ESTIMATION_BUFFER,
 	timeoutMinutesByPriority: DEFAULT_TIMEOUT_MINUTES_BY_PRIORITY,
@@ -59,6 +63,7 @@ interface Row {
 	time_windows: string; // JSON: AutoWorkTimeWindow[]
 	session_pct_limit: number;
 	weekly_pct_limit: number;
+	weekly_pct_threshold: number;
 	default_estimate_pct_by_priority: string;
 	estimation_buffer: number;
 	timeout_minutes_by_priority: string;
@@ -121,6 +126,7 @@ function rowToConfig(r: Row): AutoWorkConfig {
 		timeWindows: parseTimeWindows(r.time_windows),
 		sessionPctLimit: r.session_pct_limit,
 		weeklyPctLimit: r.weekly_pct_limit,
+		weeklyPctThreshold: r.weekly_pct_threshold,
 		defaultEstimatePctByPriority,
 		estimationBuffer: r.estimation_buffer,
 		timeoutMinutesByPriority,
@@ -133,7 +139,7 @@ export function getAutoWorkConfig(cwd: string): AutoWorkConfig {
 	const row = getDb()
 		.query<Row, [string]>(
 			`SELECT workspace_cwd, enabled, model_by_priority, time_windows,
-			        session_pct_limit, weekly_pct_limit, default_estimate_pct_by_priority,
+			        session_pct_limit, weekly_pct_limit, weekly_pct_threshold, default_estimate_pct_by_priority,
 			        estimation_buffer, timeout_minutes_by_priority, updated_at
 			 FROM auto_work_config WHERE workspace_cwd = ?`,
 		)
@@ -149,18 +155,19 @@ export function setAutoWorkConfig(
 ): AutoWorkConfig {
 	const db = getDb();
 	const now = nowIso();
-	db.prepare<unknown, [string, number, string, string, number, number, string, number, string, string]>(
+	db.prepare<unknown, [string, number, string, string, number, number, number, string, number, string, string]>(
 		`INSERT INTO auto_work_config
 		   (workspace_cwd, enabled, model_by_priority, time_windows,
-		    session_pct_limit, weekly_pct_limit, default_estimate_pct_by_priority,
+		    session_pct_limit, weekly_pct_limit, weekly_pct_threshold, default_estimate_pct_by_priority,
 		    estimation_buffer, timeout_minutes_by_priority, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(workspace_cwd) DO UPDATE SET
 		   enabled = excluded.enabled,
 		   model_by_priority = excluded.model_by_priority,
 		   time_windows = excluded.time_windows,
 		   session_pct_limit = excluded.session_pct_limit,
 		   weekly_pct_limit = excluded.weekly_pct_limit,
+		   weekly_pct_threshold = excluded.weekly_pct_threshold,
 		   default_estimate_pct_by_priority = excluded.default_estimate_pct_by_priority,
 		   estimation_buffer = excluded.estimation_buffer,
 		   timeout_minutes_by_priority = excluded.timeout_minutes_by_priority,
@@ -172,6 +179,7 @@ export function setAutoWorkConfig(
 		JSON.stringify(values.timeWindows),
 		values.sessionPctLimit,
 		values.weeklyPctLimit,
+		values.weeklyPctThreshold,
 		JSON.stringify(values.defaultEstimatePctByPriority),
 		values.estimationBuffer,
 		JSON.stringify(values.timeoutMinutesByPriority),

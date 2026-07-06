@@ -49,6 +49,8 @@ import { getDeckBaseUrl as getServerDeckBaseUrl } from "../db/server-settings.ts
 import { findStateByName, getTask, listTasks, moveTask, updateTask } from "../db/tasks.ts";
 import { getWorkspacePreference } from "../db/workspace-preferences.ts";
 import { logger } from "../log.ts";
+import { notify as sendAutoWorkNotification } from "./notify.ts";
+import type { AutoWorkNotificationEvent } from "./notify.ts";
 import { getSubscriptionUsage } from "../usage-subscription.ts";
 import { estimateTaskCostPct } from "./estimate.ts";
 
@@ -217,6 +219,12 @@ export function classifyRunningAutoWorkRun(
 // ─── Orchestrator (IO) ──────────────────────────────────────────────────────
 
 export interface RunAutoWorkCycleOptions {
+	/**
+	 * Sends a lifecycle/budget notification (T-67). Defaults to the real
+	 * Telegram-backed `notify()` in `./notify.ts`. Injectable for tests so
+	 * they can assert calls without a bot token or real Telegram API calls.
+	 */
+	notify?: (event: AutoWorkNotificationEvent) => Promise<void>;
 	/** Injectable for tests — defaults to the real cached subscription-usage lookup. */
 	getSubscriptionUsage?: () => Promise<{ available: boolean; weeklyPct?: number }>;
 	/** Injectable clock for tests — defaults to `new Date()`. */
@@ -256,6 +264,17 @@ export async function runAutoWorkCycle(
 	const subscriptionPctUsed = usage.available && typeof usage.weeklyPct === "number" ? usage.weeklyPct : null;
 	const resolveDeckBaseUrl = options.getDeckBaseUrl ?? (() => getServerDeckBaseUrl(loadConfig()).deckBaseUrl);
 	const createPullRequest = options.createPullRequest ?? createPullRequestViaGh;
+	const notify = options.notify ?? sendAutoWorkNotification;
+
+	// Weekly-usage budget warning (T-67) — a softer heads-up than
+	// `weeklyPctLimit`'s hard block, so it can fire even on a cycle that goes
+	// on to select and start a task. Evaluated once per cycle, independent of
+	// the preflight/selection outcome below; `notify()` itself dedupes to at
+	// most once per calendar day.
+	const weeklyThresholdHit = subscriptionPctUsed !== null && subscriptionPctUsed >= config.weeklyPctThreshold;
+	if (subscriptionPctUsed !== null && weeklyThresholdHit) {
+		await notify({ kind: "weekly_threshold", cwd, pctUsed: subscriptionPctUsed, thresholdPct: config.weeklyPctThreshold });
+	}
 
 	const allTasks = listTasks();
 	const workspaceTasks = allTasks.filter((t) => t.cwd === cwd);
@@ -270,6 +289,7 @@ export async function runAutoWorkCycle(
 		const resumed = await resumeOrRetireAutoWorkRun(cwd, bridge, runningRun, config, {
 			resolveDeckBaseUrl,
 			createPullRequest,
+			notify,
 		});
 		if (resumed) return resumed;
 		activeRuns = activeRuns.filter((r) => r.id !== runningRun.id);
@@ -306,6 +326,18 @@ export async function runAutoWorkCycle(
 				? "no eligible auto-work tasks in backlog (autoWork flag, dependencies, or state)"
 				: `${selection.consideredCount} eligible task(s) considered but none fit the current cost/budget limits`;
 		log.info(`cycle for ${cwd}: ${reason}`);
+		// Session-limit notification (T-67) — only for the "considered but none
+		// fit" case (a genuine budget-driven pause), and only when the weekly
+		// threshold warning above didn't already fire this cycle: sending both
+		// for the same skipped cycle would be redundant noise, so the weekly
+		// warning takes precedence (it is the broader, workspace-wide signal).
+		if (selection.kind === "none_fit" && !weeklyThresholdHit) {
+			await notify({
+				kind: "session_limit",
+				sessionPctUsed: subscriptionPctUsed ?? 0,
+				sessionPctLimit: config.sessionPctLimit,
+			});
+		}
 		return { outcome: "skipped", reason };
 	}
 
@@ -340,12 +372,27 @@ export async function runAutoWorkCycle(
 		worktreePath,
 	});
 	log.info(`run ${runId} started for T-${task.displayId}, session ${session.sessionId}, worktree ${worktreePath}`);
+	await notify({
+		kind: "task_started",
+		displayId: task.displayId,
+		title: task.title,
+		model: model ? `${model.provider}/${model.id}` : "default",
+	});
 
 	const prompt = `Trabaja en T-${task.displayId}: ${task.title}\n\n(contexto completo disponible via GET /api/tasks/${task.id})`;
 	await session.prompt(prompt);
 
 	const timeoutMinutes = resolveAutoWorkTimeoutMinutes(task.priority, config);
-	return finalizeAutoWorkRun({ runId, task, session, worktreePath, timeoutMinutes, resolveDeckBaseUrl, createPullRequest });
+	return finalizeAutoWorkRun({
+		runId,
+		task,
+		session,
+		worktreePath,
+		timeoutMinutes,
+		resolveDeckBaseUrl,
+		createPullRequest,
+		notify,
+	});
 }
 
 // ─── Small IO helpers ───────────────────────────────────────────────────────
@@ -373,8 +420,9 @@ async function finalizeAutoWorkRun(params: {
 	timeoutMinutes: number;
 	resolveDeckBaseUrl: () => string;
 	createPullRequest: (params: CreatePullRequestParams) => Promise<CreatePullRequestResult>;
+	notify: (event: AutoWorkNotificationEvent) => Promise<void>;
 }): Promise<AutoWorkCycleResult> {
-	const { runId, task, session, worktreePath, timeoutMinutes, resolveDeckBaseUrl, createPullRequest } = params;
+	const { runId, task, session, worktreePath, timeoutMinutes, resolveDeckBaseUrl, createPullRequest, notify } = params;
 	const terminal = await waitForAutoWorkSessionTerminal(session, timeoutMinutes * 60_000);
 
 	if (terminal === "timed_out") {
@@ -386,14 +434,15 @@ async function finalizeAutoWorkRun(params: {
 			body: `${task.body}\n\n---\n**Auto Work timeout** — run \`${runId}\` ${failureReason}. Session: \`${session.sessionId}\`, worktree: \`${worktreePath}\`.`,
 		});
 		log.warn(`run ${runId} timed out; T-${task.displayId} moved to blocked (${failureReason})`);
+		await notify({ kind: "task_failed", displayId: task.displayId, reason: failureReason });
 		return { outcome: "timed_out", taskId: task.id, runId, sessionId: session.sessionId, worktreePath };
 	}
-
 	const deckBaseUrl = resolveDeckBaseUrl();
 	const sessionUrl = buildSessionUrl(deckBaseUrl, session.sessionId);
 	const shortSessionId = session.sessionId.slice(0, 8);
 
 	let prNote: string;
+	let prNumber: number | undefined;
 	try {
 		const pr = await createPullRequest({
 			cwd: worktreePath,
@@ -401,6 +450,7 @@ async function finalizeAutoWorkRun(params: {
 			body: `Auto Work completed T-${task.displayId}: ${task.title}\n\nSession: ${sessionUrl}`,
 		});
 		prNote = `PR #${pr.number}`;
+		prNumber = pr.number;
 		log.info(`run ${runId}: opened PR #${pr.number} (${pr.url}) for T-${task.displayId}`);
 	} catch (err) {
 		prNote = "PR creation failed — open manually";
@@ -417,6 +467,13 @@ async function finalizeAutoWorkRun(params: {
 
 	completeAutoWorkRun(runId, { status: "completed" });
 	log.info(`run ${runId} completed for T-${task.displayId} — moved to validate`);
+	// Only announces completion once a PR actually exists — a fallback
+	// "open manually" note (PR creation failure, above) isn't a state the
+	// user needs paged about; it's already surfaced loudly in the task body
+	// and the logs.
+	if (prNumber !== undefined) {
+		await notify({ kind: "task_completed", displayId: task.displayId, prNumber });
+	}
 	return { outcome: "completed", taskId: task.id, runId, sessionId: session.sessionId, worktreePath };
 }
 
@@ -500,6 +557,7 @@ async function resumeOrRetireAutoWorkRun(
 	completion: {
 		resolveDeckBaseUrl: () => string;
 		createPullRequest: (params: CreatePullRequestParams) => Promise<CreatePullRequestResult>;
+		notify: (event: AutoWorkNotificationEvent) => Promise<void>;
 	},
 ): Promise<AutoWorkCycleResult | undefined> {
 	const handle = await resolveRunningSessionHandle(bridge, run);
@@ -539,6 +597,7 @@ async function resumeOrRetireAutoWorkRun(
 		timeoutMinutes,
 		resolveDeckBaseUrl: completion.resolveDeckBaseUrl,
 		createPullRequest: completion.createPullRequest,
+		notify: completion.notify,
 	});
 }
 

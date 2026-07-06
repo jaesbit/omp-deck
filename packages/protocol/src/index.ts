@@ -1912,6 +1912,13 @@ export interface AutoWorkConfig {
 	/** Ceiling on cumulative weekly auto-work spend, as % of the weekly budget, 0–100. */
 	weeklyPctLimit: number;
 	/**
+	 * Weekly subscription usage % (0–100) at which a one-per-calendar-day
+	 * "budget warning" Telegram notification fires (T-67). Independent of
+	 * `weeklyPctLimit`, which hard-blocks new runs — this is a softer
+	 * heads-up that can fire while the workspace is still allowed to run.
+	 */
+	weeklyPctThreshold: number;
+	/**
 	 * Default cost estimate (% of a session budget) per priority, used by
 	 * `estimateTaskCostPct` (T-63) when no completed run history exists yet
 	 * for that priority.
@@ -1936,6 +1943,7 @@ export interface SetAutoWorkConfigRequest {
 	timeWindows: AutoWorkTimeWindow[];
 	sessionPctLimit: number;
 	weeklyPctLimit: number;
+	weeklyPctThreshold: number;
 	defaultEstimatePctByPriority: Record<TaskPriority, number>;
 	estimationBuffer: number;
 	timeoutMinutesByPriority: Record<TaskPriority, number>;
