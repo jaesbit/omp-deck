@@ -1203,6 +1203,12 @@ export interface Task {
 	 */
 	stateEnteredAt: string;
 	archivedAt?: string;
+	/**
+	 * Task ids this task is blocked on (T-57). Always present, empty when
+	 * there are no dependencies. Auto-work (T-64) treats a task as blocked
+	 * while any entry here refers to a task not in a `done`-flavored state.
+	 */
+	dependsOn: string[];
 }
 
 export interface CreateTaskRequest {
@@ -1211,6 +1217,7 @@ export interface CreateTaskRequest {
 	stateId?: string;
 	cwd?: string;
 	priority?: TaskPriority;
+	dependsOn?: string[];
 }
 
 export interface UpdateTaskRequest {
@@ -1221,6 +1228,8 @@ export interface UpdateTaskRequest {
 	cwd?: string;
 	archived?: boolean;
 	priority?: TaskPriority;
+	/** Replaces the full dependency set when present (T-57). */
+	dependsOn?: string[];
 }
 
 export interface ListTasksResponse {

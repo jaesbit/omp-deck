@@ -1,9 +1,10 @@
-import { useEffect, useState } from "react";
-import { Archive, Bot, MessageSquarePlus, RotateCcw, Trash2, X } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
+import { Archive, Bot, CheckCircle2, Circle, Link2, MessageSquarePlus, RotateCcw, Trash2, X } from "lucide-react";
 import type { Task, TaskPriority, TaskState } from "@omp-deck/protocol";
 
 import { MarkdownEdit } from "@/components/MarkdownEdit";
 import { Modal } from "@/components/ui/Modal";
+import { candidateDependencyTasks, resolveDependencyTasks, resolveDependentTasks } from "@/lib/task-dependencies";
 import { cn } from "@/lib/utils";
 
 const PRIORITIES: TaskPriority[] = ["P0", "P1", "P2", "P3", "P4", "P5"];
@@ -11,8 +12,17 @@ const PRIORITIES: TaskPriority[] = ["P0", "P1", "P2", "P3", "P4", "P5"];
 interface Props {
 	task: Task | null;
 	states: TaskState[];
+	/** Full task list, used to resolve dependency titles/state (T-57). */
+	allTasks: Task[];
 	onClose: () => void;
-	onSave: (patch: { title?: string; body?: string; stateId?: string; cwd?: string; priority?: TaskPriority }) => void;
+	onSave: (patch: {
+		title?: string;
+		body?: string;
+		stateId?: string;
+		cwd?: string;
+		priority?: TaskPriority;
+		dependsOn?: string[];
+	}) => void;
 	onDelete: () => void;
 	onArchive: () => void;
 	onOpenInChat: () => void;
@@ -31,6 +41,7 @@ interface Props {
 export function TaskModal({
 	task,
 	states,
+	allTasks,
 	onClose,
 	onSave,
 	onDelete,
@@ -53,6 +64,21 @@ export function TaskModal({
 		setCwd(task.cwd ?? "");
 	}, [task]);
 
+	// Resolved-to-full-Task dependency lists for the picker (T-57); pure logic
+	// lives in task-dependencies.ts so it has plain unit tests.
+	const dependencyTasks = useMemo(
+		() => (task ? resolveDependencyTasks(task, allTasks) : []),
+		[task, allTasks],
+	);
+	const candidateTasks = useMemo(
+		() => (task ? candidateDependencyTasks(task, allTasks) : []),
+		[task, allTasks],
+	);
+	const dependentTasks = useMemo(
+		() => (task ? resolveDependentTasks(task, allTasks) : []),
+		[task, allTasks],
+	);
+
 	if (!task) return null;
 
 	function commitTitle(): void {
@@ -72,6 +98,14 @@ export function TaskModal({
 		if (!task) return;
 		const next = cwd.trim() || undefined;
 		if ((task.cwd ?? "") !== (next ?? "")) onSave({ cwd: next });
+	}
+	function addDependency(depId: string): void {
+		if (!task || !depId || task.dependsOn.includes(depId)) return;
+		onSave({ dependsOn: [...task.dependsOn, depId] });
+	}
+	function removeDependency(depId: string): void {
+		if (!task) return;
+		onSave({ dependsOn: task.dependsOn.filter((id) => id !== depId) });
 	}
 
 	const isArchived = Boolean(task.archivedAt);
@@ -182,6 +216,95 @@ export function TaskModal({
 				</div>
 			</div>
 
+			<div className="shrink-0 border-b border-line px-6 py-3">
+				<div className="mb-2 flex items-center gap-1.5 font-mono text-2xs uppercase tracking-meta text-ink-4">
+					<Link2 className="h-3.5 w-3.5" />
+					<span>Depends on</span>
+				</div>
+				<div className="flex flex-wrap items-center gap-1.5">
+					{dependencyTasks.map((dep) => {
+						const depState = states.find((s) => s.id === dep.stateId);
+						const isDone = depState?.name.toLowerCase() === "done";
+						return (
+							<span
+								key={dep.id}
+								className="inline-flex items-center gap-1.5 rounded-md border border-line bg-paper-2 py-1 pl-2 pr-1 text-xs text-ink-2"
+								title={dep.title}
+							>
+								{isDone ? (
+									<CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-success" />
+								) : (
+									<Circle
+										className="h-3.5 w-3.5 shrink-0"
+										style={{ color: depState?.color ?? "var(--ink-3, #6e6a62)" }}
+									/>
+								)}
+								<span className="font-mono text-2xs text-ink-4">T-{dep.displayId}</span>
+								<span className="max-w-[16rem] truncate">{dep.title || "Untitled task"}</span>
+								<span className="text-2xs text-ink-4">{depState?.name ?? "?"}</span>
+								<button
+									type="button"
+									onClick={() => removeDependency(dep.id)}
+									aria-label={`Remove dependency T-${dep.displayId}`}
+									className="flex h-4 w-4 items-center justify-center rounded-sm text-ink-4 hover:bg-danger/10 hover:text-danger"
+								>
+									<X className="h-3 w-3" />
+								</button>
+							</span>
+						);
+					})}
+					{candidateTasks.length > 0 ? (
+						<select
+							value=""
+							onChange={(e) => addDependency(e.target.value)}
+							className="field h-7 px-2 text-2xs"
+							aria-label="Add dependency"
+						>
+							<option value="">+ Add dependency…</option>
+							{candidateTasks.map((c) => (
+								<option key={c.id} value={c.id}>
+									T-{c.displayId} {c.title || "Untitled task"}
+								</option>
+							))}
+						</select>
+					) : dependencyTasks.length === 0 ? (
+						<span className="text-2xs text-ink-4">No other tasks to depend on yet.</span>
+					) : null}
+				</div>
+			</div>
+			{dependentTasks.length > 0 && (
+				<div className="shrink-0 border-b border-line px-6 py-3">
+					<div className="mb-2 flex items-center gap-1.5 font-mono text-2xs uppercase tracking-meta text-ink-4">
+						<Link2 className="h-3.5 w-3.5" />
+						<span>Required by</span>
+					</div>
+					<div className="flex flex-wrap items-center gap-1.5">
+						{dependentTasks.map((dep) => {
+							const depState = states.find((s) => s.id === dep.stateId);
+							const isDone = depState?.name.toLowerCase() === "done";
+							return (
+								<span
+									key={dep.id}
+									className="inline-flex items-center gap-1.5 rounded-md border border-line bg-paper-2 py-1 px-2 text-xs text-ink-2"
+									title={dep.title}
+								>
+									{isDone ? (
+										<CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-success" />
+									) : (
+										<Circle
+											className="h-3.5 w-3.5 shrink-0"
+											style={{ color: depState?.color ?? "var(--ink-3, #6e6a62)" }}
+										/>
+									)}
+									<span className="font-mono text-2xs text-ink-4">T-{dep.displayId}</span>
+									<span className="max-w-[16rem] truncate">{dep.title || "Untitled task"}</span>
+									<span className="text-2xs text-ink-4">{depState?.name ?? "?"}</span>
+								</span>
+							);
+						})}
+					</div>
+				</div>
+			)}
 			<div className="min-h-0 flex-1 overflow-y-auto px-6 py-5">
 				<MarkdownEdit
 					value={task.body}

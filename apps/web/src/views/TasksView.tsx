@@ -484,6 +484,7 @@ export function TasksView() {
 			<TaskModal
 				task={openTask ?? null}
 				states={states}
+				allTasks={tasks}
 				onClose={() => setOpenTask(undefined)}
 				onSave={(patch) => void saveTask(patch)}
 				onDelete={() => void deleteOpenTask()}
