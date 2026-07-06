@@ -1012,7 +1012,7 @@ async function selectTaskWithModel(
 			log.warn("global task selector timed out; using priority order");
 			return undefined;
 		}
-		const response = latestAssistantText(session.snapshot().messages);
+		const response = latestAssistantText((await session.snapshot()).messages);
 		const match = candidates.find((candidate) => response.trim() === candidate.task.id);
 		if (!match) {
 			log.warn(`global task selector returned an invalid task ID; using priority order`);

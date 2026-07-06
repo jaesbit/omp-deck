@@ -59,12 +59,13 @@ The deck can now create, pause, resume, and cancel autonomous multi-turn goals t
 ### Fixed
 
 - **Orphaned session handle on resume/create collision.** A resume/create call for a `sessionId` already tracked in the bridge's active map silently overwrote that map entry, orphaning the previous handle — its subscriptions and any in-flight turn kept running forever with no way to reach or abort it. The superseded instance is now disposed before being replaced, so at most one in-process handle ever drives a given session file.
+- **Cross-session IRC/subagent isolation.** Each active deck root session now owns a dedicated Bun child process running the omp SDK. Process-global SDK state (`AgentRegistry`, `IrcBus`, subagent lifecycle) is therefore scoped to one root tree instead of leaking between concurrent browser sessions whose agents reuse names such as `Main` or `Worker`. The parent keeps the existing `AgentBridge` API, proxies it over typed Bun IPC, forwards child broadcast frames once, and tears the child down on session deletion, idle reap, crash, or server shutdown. `@oh-my-pi/pi-coding-agent` / `pi-ai` are upgraded from `16.3.4` to `16.3.11`; the old IRC patch is removed rather than ported.
 
 ### Docs
 
 - `README.md` — "What you get" gains Goal Mode and multi-tab session continuity; feature comparison table unchanged (still deck-vs-competitor scope, not a full feature log).
 - `docs/tui-parity.md` — Goal Mode added to "What omp-deck adds on top of the TUI"; multi-session sidebar note updated with deep-link reconnect; kanban bullet updated with workspace color markers + filter.
-- `docs/architecture.md` — `sessions_changed` added to the broadcast-frame list; `workspace_preferences` and `tasks.priority` documented in the database table inventory.
+- `docs/architecture.md` — per-root child-process SDK isolation and typed IPC ownership documented; `sessions_changed` added to the broadcast-frame list; `workspace_preferences` and `tasks.priority` documented in the database table inventory.
 - `docs/slash-commands.md` — new `/goal` section alongside `/plan`.
 - `docs/configuration.md` — no new env vars this round (workspace model defaults and the abort shortcut are both UI-configured, not env-driven); new "Browser-local settings" table cross-references both instead of duplicating env-var-shaped docs for non-env settings.
 

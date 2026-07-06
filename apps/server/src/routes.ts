@@ -168,7 +168,7 @@ export function buildRouter(
 	 * sessions — the client is by construction subscribed (and thus the
 	 * session active) whenever it pages.
 	 */
-	app.get("/sessions/:id/history", (c) => {
+	app.get("/sessions/:id/history", async (c) => {
 		const id = c.req.param("id");
 		const handle = bridge.getSession(id);
 		if (!handle) return c.json({ error: "session not active" }, 404);
@@ -178,7 +178,7 @@ export function buildRouter(
 		}
 		const limitRaw = Number(c.req.query("limit"));
 		const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(limitRaw, 1), 500) : 100;
-		const body: SessionHistoryResponse = handle.getHistory(before, limit);
+		const body: SessionHistoryResponse = await handle.getHistory(before, limit);
 		return c.json(body);
 	});
 

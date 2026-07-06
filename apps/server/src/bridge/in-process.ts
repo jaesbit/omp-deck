@@ -3,10 +3,9 @@ import {
 	ModelRegistry,
 	SessionManager,
 	settings as ompSettings,
-	type AgentSession,
 } from "@oh-my-pi/pi-coding-agent";
+import type { AgentSession, CreateAgentSessionResult } from "@oh-my-pi/pi-coding-agent";
 import { getLatestTodoPhasesFromEntries } from "@oh-my-pi/pi-coding-agent/tools/todo";
-import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { getEnvApiKey } from "@oh-my-pi/pi-ai";
 import { runExtensionCompact, runExtensionSetModel } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/compact-handler";
 import { getSessionSlashCommands } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/get-commands-handler";
@@ -24,12 +23,15 @@ import { executeAcpBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-c
 import type {
 	AgentMessageJson,
 	AgentSessionEventJson,
+	ContextUsage,
 	ExtUiDialogResponse,
+	ImageAttachment,
 	ModelInfo,
 	ModelRef,
 	GoalModeContextWire,
 	PendingPlanApprovalWire,
 	PlanModeContextWire,
+	QueuedPromptWire,
 	ServerFrame,
 	SessionHistoryResponse,
 	SessionSnapshot,
@@ -37,14 +39,17 @@ import type {
 	SessionSummary,
 } from "@omp-deck/protocol";
 
+import type { DeckSlashResult } from "../deck-slash-commands.ts";
 import { logger } from "../log.ts";
 import { getDeckModelRegistry } from "../auth-singleton.ts";
 import { looksLikePlaceholderKey } from "../credential-quality.ts";
 import { getEffectivePrelude } from "../orientation-store.ts";
 import { notificationService } from "../notifications/index.ts";
 import { ExtensionUIBridge } from "./ext-ui-bridge.ts";
-import { GoalModeBridge, type GoalModeState } from "./goal-mode-bridge.ts";
+import { GoalModeBridge } from "./goal-mode-bridge.ts";
+import type { GoalAction, GoalModeSessionSurface, GoalModeState } from "./goal-mode-bridge.ts";
 import { PlanModeBridge } from "./plan-mode-bridge.ts";
+import type { PlanModeSessionSurface } from "./plan-mode-bridge.ts";
 import type {
 	AgentBridge,
 	CreateSessionOpts,
@@ -169,12 +174,10 @@ export class InProcessAgentBridge implements AgentBridge {
 
 	async createSession(opts: CreateSessionOpts): Promise<SessionHandle> {
 		const sessionManager = SessionManager.create(opts.cwd);
-		const agentRegistry = new AgentRegistry();
 		const modelRegistry = await this.ensureModelRegistry();
 		const result = await createAgentSession({
 			cwd: opts.cwd,
 			sessionManager,
-			agentRegistry,
 			modelRegistry,
 			authStorage: modelRegistry.authStorage,
 			// Skip eval-tool Python warmup on session create. On Windows this otherwise
@@ -227,13 +230,11 @@ export class InProcessAgentBridge implements AgentBridge {
 			}
 		}
 		const cwd = (sessionManager.getCwd?.() as string | undefined) ?? process.cwd();
-		const agentRegistry = new AgentRegistry();
 		const modelRegistry = await this.ensureModelRegistry();
 		const result = await createAgentSession({
 			cwd,
 			sessionManager,
 			modelRegistry,
-			agentRegistry,
 			authStorage: modelRegistry.authStorage,
 			skipPythonPreflight: true,
 			systemPrompt: (defaults) => [getEffectivePrelude(), ...defaults],
@@ -520,7 +521,7 @@ export class InProcessAgentBridge implements AgentBridge {
 		session: AgentSession,
 		cwd: string,
 		sessionManager: SessionManager,
-		setToolUIContext: import("@oh-my-pi/pi-coding-agent").CreateAgentSessionResult["setToolUIContext"],
+		setToolUIContext: CreateAgentSessionResult["setToolUIContext"],
 	): Promise<InProcessSessionHandle> {
 		const sessionId = (session as any).sessionId as string;
 		const uiBridge = new ExtensionUIBridge(sessionId);
@@ -531,13 +532,13 @@ export class InProcessAgentBridge implements AgentBridge {
 
 		const planBridge = new PlanModeBridge({
 			sessionId,
-			session: session as unknown as import("./plan-mode-bridge.ts").PlanModeSessionSurface,
+			session: session as unknown as PlanModeSessionSurface,
 			getArtifactsDir: () => (sessionManager as unknown as { getArtifactsDir: () => string | null }).getArtifactsDir(),
 			getSessionId: () => (sessionManager as unknown as { getSessionId: () => string | null }).getSessionId(),
 		});
 
 		const goalBridge = new GoalModeBridge(
-			session as unknown as import("./goal-mode-bridge.ts").GoalModeSessionSurface,
+			session as unknown as GoalModeSessionSurface,
 			() => planBridge.exit("user_cancelled"),
 		);
 
@@ -784,7 +785,7 @@ export class InProcessSessionHandle implements SessionHandle {
 	 * for cancel/edit targeting, so client and server agree without a
 	 * separate id mapping table.
 	 */
-	private shadowQueue: import("@omp-deck/protocol").QueuedPromptWire[] = [];
+	private shadowQueue: QueuedPromptWire[] = [];
 
 	constructor(args: {
 		session: AgentSession;
@@ -923,13 +924,13 @@ export class InProcessSessionHandle implements SessionHandle {
 		return sliceHistoryPage(this.allMessages(), before, limit);
 	}
 
-	getContextUsage(): import("@omp-deck/protocol").ContextUsage | undefined {
+	getContextUsage(): ContextUsage | undefined {
 		// The SDK exposes `session.getContextUsage()` returning
 		// `{ tokens: number | null, contextWindow: number, percent: number | null }`
 		// or `undefined` when the model has no declared window. We pass it through
 		// verbatim — the deck's protocol type mirrors the SDK shape.
 		const s = this.session as unknown as {
-			getContextUsage?: () => import("@omp-deck/protocol").ContextUsage | undefined;
+			getContextUsage?: () => ContextUsage | undefined;
 		};
 		if (typeof s.getContextUsage !== "function") return undefined;
 		try {
@@ -975,7 +976,7 @@ export class InProcessSessionHandle implements SessionHandle {
 
 	async dispatchDeckSlashCommand(text: string): Promise<SlashDispatchResult> {
 		if (!text.startsWith("/")) return { kind: "fallthrough" };
-		let result: import("../deck-slash-commands.ts").DeckSlashResult | "fallthrough";
+		let result: DeckSlashResult | "fallthrough";
 		try {
 			const { executeDeckSlashCommand } = await import("../deck-slash-commands.ts");
 			result = await executeDeckSlashCommand(text, { cwd: this.cwd });
@@ -1049,7 +1050,7 @@ export class InProcessSessionHandle implements SessionHandle {
 
 	async prompt(
 		text: string,
-		opts?: { streamingBehavior?: "steer" | "followUp"; images?: import("@omp-deck/protocol").ImageAttachment[] },
+		opts?: { streamingBehavior?: "steer" | "followUp"; images?: ImageAttachment[] },
 	): Promise<void> {
 		// Snapshot the streaming flag BEFORE calling the SDK so we can tell
 		// whether the SDK queued this prompt (was streaming) or ran it immediately.
@@ -1067,7 +1068,7 @@ export class InProcessSessionHandle implements SessionHandle {
 			// slash/template expansion) so head-drain matching survives expansion.
 			// Falls back to the raw text when the SDK doesn't expose getQueuedMessages.
 			const storedText = this.readLastQueuedText(behavior) ?? text;
-			const entry: import("@omp-deck/protocol").QueuedPromptWire = {
+			const entry: QueuedPromptWire = {
 				id: queuedId,
 				text: storedText,
 				behavior,
@@ -1097,7 +1098,7 @@ export class InProcessSessionHandle implements SessionHandle {
 		return typeof s.queuedMessageCount === "number" ? s.queuedMessageCount : 0;
 	}
 
-	getQueueSnapshot(): import("@omp-deck/protocol").QueuedPromptWire[] {
+	getQueueSnapshot(): QueuedPromptWire[] {
 		return [...this.shadowQueue];
 	}
 
@@ -1130,7 +1131,7 @@ export class InProcessSessionHandle implements SessionHandle {
 	async editQueuedById(
 		id: string,
 		text: string,
-		images?: import("@omp-deck/protocol").ImageAttachment[],
+		images?: ImageAttachment[],
 	): Promise<boolean> {
 		const idx = this.shadowQueue.findIndex((q) => q.id === id);
 		if (idx < 0) return false;
@@ -1153,7 +1154,7 @@ export class InProcessSessionHandle implements SessionHandle {
 	 */
 	private async rebuildQueueExcept(
 		targetIdx: number,
-		replace: { text: string; images?: import("@omp-deck/protocol").ImageAttachment[] } | undefined,
+		replace: { text: string; images?: ImageAttachment[] } | undefined,
 	): Promise<void> {
 		const sdk = this.session as unknown as {
 			popLastQueuedMessage?: () => string | undefined;
@@ -1164,12 +1165,12 @@ export class InProcessSessionHandle implements SessionHandle {
 		}
 		// Capture survivors with original ids preserved. The edited entry
 		// keeps its id so the deck bubble doesn't re-key.
-		const survivors: import("@omp-deck/protocol").QueuedPromptWire[] = [];
+		const survivors: QueuedPromptWire[] = [];
 		for (let i = 0; i < this.shadowQueue.length; i++) {
 			const entry = this.shadowQueue[i]!;
 			if (i === targetIdx) {
 				if (!replace) continue;
-				const next: import("@omp-deck/protocol").QueuedPromptWire = {
+				const next: QueuedPromptWire = {
 					id: entry.id,
 					text: replace.text,
 					behavior: entry.behavior,
@@ -1240,13 +1241,13 @@ export class InProcessSessionHandle implements SessionHandle {
 	 * keep their id; any extras get a fresh uuid.
 	 */
 	private resyncShadowFromSdk(
-		previous: import("@omp-deck/protocol").QueuedPromptWire[],
-	): import("@omp-deck/protocol").QueuedPromptWire[] {
+		previous: QueuedPromptWire[],
+	): QueuedPromptWire[] {
 		const q = this.readQueuedTextsByBehavior();
 		const ordered: { text: string; behavior: "steer" | "followUp" }[] = [];
 		for (const t of q.steering) ordered.push({ text: t, behavior: "steer" });
 		for (const t of q.followUp) ordered.push({ text: t, behavior: "followUp" });
-		const out: import("@omp-deck/protocol").QueuedPromptWire[] = [];
+		const out: QueuedPromptWire[] = [];
 		for (let i = 0; i < ordered.length; i++) {
 			const prev = previous[i];
 			const e = ordered[i]!;
@@ -1316,7 +1317,7 @@ export class InProcessSessionHandle implements SessionHandle {
 		return this.planBridge.respond(proposalId, response);
 	}
 
-	async actOnGoal(action: import("./goal-mode-bridge.ts").GoalAction): Promise<void> {
+	async actOnGoal(action: GoalAction): Promise<void> {
 		await this.goalBridge.act(action);
 	}
 
