@@ -17,6 +17,7 @@ import type {
 	ListWorkspacePreferencesResponse,
 	ListWorkspacesResponse,
 	ModelRef,
+	SessionHistoryResponse,
 	SetAutoWorkConfigRequest,
 	SetAutoWorkGlobalConfigRequest,
 	SetDeckBaseUrlRequest,
@@ -55,6 +56,11 @@ export const api = {
 	listSessions(cwd?: string): Promise<ListSessionsResponse> {
 		const q = cwd ? `?cwd=${encodeURIComponent(cwd)}` : "";
 		return request<ListSessionsResponse>(`/sessions${q}`);
+	},
+	sessionHistory(id: string, before: number, limit: number): Promise<SessionHistoryResponse> {
+		return request<SessionHistoryResponse>(
+			`/sessions/${encodeURIComponent(id)}/history?before=${before}&limit=${limit}`,
+		);
 	},
 	createSession(body: CreateSessionRequest): Promise<CreateSessionResponse> {
 		return request<CreateSessionResponse>("/sessions", {

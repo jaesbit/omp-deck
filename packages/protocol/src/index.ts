@@ -836,7 +836,26 @@ export interface SessionSnapshot {
 	model?: ModelRef;
 	thinkingLevel?: string;
 	isStreaming: boolean;
+	/**
+	 * Tail window of the session's message history. For long conversations
+	 * only the most recent messages are included (see `messagesStartIndex` /
+	 * `messagesTotal`); older pages are fetched on demand via
+	 * `GET /sessions/:id/history`.
+	 */
 	messages: AgentMessageJson[];
+	/**
+	 * Index (into the full server-side history) of `messages[0]`. `0` (or
+	 * absent) means the snapshot carries the complete history.
+	 */
+	messagesStartIndex?: number;
+	/** Total number of messages in the full server-side history. */
+	messagesTotal?: number;
+	/**
+	 * Token/cost totals accumulated over the FULL history — not just the
+	 * tail included in `messages`. The client seeds its cost strip from this
+	 * so tail-sliced snapshots don't under-report session cost.
+	 */
+	usageRollup?: UsageRollupWire;
 	todoPhases: Array<Record<string, unknown>>;
 	/**
 	 * Current context-window utilization, mirroring the SDK's
@@ -867,6 +886,30 @@ export interface SessionSnapshot {
 	 * queue immediately instead of waiting for the next `queue_state` event.
 	 */
 	queuedPrompts?: QueuedPromptWire[];
+}
+
+/**
+ * Aggregated token/cost usage across a set of assistant messages. Mirrors
+ * the web client's local rollup shape so a snapshot can seed it directly.
+ */
+export interface UsageRollupWire {
+	input: number;
+	output: number;
+	cacheRead: number;
+	cacheWrite: number;
+	totalTokens: number;
+	cost: number;
+	reasoningTokens?: number;
+}
+
+/**
+ * Response of `GET /sessions/:id/history?before=<index>&limit=<n>` — one
+ * page of messages older than `before`. `startIndex` is the history index
+ * of `messages[0]`; when it reaches 0 the client has the full history.
+ */
+export interface SessionHistoryResponse {
+	messages: AgentMessageJson[];
+	startIndex: number;
 }
 
 /**

@@ -45,6 +45,9 @@ function fakeBridge(): {
 		snapshot() {
 			return {};
 		},
+		getHistory() {
+			return { messages: [], startIndex: 0 };
+		},
 	};
 
 	return {
@@ -136,6 +139,81 @@ describe("WsHub subscription ownership", () => {
 
 			expect(frames(socket)).toEqual([]);
 			expect(removed).toEqual([{ sessionId: "session-1", connectionId: socket.data.connectionId }]);
+		} finally {
+			hub.onClose(socket as unknown as ServerWebSocket<ConnectionData>);
+			hub.dispose();
+		}
+	});
+});
+
+/**
+ * The subscribe path routes session events through a per-subscriber
+ * StreamCoalescer (default 1s interval): streaming updates are throttled to
+ * a leading-edge emit + one flush per interval, everything else passes
+ * through immediately. These cases only assert the synchronous paths — the
+ * timer schedule itself is covered in stream-coalescer.test.ts.
+ */
+describe("WsHub stream coalescing", () => {
+	test("delivers the first streaming update, buffers the burst, and drops it when message_end supersedes", async () => {
+		const { bridge, emitSessionEvent } = fakeBridge();
+		const hub = new WsHub(bridge, noopSkills);
+		const socket = makeSocket(hub);
+		try {
+			await hub.onMessage(
+				socket as unknown as ServerWebSocket<ConnectionData>,
+				JSON.stringify({ type: "subscribe", sessionId: "session-1" }),
+			);
+			socket.sent.length = 0;
+
+			const u1 = { type: "message_update", message: { role: "assistant", content: "He" } };
+			const u2 = { type: "message_update", message: { role: "assistant", content: "Hello" } };
+			const end = { type: "message_end", message: { role: "assistant", content: "Hello!" } };
+
+			// Leading edge: the first update after subscribe goes out synchronously.
+			emitSessionEvent(u1);
+			expect(frames(socket)).toEqual([{ type: "session_event", sessionId: "session-1", event: u1 }]);
+
+			// The second update within the interval is held back.
+			emitSessionEvent(u2);
+			expect(frames(socket)).toEqual([{ type: "session_event", sessionId: "session-1", event: u1 }]);
+
+			// message_end supersedes the buffered update: the end frame arrives,
+			// the intermediate u2 never does.
+			emitSessionEvent(end);
+			expect(frames(socket)).toEqual([
+				{ type: "session_event", sessionId: "session-1", event: u1 },
+				{ type: "session_event", sessionId: "session-1", event: end },
+			]);
+		} finally {
+			hub.onClose(socket as unknown as ServerWebSocket<ConnectionData>);
+			hub.dispose();
+		}
+	});
+
+	test("a non-coalescible event passes through immediately, flushing the buffered update ahead of itself", async () => {
+		const { bridge, emitSessionEvent } = fakeBridge();
+		const hub = new WsHub(bridge, noopSkills);
+		const socket = makeSocket(hub);
+		try {
+			await hub.onMessage(
+				socket as unknown as ServerWebSocket<ConnectionData>,
+				JSON.stringify({ type: "subscribe", sessionId: "session-1" }),
+			);
+			socket.sent.length = 0;
+
+			const u1 = { type: "message_update", message: { role: "assistant", content: "a" } };
+			const u2 = { type: "message_update", message: { role: "assistant", content: "ab" } };
+			const start = { type: "agent_start" };
+
+			emitSessionEvent(u1); // leading edge — synchronous
+			emitSessionEvent(u2); // buffered
+			emitSessionEvent(start); // passthrough — must flush u2 first
+
+			expect(frames(socket)).toEqual([
+				{ type: "session_event", sessionId: "session-1", event: u1 },
+				{ type: "session_event", sessionId: "session-1", event: u2 },
+				{ type: "session_event", sessionId: "session-1", event: start },
+			]);
 		} finally {
 			hub.onClose(socket as unknown as ServerWebSocket<ConnectionData>);
 			hub.dispose();

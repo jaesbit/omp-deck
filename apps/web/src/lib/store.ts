@@ -36,9 +36,16 @@ export interface NotificationItem {
 const MAX_NOTIFICATIONS = 50;
 
 import { api } from "./api";
-import { applyEvent, initSession } from "./reducer";
+import { applyEvent, initSession, prependHistory, trimHistory } from "./reducer";
 import type { SessionUi } from "./types";
 import { WsClient, type WsStatus } from "./ws";
+
+/** Messages fetched per scroll-up history page. */
+const HISTORY_PAGE_SIZE = 100;
+/** Trim the loaded window once it exceeds this many messages… */
+const TRIM_THRESHOLD = 350;
+/** …down to roughly this many (matches the server's snapshot tail). */
+const TRIM_TARGET = 200;
 
 function readBool(key: string, fallback: boolean): boolean {
 	if (typeof localStorage === "undefined") return fallback;
@@ -241,6 +248,20 @@ interface StoreState {
 	 *  still subscribed to it is unaffected; re-selecting the same id later
 	 *  just resumes viewing it via `selectSession`'s idempotent subscribe. */
 	closeActiveSession(): void;
+	/**
+	 * Fetch one page of older messages for a subscribed session and prepend
+	 * it to the loaded window. No-op while a fetch is in flight or when the
+	 * full history is already loaded. Called by the chat pane as the user
+	 * scrolls toward the top.
+	 */
+	loadOlderMessages(sessionId: string): Promise<void>;
+	/**
+	 * Shrink a session's loaded window back to the default tail once the
+	 * user has returned to the bottom of the conversation. Dropped pages are
+	 * re-fetched transparently by `loadOlderMessages` when scrolling up
+	 * again.
+	 */
+	trimConversation(sessionId: string): void;
 	/** Start or stop receiving task-change broadcasts for the mounted Tasks view. */
 	subscribeTasks(): void;
 	unsubscribeTasks(): void;
@@ -312,6 +333,16 @@ function ensureSessionSubscription(id: string, get: () => StoreState): void {
 function releaseSessionSubscription(id: string, get: () => StoreState): void {
 	if (!get().subscribed.delete(id)) return;
 	get().ws?.send({ type: "unsubscribe", sessionId: id });
+	// Evict the local conversation cache — nothing renders it anymore, and a
+	// long transcript (messages + tool-call streams) is the dominant heap
+	// cost per session. Re-selecting the session re-subscribes and the
+	// server replays a fresh snapshot, so nothing is lost.
+	useStore.setState((s) => {
+		if (!(id in s.sessionsById)) return {};
+		const next = { ...s.sessionsById };
+		delete next[id];
+		return { sessionsById: next };
+	});
 }
 
 export const useStore = create<StoreState>()(
@@ -444,6 +475,54 @@ export const useStore = create<StoreState>()(
 				}
 				set((s) => ({ watchingSessionCounts: new Map(s.watchingSessionCounts).set(id, current - 1) }));
 			};
+		},
+
+		async loadOlderMessages(sessionId: string) {
+			const ui = get().sessionsById[sessionId];
+			if (!ui || ui.historyLoading) return;
+			const before = ui.historyStartIndex ?? 0;
+			if (before <= 0) return;
+			set((s) => {
+				const prev = s.sessionsById[sessionId];
+				if (!prev) return {};
+				return { sessionsById: { ...s.sessionsById, [sessionId]: { ...prev, historyLoading: true } } };
+			});
+			try {
+				const page = await api.sessionHistory(sessionId, before, HISTORY_PAGE_SIZE);
+				set((s) => {
+					const prev = s.sessionsById[sessionId];
+					if (!prev) return {};
+					// The page must abut the current window front; if the cursor
+					// moved while the fetch was in flight (trim, re-snapshot),
+					// discard the stale page instead of splicing a gap/overlap.
+					if ((prev.historyStartIndex ?? 0) !== before) {
+						return { sessionsById: { ...s.sessionsById, [sessionId]: { ...prev, historyLoading: false } } };
+					}
+					return {
+						sessionsById: {
+							...s.sessionsById,
+							[sessionId]: prependHistory(prev, page.messages, page.startIndex),
+						},
+					};
+				});
+			} catch (err) {
+				console.warn(`loadOlderMessages failed for ${sessionId}`, err);
+				set((s) => {
+					const prev = s.sessionsById[sessionId];
+					if (!prev) return {};
+					return { sessionsById: { ...s.sessionsById, [sessionId]: { ...prev, historyLoading: false } } };
+				});
+			}
+		},
+
+		trimConversation(sessionId: string) {
+			set((s) => {
+				const prev = s.sessionsById[sessionId];
+				if (!prev || prev.historyLoading || prev.messages.length <= TRIM_THRESHOLD) return {};
+				const next = trimHistory(prev, TRIM_TARGET);
+				if (next === prev) return {};
+				return { sessionsById: { ...s.sessionsById, [sessionId]: next } };
+			});
 		},
 
 		subscribeTasks() {

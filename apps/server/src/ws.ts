@@ -7,6 +7,7 @@ import { broadcastBus } from "./broadcast-bus.ts";
 import { logger } from "./log.ts";
 import { getBuildInfo, getUptimeSecs } from "./build-info.ts";
 import { buildSkillInvocationPrompt, parseSkillSlashCommand } from "./skill-invocation.ts";
+import { StreamCoalescer } from "./stream-coalescer.ts";
 import type { SkillsService } from "./skills-service.ts";
 const log = logger("ws");
 
@@ -214,9 +215,21 @@ export class WsHub {
 			return;
 		}
 
-		const unsubSession = handle.subscribe((event) => {
-			send(ws, { type: "session_event", sessionId, event });
+		// Streaming updates (`message_update` / `tool_execution_update`) fire
+		// per token / output chunk, each carrying the full accumulated payload
+		// — per-subscriber coalescing caps that at one flush per interval and
+		// is lossless because those events are latest-state snapshots. All
+		// other event types pass through immediately.
+		const coalescer = new StreamCoalescer((event) => {
+			try {
+				send(ws, { type: "session_event", sessionId, event });
+			} catch (err) {
+				// A timer-driven flush must never throw into Bun's event loop
+				// (fatal to the process) just because the socket is closing.
+				log.warn(`session event send failed`, err);
+			}
 		});
+		const unsubSession = handle.subscribe((event) => coalescer.push(event));
 		// Mirror extension-UI dialog frames (ask tool etc.) into this connection.
 		// `subscribeUiFrames` also replays any already-open dialogs so a page-
 		// reload subscriber sees the pending modal immediately.
@@ -231,6 +244,7 @@ export class WsHub {
 			send(ws, frame);
 		});
 		const teardown = (): void => {
+			coalescer.dispose();
 			try {
 				unsubSession();
 			} catch (err) {

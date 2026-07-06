@@ -10,6 +10,7 @@ import type {
 	PendingPlanApprovalWire,
 	PlanModeContextWire,
 	ServerFrame,
+	SessionHistoryResponse,
 	SessionSnapshot,
 	SessionSummary,
 } from "@omp-deck/protocol";
@@ -110,6 +111,13 @@ export interface SessionHandle {
 
 	subscribe(listener: EventListener): () => void;
 	snapshot(): SessionSnapshot;
+	/**
+	 * One page of message history older than index `before` (exclusive),
+	 * newest-last. Complements the tail-sliced `snapshot()`: the client
+	 * walks `before` backwards (starting at the snapshot's
+	 * `messagesStartIndex`) until `startIndex` reaches 0.
+	 */
+	getHistory(before: number, limit: number): SessionHistoryResponse;
 	prompt(
 		text: string,
 		opts?: { streamingBehavior?: "steer" | "followUp"; images?: ImageAttachment[] },
