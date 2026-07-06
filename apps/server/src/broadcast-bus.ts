@@ -26,6 +26,7 @@ export type BroadcastFrame = Extract<
 	| { type: "routine_run_finished" }
 	| { type: "heartbeat" }
 	| { type: "notification" }
+	| { type: "auto_work_runs_changed" }
 >;
 
 type Listener = (frame: BroadcastFrame) => void;

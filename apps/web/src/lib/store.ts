@@ -174,6 +174,13 @@ interface StoreState {
 	sessionsChangeCounter: number;
 
 	/**
+	 * Counter for `auto_work_runs_changed` broadcasts. Bumped on every run
+	 * lifecycle event (start, complete, fail, timeout). AutoWorkView watches
+	 * this and refetches the run list. Same pattern as `tasksChangeCounter`.
+	 */
+	autoWorkRunsChangeCounter: number;
+
+	/**
 	 * Per-session open extension-UI dialog (currently used by the SDK `ask`
 	 * tool, but the channel is shape-typed to cover any extension dialog).
 	 * At most one dialog per session is open at a time because the SDK awaits
@@ -221,6 +228,9 @@ interface StoreState {
 		suppressAutoStart?: boolean;
 	}): Promise<string>;
 	selectSession(id: string): void;
+	/** Subscribe to a session for read-only monitoring without making it the
+	 *  active session (used by the Auto-Work monitor panel). Idempotent. */
+	watchSession(id: string): void;
 	/** Detach the current tab's view from the active session — clears
 	 *  `activeId` only. Unlike `disposeSession`, the underlying server-side
 	 *  session keeps running in the background (T-52) and any other tab
@@ -302,6 +312,7 @@ export const useStore = create<StoreState>()(
 		skillsChangeCounter: 0,
 		kbChangeCounter: 0,
 		sessionsChangeCounter: 0,
+		autoWorkRunsChangeCounter: 0,
 		pendingDialogs: {},
 		heartbeat: null,
 		notifications: [],
@@ -390,6 +401,13 @@ export const useStore = create<StoreState>()(
 				get().subscribed.add(id);
 			}
 		},
+		watchSession(id: string) {
+			if (!get().subscribed.has(id)) {
+				get().ws?.send({ type: "subscribe", sessionId: id });
+				get().subscribed.add(id);
+			}
+		},
+
 
 		sendPrompt(text, images) {
 			const id = get().activeId;
@@ -691,6 +709,10 @@ function handleFrame(
 
 		case "sessions_changed":
 			set((s) => ({ sessionsChangeCounter: s.sessionsChangeCounter + 1 }));
+			return;
+
+		case "auto_work_runs_changed":
+			set((s) => ({ autoWorkRunsChangeCounter: s.autoWorkRunsChangeCounter + 1 }));
 			return;
 
 		case "ext_ui_dialog_open":

@@ -1187,6 +1187,7 @@ export type ServerFrame =
 			actionUrl?: string;
 			timestamp: string;
 	  }
+	| { type: "auto_work_runs_changed" }
 	| { type: "error"; sessionId?: string; error: string };
 
 /** Severity for a deck notification. Drives the audio tone + visual styling. */
