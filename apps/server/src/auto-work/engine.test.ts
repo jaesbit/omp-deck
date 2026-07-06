@@ -15,15 +15,16 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-import type { AutoWorkConfig, ModelInfo, Task, TaskPriority } from "@omp-deck/protocol";
+import type { AutoWorkConfig, ModelInfo, SessionSummary, Task, TaskPriority } from "@omp-deck/protocol";
 
 import type { AgentBridge, EventListener, SessionHandle } from "../bridge/types.ts";
 import { DEFAULT_AUTO_WORK_VALUES, setAutoWorkConfig } from "../db/auto-work.ts";
 import { getAutoWorkCostEstimate, listAutoWorkRuns, startAutoWorkRun } from "../db/auto-work-runs.ts";
 import { closeDb, openDb } from "../db/index.ts";
-import { createTask, getTask } from "../db/tasks.ts";
+import { createTask, getTask, moveTask } from "../db/tasks.ts";
 import {
 	checkAutoWorkPreflight,
+	classifyRunningAutoWorkRun,
 	costFitsAutoWorkBudget,
 	resolveAutoWorkModel,
 	resolveAutoWorkTimeoutMinutes,
@@ -384,6 +385,36 @@ describe("resolveAutoWorkTimeoutMinutes", () => {
 	});
 });
 
+describe("classifyRunningAutoWorkRun", () => {
+	const baseRun = {
+		id: "awrun_1",
+		taskId: "t_1",
+		taskPriority: "P0" as const,
+		sessionId: "sess_1",
+		worktreePath: "/tmp/wt",
+		startedAt: "2026-01-01T00:00:00.000Z",
+		completedAt: null,
+		status: "running" as const,
+		inputTokens: null,
+		outputTokens: null,
+		pctConsumed: null,
+		failureReason: null,
+	};
+
+	test("resumes when the session and its worktree both still exist", () => {
+		expect(classifyRunningAutoWorkRun(baseRun, true, true)).toBe("resume");
+	});
+
+	test("reconnects when the session exists but the worktree is gone", () => {
+		expect(classifyRunningAutoWorkRun(baseRun, true, false)).toBe("reconnect");
+	});
+
+	test("is stale when the session is gone, regardless of the worktree", () => {
+		expect(classifyRunningAutoWorkRun(baseRun, false, true)).toBe("stale");
+		expect(classifyRunningAutoWorkRun(baseRun, false, false)).toBe("stale");
+	});
+});
+
 // ─── Orchestrator (real DB + real git worktree + stub bridge) ──────────────
 
 const AVAILABLE_MODEL: ModelInfo = {
@@ -415,13 +446,37 @@ class FakeSessionHandle {
 	async prompt(): Promise<void> {}
 }
 
-function fakeBridge(handle: FakeSessionHandle, models: ModelInfo[] = [AVAILABLE_MODEL]): AgentBridge {
+function fakeBridge(
+	handle: FakeSessionHandle,
+	opts: {
+		models?: ModelInfo[];
+		/** Live in-process handles, keyed by sessionId — what `bridge.getSession` finds without a restart. */
+		liveSessions?: Map<string, FakeSessionHandle>;
+		/** Persisted (on-disk) session summaries `bridge.listSessions`/`resumeSession` can see across a restart. */
+		persistedSessions?: SessionSummary[];
+	} = {},
+): AgentBridge {
+	const models = opts.models ?? [AVAILABLE_MODEL];
 	return {
 		async listModels() {
 			return models;
 		},
 		async createSession() {
 			return handle as unknown as SessionHandle;
+		},
+		getSession(sessionId: string) {
+			return opts.liveSessions?.get(sessionId) as unknown as SessionHandle | undefined;
+		},
+		async listSessions(listOpts: { cwd?: string }) {
+			const all = opts.persistedSessions ?? [];
+			return listOpts.cwd ? all.filter((s) => s.cwd === listOpts.cwd) : all;
+		},
+		async resumeSession(resumeOpts: { sessionPath: string }) {
+			const match = opts.persistedSessions?.find((s) => s.path === resumeOpts.sessionPath);
+			if (!match) throw new Error(`no persisted session at ${resumeOpts.sessionPath}`);
+			const resumedHandle = opts.liveSessions?.get(match.id);
+			if (!resumedHandle) throw new Error(`no fake handle registered for persisted session ${match.id}`);
+			return resumedHandle as unknown as SessionHandle;
 		},
 	} as unknown as AgentBridge;
 }
@@ -522,26 +577,41 @@ describe("runAutoWorkCycle", () => {
 		expect(runs[0]?.failureReason).toContain("timeout");
 	});
 
-	test("skips when another run is already active for the workspace (mutex)", async () => {
+	test("resumes the active run instead of starting new work when another run is already active for the workspace (mutex)", async () => {
 		setAutoWorkConfig(repoCwd, { ...DEFAULT_AUTO_WORK_VALUES, enabled: true });
-		const task = createTask({ title: "Queued", cwd: repoCwd, priority: "P5", autoWork: true });
-		startAutoWorkRun({
-			taskId: task.id,
+		const activeTask = createTask({ title: "Already running", cwd: repoCwd, priority: "P5", autoWork: true });
+		moveTask(activeTask.id, "s_active", 0);
+		const worktreePath = path.join(repoCwd, ".worktrees", "aw-mutex");
+		fs.mkdirSync(worktreePath, { recursive: true });
+		const priorRunId = startAutoWorkRun({
+			taskId: activeTask.id,
 			taskPriority: "P5",
 			sessionId: "already-running",
-			worktreePath: "/tmp/whatever",
+			worktreePath,
 		});
 
-		const handle = new FakeSessionHandle("sess_2", 10);
-		const result = await runAutoWorkCycle(repoCwd, fakeBridge(handle), {
-			getSubscriptionUsage: async () => ({ available: true, weeklyPct: 5 }),
-		});
+		// A second, unrelated backlog task that must NOT be picked up while the
+		// first run is still (genuinely) active.
+		const queuedTask = createTask({ title: "Queued", cwd: repoCwd, priority: "P5", autoWork: true });
 
-		expect(result.outcome).toBe("skipped");
-		if (result.outcome !== "skipped") throw new Error("expected skipped");
-		expect(result.reason).toContain("already active");
-		// The pre-existing task must not have been touched.
-		expect(getTask(task.id)?.stateId).toBe("s_backlog");
+		const liveHandle = new FakeSessionHandle("already-running", 10);
+		const decoyHandle = new FakeSessionHandle("sess_2", 10);
+		const result = await runAutoWorkCycle(
+			repoCwd,
+			fakeBridge(decoyHandle, { liveSessions: new Map([["already-running", liveHandle]]) }),
+			{ getSubscriptionUsage: async () => ({ available: true, weeklyPct: 5 }) },
+		);
+
+		expect(result.outcome).toBe("completed");
+		if (result.outcome !== "completed") throw new Error("expected completed");
+		expect(result.taskId).toBe(activeTask.id);
+		expect(result.runId).toBe(priorRunId);
+		expect(result.sessionId).toBe("already-running");
+
+		// The unrelated queued task must not have been touched or started —
+		// the mutex still holds for a genuinely live running row.
+		expect(getTask(queuedTask.id)?.stateId).toBe("s_backlog");
+		expect(listAutoWorkRuns({ taskId: queuedTask.id })).toHaveLength(0);
 	});
 
 	test("skips when auto-work is disabled for the workspace", async () => {
@@ -589,5 +659,141 @@ describe("runAutoWorkCycle", () => {
 		expect(result.outcome).toBe("skipped");
 		if (result.outcome !== "skipped") throw new Error("expected skipped");
 		expect(result.reason).toContain("none fit");
+	});
+});
+
+describe("runAutoWorkCycle session continuation (T-65)", () => {
+	test("resumes an interrupted run via its live session handle — no new worktree or session is created", async () => {
+		setAutoWorkConfig(repoCwd, { ...DEFAULT_AUTO_WORK_VALUES, enabled: true });
+		const task = createTask({ title: "Interrupted mid-run", cwd: repoCwd, priority: "P5", autoWork: true });
+		moveTask(task.id, "s_active", 0);
+
+		const worktreePath = path.join(repoCwd, ".worktrees", "aw-resume");
+		fs.mkdirSync(worktreePath, { recursive: true });
+		const priorRunId = startAutoWorkRun({
+			taskId: task.id,
+			taskPriority: "P5",
+			sessionId: "sess_prev",
+			worktreePath,
+		});
+
+		const liveHandle = new FakeSessionHandle("sess_prev", 10);
+		// A distinct decoy: if the engine wrongly restarted the task instead of
+		// resuming, `createSession` would return this handle and the assertions
+		// on sessionId/runId below would fail.
+		const decoyHandle = new FakeSessionHandle("sess_fresh", 10);
+		const result = await runAutoWorkCycle(
+			repoCwd,
+			fakeBridge(decoyHandle, { liveSessions: new Map([["sess_prev", liveHandle]]) }),
+			{ getSubscriptionUsage: async () => ({ available: true, weeklyPct: 5 }) },
+		);
+
+		expect(result.outcome).toBe("completed");
+		if (result.outcome !== "completed") throw new Error("expected completed");
+		expect(result.sessionId).toBe("sess_prev");
+		expect(result.runId).toBe(priorRunId);
+		expect(result.worktreePath).toBe(worktreePath);
+
+		const runs = listAutoWorkRuns({ taskId: task.id });
+		expect(runs).toHaveLength(1);
+		expect(runs[0]?.status).toBe("completed");
+
+		// No duplicate worktree was created for the same task.
+		const worktreeDirs = fs.readdirSync(path.join(repoCwd, ".worktrees"));
+		expect(worktreeDirs).toEqual(["aw-resume"]);
+	});
+
+	test("reconnects to a live session when its worktree directory is gone, without creating a new worktree", async () => {
+		setAutoWorkConfig(repoCwd, { ...DEFAULT_AUTO_WORK_VALUES, enabled: true });
+		const task = createTask({ title: "Reconnect target", cwd: repoCwd, priority: "P5", autoWork: true });
+		moveTask(task.id, "s_active", 0);
+
+		// Never created on disk — simulates the worktree having been deleted
+		// out from under a still-running session.
+		const worktreePath = path.join(repoCwd, ".worktrees", "aw-vanished");
+		startAutoWorkRun({
+			taskId: task.id,
+			taskPriority: "P5",
+			sessionId: "sess_alive",
+			worktreePath,
+		});
+
+		const liveHandle = new FakeSessionHandle("sess_alive", 10);
+		const decoyHandle = new FakeSessionHandle("sess_fresh", 10);
+		const result = await runAutoWorkCycle(
+			repoCwd,
+			fakeBridge(decoyHandle, { liveSessions: new Map([["sess_alive", liveHandle]]) }),
+			{ getSubscriptionUsage: async () => ({ available: true, weeklyPct: 5 }) },
+		);
+
+		expect(result.outcome).toBe("completed");
+		if (result.outcome !== "completed") throw new Error("expected completed");
+		expect(result.sessionId).toBe("sess_alive");
+		expect(result.worktreePath).toBe(worktreePath);
+		// Nothing was ever created under .worktrees for this run.
+		expect(fs.existsSync(path.join(repoCwd, ".worktrees"))).toBe(false);
+	});
+
+	test("marks a lost run stale: task returns to backlog, worktree is removed, run is failed", async () => {
+		// enabled: false isolates the stale-cleanup path from a subsequent
+		// task-selection cycle re-picking up the now-backlogged task.
+		setAutoWorkConfig(repoCwd, { ...DEFAULT_AUTO_WORK_VALUES, enabled: false });
+		const task = createTask({ title: "Orphaned", cwd: repoCwd, priority: "P5", autoWork: true });
+		moveTask(task.id, "s_active", 0);
+
+		const worktreePath = path.join(repoCwd, ".worktrees", "aw-stale");
+		runGit(["worktree", "add", "-b", "auto-work/stale-test", worktreePath], repoCwd);
+		expect(fs.existsSync(worktreePath)).toBe(true);
+
+		startAutoWorkRun({
+			taskId: task.id,
+			taskPriority: "P5",
+			sessionId: "sess_gone",
+			worktreePath,
+		});
+
+		const handle = new FakeSessionHandle("sess_never_used", 10);
+		const result = await runAutoWorkCycle(repoCwd, fakeBridge(handle), {
+			getSubscriptionUsage: async () => ({ available: true, weeklyPct: 5 }),
+		});
+
+		expect(result).toEqual({ outcome: "skipped", reason: expect.stringContaining("disabled") });
+
+		const runs = listAutoWorkRuns({ taskId: task.id });
+		expect(runs).toHaveLength(1);
+		expect(runs[0]?.status).toBe("failed");
+		expect(runs[0]?.failureReason).toBe("session_lost");
+
+		expect(getTask(task.id)?.stateId).toBe("s_backlog");
+		expect(fs.existsSync(worktreePath)).toBe(false);
+	});
+
+	test("does not treat a stale run as a mutex block — a fresh eligible task is picked up in the same cycle", async () => {
+		setAutoWorkConfig(repoCwd, { ...DEFAULT_AUTO_WORK_VALUES, enabled: true });
+		const staleTask = createTask({ title: "Was active, now orphaned", cwd: repoCwd, priority: "P1", autoWork: true });
+		moveTask(staleTask.id, "s_active", 0);
+		const worktreePath = path.join(repoCwd, ".worktrees", "aw-stale-2");
+		runGit(["worktree", "add", "-b", "auto-work/stale-test-2", worktreePath], repoCwd);
+		startAutoWorkRun({
+			taskId: staleTask.id,
+			taskPriority: "P1",
+			sessionId: "sess_gone_2",
+			worktreePath,
+		});
+
+		const freshTask = createTask({ title: "Fresh backlog task", cwd: repoCwd, priority: "P5", autoWork: true });
+
+		const handle = new FakeSessionHandle("sess_new", 10);
+		const result = await runAutoWorkCycle(repoCwd, fakeBridge(handle), {
+			getSubscriptionUsage: async () => ({ available: true, weeklyPct: 5 }),
+		});
+
+		expect(result.outcome).toBe("completed");
+		if (result.outcome !== "completed") throw new Error("expected completed");
+		expect(result.taskId).toBe(freshTask.id);
+		expect(result.sessionId).toBe("sess_new");
+
+		expect(getTask(staleTask.id)?.stateId).toBe("s_backlog");
+		expect(fs.existsSync(worktreePath)).toBe(false);
 	});
 });

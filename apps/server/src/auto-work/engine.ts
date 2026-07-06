@@ -19,9 +19,6 @@
  * *is* terminal state for a one-shot session.
  *
  * Explicitly out of scope here (later tickets in the stack):
- *  - T-65: resuming a run after a server restart. We do record `sessionId` /
- *    `worktreePath` on the `auto_work_runs` row from the moment execution
- *    starts, so T-65 has something to resume from.
  *  - T-66: PR creation + moving the task to `validate` on success. A
  *    successful run leaves the task in `active` with the run row closed
  *    `status: "completed"` — T-66 picks up from there.
@@ -29,6 +26,7 @@
  *    notifier can hook the log stream later.
  */
 
+import * as fs from "node:fs";
 import * as path from "node:path";
 
 import type {
@@ -43,7 +41,7 @@ import type {
 import type { AgentBridge, SessionHandle } from "../bridge/types.ts";
 import { getAutoWorkConfig } from "../db/auto-work.ts";
 import { completeAutoWorkRun, listAutoWorkRuns, startAutoWorkRun } from "../db/auto-work-runs.ts";
-import { findStateByName, listTasks, moveTask, updateTask } from "../db/tasks.ts";
+import { findStateByName, getTask, listTasks, moveTask, updateTask } from "../db/tasks.ts";
 import { getWorkspacePreference } from "../db/workspace-preferences.ts";
 import { logger } from "../log.ts";
 import { getSubscriptionUsage } from "../usage-subscription.ts";
@@ -184,6 +182,33 @@ export function resolveAutoWorkModel(
 	return config.modelByPriority[priority] ?? workspaceDefaultModel ?? undefined;
 }
 
+export type RunningAutoWorkRunClassification = "resume" | "reconnect" | "stale";
+
+/**
+ * Classifies a `status: "running"` `auto_work_runs` row found at the start
+ * of a cycle (T-65). `sessionExists`/`worktreeExists` are resolved by the
+ * caller — this stays pure so the three outcomes are unit-testable without
+ * a bridge or filesystem:
+ *
+ *  - session alive, worktree present → `"resume"`: pick the run back up and
+ *    wait for it to reach a terminal state; skip task selection entirely.
+ *  - session alive, worktree gone → `"reconnect"`: same as resume, but the
+ *    directory the agent was writing to disappeared out from under it (e.g.
+ *    manual cleanup). Let the agent finish in whatever state it's in.
+ *  - session gone (no live handle and nothing persisted to `resumeSession`
+ *    from) → `"stale"`: unrecoverable. Caller fails the run, returns the
+ *    task to backlog, and removes the worktree before falling through to
+ *    normal task selection.
+ */
+export function classifyRunningAutoWorkRun(
+	_run: AutoWorkRun,
+	sessionExists: boolean,
+	worktreeExists: boolean,
+): RunningAutoWorkRunClassification {
+	if (!sessionExists) return "stale";
+	return worktreeExists ? "resume" : "reconnect";
+}
+
 // ─── Orchestrator (IO) ──────────────────────────────────────────────────────
 
 export interface RunAutoWorkCycleOptions {
@@ -214,7 +239,17 @@ export async function runAutoWorkCycle(
 	const allTasks = listTasks();
 	const workspaceTasks = allTasks.filter((t) => t.cwd === cwd);
 	const workspaceTaskIds = new Set(workspaceTasks.map((t) => t.id));
-	const activeRuns = listAutoWorkRuns({ status: "running" }).filter((r) => workspaceTaskIds.has(r.taskId));
+	let activeRuns = listAutoWorkRuns({ status: "running" }).filter((r) => workspaceTaskIds.has(r.taskId));
+
+	// A `running`-status row that survived a server restart needs to be
+	// resumed (or retired), not silently treated as a mutex block — see
+	// `classifyRunningAutoWorkRun` (T-65).
+	const runningRun = activeRuns.find((r) => r.status === "running");
+	if (runningRun) {
+		const resumed = await resumeOrRetireAutoWorkRun(cwd, bridge, runningRun, config);
+		if (resumed) return resumed;
+		activeRuns = activeRuns.filter((r) => r.id !== runningRun.id);
+	}
 
 	const preflight = checkAutoWorkPreflight({ config, now, subscriptionPctUsed, activeRuns });
 	if (!preflight.ok) {
@@ -286,12 +321,33 @@ export async function runAutoWorkCycle(
 	await session.prompt(prompt);
 
 	const timeoutMinutes = resolveAutoWorkTimeoutMinutes(task.priority, config);
+	return finalizeAutoWorkRun({ runId, task, session, worktreePath, timeoutMinutes });
+}
+
+// ─── Small IO helpers ───────────────────────────────────────────────────────
+
+/**
+ * Shared tail of the "a session is actively running" path — waits for
+ * terminal state (or timeout) and closes out the DB rows accordingly. Used
+ * by both a freshly-started run and a `"resume"`/`"reconnect"` pickup of a
+ * pre-existing one (T-65), so a resumed run gets exactly the same
+ * timeout/blocked/completed handling a fresh one does.
+ */
+async function finalizeAutoWorkRun(params: {
+	runId: string;
+	task: Task;
+	session: SessionHandle;
+	worktreePath: string;
+	timeoutMinutes: number;
+}): Promise<AutoWorkCycleResult> {
+	const { runId, task, session, worktreePath, timeoutMinutes } = params;
 	const terminal = await waitForAutoWorkSessionTerminal(session, timeoutMinutes * 60_000);
 
 	if (terminal === "timed_out") {
 		const failureReason = `exceeded ${timeoutMinutes}min timeout for priority ${task.priority}`;
 		completeAutoWorkRun(runId, { status: "timed_out", failureReason });
-		moveTask(task.id, blockedState.id, 0);
+		const blockedState = findStateByName("blocked");
+		if (blockedState) moveTask(task.id, blockedState.id, 0);
 		updateTask(task.id, {
 			body: `${task.body}\n\n---\n**Auto Work timeout** — run \`${runId}\` ${failureReason}. Session: \`${session.sessionId}\`, worktree: \`${worktreePath}\`.`,
 		});
@@ -304,7 +360,121 @@ export async function runAutoWorkCycle(
 	return { outcome: "completed", taskId: task.id, runId, sessionId: session.sessionId, worktreePath };
 }
 
-// ─── Small IO helpers ───────────────────────────────────────────────────────
+/**
+ * Resolves a live handle for `run.sessionId`: the in-process bridge may
+ * still hold it (nothing was interrupted, or the same process is calling
+ * `runAutoWorkCycle` again while the prior call's session is still going),
+ * or it may only exist as a persisted `.jsonl` the bridge can
+ * `resumeSession()` from (server restarted since the run started, dropping
+ * every in-memory handle). Returns `undefined` when neither exists — that
+ * is the "stale" case `classifyRunningAutoWorkRun` fails the run on.
+ */
+async function resolveRunningSessionHandle(
+	bridge: AgentBridge,
+	run: AutoWorkRun,
+): Promise<SessionHandle | undefined> {
+	const live = bridge.getSession(run.sessionId);
+	if (live) return live;
+
+	const persisted = await findPersistedAutoWorkSession(bridge, run);
+	if (!persisted) return undefined;
+	return bridge.resumeSession({ sessionPath: persisted.path });
+}
+
+/**
+ * Looks up `run.sessionId` in the bridge's persisted-session listing.
+ * Scoped to `run.worktreePath` first (the common case, and cheap for
+ * implementations that index by cwd); falls back to the unscoped listing
+ * because the worktree directory itself may be gone (T-65's "reconnect"
+ * case) even though the underlying `.jsonl` still exists under
+ * `~/.omp/agent/sessions`.
+ */
+async function findPersistedAutoWorkSession(bridge: AgentBridge, run: AutoWorkRun) {
+	const scoped = await bridge.listSessions({ cwd: run.worktreePath });
+	const inScope = scoped.find((s) => s.id === run.sessionId);
+	if (inScope) return inScope;
+	const all = await bridge.listSessions({});
+	return all.find((s) => s.id === run.sessionId);
+}
+
+/**
+ * `git worktree remove --force`, run from `repoCwd`. Idempotent: a
+ * worktree directory that's already gone is a no-op, not an error — this
+ * is called from the "stale run" cleanup path where the directory's
+ * presence is exactly what's in question.
+ */
+async function removeAutoWorkWorktree(repoCwd: string, worktreePath: string): Promise<void> {
+	if (!fs.existsSync(worktreePath)) return;
+	const proc = Bun.spawn(["git", "worktree", "remove", "--force", worktreePath], {
+		cwd: repoCwd,
+		stdin: "ignore",
+		stdout: "pipe",
+		stderr: "pipe",
+		windowsHide: true,
+	});
+	const [stderr, exitCode] = await Promise.all([new Response(proc.stderr).text(), proc.exited]);
+	if (exitCode !== 0) {
+		log.warn(`git worktree remove --force ${worktreePath} failed (exit ${exitCode}): ${stderr.trim()}`);
+	}
+}
+
+/**
+ * The pre-flight step that distinguishes "another run is genuinely active"
+ * from "a running-status row is stale because the process that owned it
+ * died or restarted" (T-65). Called once per cycle, before the mutex check,
+ * for a workspace's sole `status: "running"` row (there is at most one —
+ * the mutex enforces that on the way in).
+ *
+ * Returns the finished `AutoWorkCycleResult` when the run was resumed or
+ * reconnected (caller should return it as-is, skipping task selection).
+ * Returns `undefined` when the run turned out to be stale — the caller
+ * falls through to normal pre-flight + task selection in that case, since
+ * `resumeOrRetireAutoWorkRun` has already closed the row, moved the task
+ * back to backlog, and removed the worktree.
+ */
+async function resumeOrRetireAutoWorkRun(
+	cwd: string,
+	bridge: AgentBridge,
+	run: AutoWorkRun,
+	config: AutoWorkConfig,
+): Promise<AutoWorkCycleResult | undefined> {
+	const handle = await resolveRunningSessionHandle(bridge, run);
+	const worktreeExists = fs.existsSync(run.worktreePath);
+	const classification = classifyRunningAutoWorkRun(run, handle !== undefined, worktreeExists);
+
+	if (classification === "stale" || !handle) {
+		log.warn(
+			`run ${run.id} (session ${run.sessionId}) has no live or persisted session to resume — marking failed and returning the task to backlog`,
+		);
+		completeAutoWorkRun(run.id, { status: "failed", failureReason: "session_lost" });
+		const backlogState = findStateByName("backlog");
+		if (backlogState) moveTask(run.taskId, backlogState.id, 0);
+		await removeAutoWorkWorktree(cwd, run.worktreePath);
+		return undefined;
+	}
+
+	const task = getTask(run.taskId);
+	if (!task) {
+		log.warn(`run ${run.id}: task ${run.taskId} no longer exists — closing the run as failed`);
+		completeAutoWorkRun(run.id, { status: "failed", failureReason: "session_lost" });
+		await removeAutoWorkWorktree(cwd, run.worktreePath);
+		return undefined;
+	}
+
+	log.info(
+		`${classification === "resume" ? "resuming" : "reconnecting to"} run ${run.id} for T-${task.displayId}, ` +
+			`session ${run.sessionId}${worktreeExists ? "" : " (worktree missing)"}`,
+	);
+
+	const timeoutMinutes = resolveAutoWorkTimeoutMinutes(run.taskPriority, config);
+	return finalizeAutoWorkRun({
+		runId: run.id,
+		task,
+		session: handle,
+		worktreePath: run.worktreePath,
+		timeoutMinutes,
+	});
+}
 
 /**
  * Terminal-state detection reuses the same signal the idle-session reaper

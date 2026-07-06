@@ -417,13 +417,25 @@ describe("POST /auto-work/trigger", () => {
 		async prompt(): Promise<void> {}
 	}
 
-	function triggerBridge(handle: FakeSessionHandle): AgentBridge {
+	function triggerBridge(
+		handle: FakeSessionHandle,
+		opts: { liveSessions?: Map<string, FakeSessionHandle> } = {},
+	): AgentBridge {
 		return {
 			async listModels() {
 				return [];
 			},
 			async createSession() {
 				return handle as unknown as SessionHandle;
+			},
+			getSession(sessionId: string) {
+				return opts.liveSessions?.get(sessionId) as unknown as SessionHandle | undefined;
+			},
+			async listSessions() {
+				return [];
+			},
+			async resumeSession() {
+				throw new Error("no persisted session to resume in this fixture");
 			},
 		} as unknown as AgentBridge;
 	}
@@ -491,23 +503,32 @@ describe("POST /auto-work/trigger", () => {
 		expect(listAutoWorkRuns({ taskId: task.id })[0]?.status).toBe("completed");
 	});
 
-	test("is safely callable a second time while a run is active — mutex skips instead of double-starting", async () => {
+	test("is safely callable a second time while a run is active — resumes instead of double-starting", async () => {
 		setAutoWorkConfig(repoCwd, { ...DEFAULT_AUTO_WORK_VALUES, enabled: true });
 		const task = createTask({ title: "Already running", cwd: repoCwd, priority: "P5", autoWork: true });
-		startAutoWorkRun({
+		const worktreePath = path.join(repoCwd, ".worktrees", "aw-in-flight");
+		fs.mkdirSync(worktreePath, { recursive: true });
+		const priorRunId = startAutoWorkRun({
 			taskId: task.id,
 			taskPriority: "P5",
 			sessionId: "in-flight",
-			worktreePath: "/tmp/x",
+			worktreePath,
 		});
 
-		const app = buildAutoWorkRouter(triggerBridge(new FakeSessionHandle("sess_2", 10)), {
+		const liveHandle = new FakeSessionHandle("in-flight", 10);
+		const decoyHandle = new FakeSessionHandle("sess_2", 10);
+		const app = buildAutoWorkRouter(triggerBridge(decoyHandle, { liveSessions: new Map([["in-flight", liveHandle]]) }), {
 			fetcherOverride: stubUsageFetcher(0.05),
 		});
 		const res = await app.request(`/auto-work/trigger?cwd=${encodeURIComponent(repoCwd)}`, { method: "POST" });
 		expect(res.status).toBe(200);
-		const body = (await res.json()) as { outcome: string; reason?: string };
-		expect(body.outcome).toBe("skipped");
-		expect(body.reason).toContain("already active");
+		const body = (await res.json()) as { outcome: string; taskId?: string; runId?: string; sessionId?: string };
+		expect(body.outcome).toBe("completed");
+		expect(body.taskId).toBe(task.id);
+		expect(body.runId).toBe(priorRunId);
+		expect(body.sessionId).toBe("in-flight");
+
+		// The already-active run was resumed, not duplicated.
+		expect(listAutoWorkRuns({ taskId: task.id })).toHaveLength(1);
 	});
 });
