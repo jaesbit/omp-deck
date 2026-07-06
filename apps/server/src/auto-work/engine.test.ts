@@ -17,7 +17,7 @@ import * as path from "node:path";
 
 import type { AutoWorkConfig, ModelInfo, SessionSummary, Task, TaskPriority } from "@omp-deck/protocol";
 
-import type { AgentBridge, EventListener, SessionHandle } from "../bridge/types.ts";
+import type { AgentBridge, CreateSessionOpts, EventListener, SessionHandle } from "../bridge/types.ts";
 import { DEFAULT_AUTO_WORK_VALUES, setAutoWorkConfig } from "../db/auto-work.ts";
 import { getAutoWorkCostEstimate, listAutoWorkRuns, startAutoWorkRun } from "../db/auto-work-runs.ts";
 import { closeDb, openDb } from "../db/index.ts";
@@ -27,11 +27,13 @@ import {
 	checkAutoWorkPreflight,
 	classifyRunningAutoWorkRun,
 	costFitsAutoWorkBudget,
+	reconcileInactiveAutoWorkRuns,
 	resolveAutoWorkModel,
 	resolveAutoWorkTimeoutMinutes,
 	runAutoWorkCycle,
 	runGlobalAutoWorkCycle,
 	selectNextAutoWorkTask,
+	waitForAutoWorkSessionTerminal,
 } from "./engine.ts";
 
 // ─── Fixtures ───────────────────────────────────────────────────────────────
@@ -429,6 +431,8 @@ const AVAILABLE_MODEL: ModelInfo = {
 class FakeSessionHandle {
 	readonly sessionId: string;
 	private listeners = new Set<EventListener>();
+	private readonly subscription = Promise.withResolvers<void>();
+	readonly subscriptionStarted = this.subscription.promise;
 
 	constructor(
 		sessionId: string,
@@ -439,10 +443,15 @@ class FakeSessionHandle {
 
 	subscribe(listener: EventListener): () => void {
 		this.listeners.add(listener);
+		this.subscription.resolve();
 		if (this.terminalDelayMs !== null) {
 			setTimeout(() => listener({ type: "turn_end" } as never), this.terminalDelayMs);
 		}
 		return () => this.listeners.delete(listener);
+	}
+
+	emit(event: Parameters<EventListener>[0]): void {
+		for (const listener of this.listeners) listener(event);
 	}
 
 	async prompt(): Promise<void> {}
@@ -452,6 +461,7 @@ function fakeBridge(
 	handle: FakeSessionHandle,
 	opts: {
 		models?: ModelInfo[];
+		createSessionCalls?: CreateSessionOpts[];
 		/** Live in-process handles, keyed by sessionId — what `bridge.getSession` finds without a restart. */
 		liveSessions?: Map<string, FakeSessionHandle>;
 		/** Persisted (on-disk) session summaries `bridge.listSessions`/`resumeSession` can see across a restart. */
@@ -463,7 +473,8 @@ function fakeBridge(
 		async listModels() {
 			return models;
 		},
-		async createSession() {
+		async createSession(createOpts: CreateSessionOpts) {
+			opts.createSessionCalls?.push(createOpts);
 			return handle as unknown as SessionHandle;
 		},
 		getSession(sessionId: string) {
@@ -482,6 +493,19 @@ function fakeBridge(
 		},
 	} as unknown as AgentBridge;
 }
+
+describe("waitForAutoWorkSessionTerminal", () => {
+	for (const stopReason of ["aborted", "error"]) {
+		test(`classifies a turn ending with stopReason ${stopReason} as failed`, async () => {
+			const handle = new FakeSessionHandle("sess_terminal", null);
+			const terminal = waitForAutoWorkSessionTerminal(handle as unknown as SessionHandle, 60_000);
+
+			handle.emit({ type: "turn_end", message: { stopReason } });
+
+			expect(await terminal).toBe("failed");
+		});
+	}
+});
 
 // Stubs `gh pr create` for every `runAutoWorkCycle` test that reaches the
 // success path (T-66) — a test must NEVER let the real default run, since
@@ -533,6 +557,33 @@ afterEach(() => {
 	}
 });
 
+describe("reconcileInactiveAutoWorkRuns", () => {
+	test("retires an expired persisted run without a live session and returns its task to backlog", () => {
+		const task = createTask({ title: "Expired Auto Work run", cwd: repoCwd, priority: "P5", autoWork: true });
+		moveTask(task.id, "s_active", 0);
+		expect(getTask(task.id)?.stateId).toBe("s_active");
+		const runId = startAutoWorkRun({
+			taskId: task.id,
+			taskPriority: "P5",
+			sessionId: "sess_not_running",
+			worktreePath: path.join(repoCwd, ".worktrees", "aw-expired"),
+		});
+		const startedAt = listAutoWorkRuns({ taskId: task.id })[0]?.startedAt;
+		if (!startedAt) throw new Error("expected persisted Auto Work run");
+
+		const reconciled = reconcileInactiveAutoWorkRuns(
+			fakeBridge(new FakeSessionHandle("sess_unused", null)),
+			Date.parse(startedAt) + 60_001,
+		);
+
+		expect(reconciled).toBe(1);
+		const runs = listAutoWorkRuns({ taskId: task.id });
+		expect(runs).toHaveLength(1);
+		expect(runs[0]).toEqual(expect.objectContaining({ id: runId, status: "failed", failureReason: "session_not_running" }));
+		expect(getTask(task.id)?.stateId).toBe("s_backlog");
+	});
+});
+
 describe("runAutoWorkCycle", () => {
 	test("selects the task, creates a worktree, starts a session, and closes the run as completed", async () => {
 		setAutoWorkConfig(repoCwd, { ...DEFAULT_AUTO_WORK_VALUES, enabled: true });
@@ -563,6 +614,39 @@ describe("runAutoWorkCycle", () => {
 		expect(runs[0]?.status).toBe("completed");
 		expect(runs[0]?.sessionId).toBe("sess_1");
 		expect(runs[0]?.worktreePath).toBe(result.worktreePath);
+	});
+
+	test("creates Auto Work sessions with auto-start suppressed", async () => {
+		setAutoWorkConfig(repoCwd, { ...DEFAULT_AUTO_WORK_VALUES, enabled: true });
+		createTask({ title: "Avoid duplicate start prompt", cwd: repoCwd, priority: "P5", autoWork: true });
+		const createSessionCalls: CreateSessionOpts[] = [];
+
+		const result = await runAutoWorkCycle(repoCwd, fakeBridge(new FakeSessionHandle("sess_no_autostart", 10), { createSessionCalls }), {
+			getSubscriptionUsage: async () => ({ available: true, weeklyPct: 5 }),
+			createPullRequest: stubCreatePullRequest,
+		});
+
+		expect(result.outcome).toBe("completed");
+		if (result.outcome !== "completed") throw new Error("expected completed");
+		expect(createSessionCalls).toEqual([{ cwd: result.worktreePath, suppressAutoStart: true }]);
+	});
+
+	test("records an aborted agent turn as failed instead of completed", async () => {
+		setAutoWorkConfig(repoCwd, { ...DEFAULT_AUTO_WORK_VALUES, enabled: true });
+		const task = createTask({ title: "Agent cancellation", cwd: repoCwd, priority: "P5", autoWork: true });
+		const handle = new FakeSessionHandle("sess_aborted", null);
+		const cycle = runAutoWorkCycle(repoCwd, fakeBridge(handle), {
+			getSubscriptionUsage: async () => ({ available: true, weeklyPct: 5 }),
+			createPullRequest: async () => {
+				throw new Error("an aborted run must not create a pull request");
+			},
+		});
+		await handle.subscriptionStarted;
+		handle.emit({ type: "turn_end", message: { stopReason: "aborted" } });
+		const result = await cycle;
+
+		expect(result.outcome).not.toBe("completed");
+		expect(listAutoWorkRuns({ taskId: task.id })[0]?.status).toBe("failed");
 	});
 
 	test("moves the task to blocked with a reason and closes the run as timed_out on timeout", async () => {

@@ -59,6 +59,10 @@ const log = logger("auto-work:engine");
 
 const PRIORITY_ORDER: Record<TaskPriority, number> = { P0: 0, P1: 1, P2: 2, P3: 3, P4: 4, P5: 5 };
 
+/** Run ids with a live engine finalizer. They are never stale, even between terminal event delivery and DB completion. */
+const activeRunIds = new Set<string>();
+const STALE_RUN_GRACE_MS = 60_000;
+
 // ─── Pure decision logic ────────────────────────────────────────────────────
 
 export interface AutoWorkPreflightInput {
@@ -380,6 +384,7 @@ export async function runAutoWorkCycle(
 
 	const session = await bridge.createSession({
 		cwd: worktreePath,
+		suppressAutoStart: true,
 		...(model ? { model } : {}),
 	});
 
@@ -399,20 +404,30 @@ export async function runAutoWorkCycle(
 		model: model ? `${model.provider}/${model.id}` : "default",
 	});
 
-	const prompt = `Trabaja en T-${task.displayId}: ${task.title}\n\n(contexto completo disponible via GET /api/tasks/${task.id})`;
-	await session.prompt(prompt);
+	activeRunIds.add(runId);
+	try {
+		const prompt = `Trabaja en T-${task.displayId}: ${task.title}\n\n(contexto completo disponible via GET /api/tasks/${task.id})`;
+		await session.prompt(prompt);
 
-	const timeoutMinutes = resolveAutoWorkTimeoutMinutes(task.priority, config);
-	return finalizeAutoWorkRun({
-		runId,
-		task,
-		session,
-		worktreePath,
-		timeoutMinutes,
-		resolveDeckBaseUrl,
-		createPullRequest,
-		notify,
-	});
+		const timeoutMinutes = resolveAutoWorkTimeoutMinutes(task.priority, config);
+		return await finalizeAutoWorkRun({
+			runId,
+			task,
+			session,
+			worktreePath,
+			timeoutMinutes,
+			resolveDeckBaseUrl,
+			createPullRequest,
+			notify,
+		});
+	} catch (err) {
+		const failureReason = `session prompt failed: ${String(err)}`;
+		failAutoWorkRun(runId, task.id, failureReason);
+		await notify({ kind: "task_failed", displayId: task.displayId, reason: failureReason });
+		return { outcome: "failed", taskId: task.id, runId, sessionId: session.sessionId, worktreePath, failureReason };
+	} finally {
+		activeRunIds.delete(runId);
+	}
 }
 
 // ─── Small IO helpers ───────────────────────────────────────────────────────
@@ -432,7 +447,28 @@ export async function runAutoWorkCycle(
  * opened by hand — surfacing that loudly in the body and the logs beats
  * silently discarding a completed session behind an unrelated `gh` error.
  */
-async function finalizeAutoWorkRun(params: {
+function failAutoWorkRun(runId: string, taskId: string, failureReason: string): void {
+	completeAutoWorkRun(runId, { status: "failed", failureReason });
+	const backlogState = findStateByName("backlog");
+	if (backlogState) moveTask(taskId, backlogState.id, 0);
+	broadcastBus.broadcast({ type: "auto_work_runs_changed" });
+}
+
+function finalizeAutoWorkRun(params: {
+	runId: string;
+	task: Task;
+	session: SessionHandle;
+	worktreePath: string;
+	timeoutMinutes: number;
+	resolveDeckBaseUrl: () => string;
+	createPullRequest: (params: CreatePullRequestParams) => Promise<CreatePullRequestResult>;
+	notify: (event: AutoWorkNotificationEvent) => Promise<void>;
+}): Promise<AutoWorkCycleResult> {
+	activeRunIds.add(params.runId);
+	return settleAutoWorkRun(params).finally(() => activeRunIds.delete(params.runId));
+}
+
+async function settleAutoWorkRun(params: {
 	runId: string;
 	task: Task;
 	session: SessionHandle;
@@ -445,18 +481,22 @@ async function finalizeAutoWorkRun(params: {
 	const { runId, task, session, worktreePath, timeoutMinutes, resolveDeckBaseUrl, createPullRequest, notify } = params;
 	const terminal = await waitForAutoWorkSessionTerminal(session, timeoutMinutes * 60_000);
 
-	if (terminal === "timed_out") {
-		const failureReason = `exceeded ${timeoutMinutes}min timeout for priority ${task.priority}`;
-		completeAutoWorkRun(runId, { status: "timed_out", failureReason });
-		broadcastBus.broadcast({ type: "auto_work_runs_changed" });
-		const blockedState = findStateByName("blocked");
-		if (blockedState) moveTask(task.id, blockedState.id, 0);
+	if (terminal !== "completed") {
+		const timedOut = terminal === "timed_out";
+		const failureReason = timedOut
+			? `exceeded ${timeoutMinutes}min timeout for priority ${task.priority}`
+			: "agent turn ended with an error or abort";
+		if (timedOut) completeAutoWorkRun(runId, { status: "timed_out", failureReason });
+		else failAutoWorkRun(runId, task.id, failureReason);
+		const terminalState = findStateByName(timedOut ? "blocked" : "backlog");
+		if (terminalState) moveTask(task.id, terminalState.id, 0);
 		updateTask(task.id, {
-			body: `${task.body}\n\n---\n**Auto Work timeout** — run \`${runId}\` ${failureReason}. Session: \`${session.sessionId}\`, worktree: \`${worktreePath}\`.`,
+			body: `${task.body}\n\n---\n**Auto Work ${timedOut ? "timeout" : "aborted"}** — run \`${runId}\` ${failureReason}. Session: \`${session.sessionId}\`, worktree: \`${worktreePath}\`.`,
 		});
-		log.warn(`run ${runId} timed out; T-${task.displayId} moved to blocked (${failureReason})`);
+		log.warn(`run ${runId} ${timedOut ? "timed out" : "failed"}; T-${task.displayId} moved to ${timedOut ? "blocked" : "backlog"} (${failureReason})`);
 		await notify({ kind: "task_failed", displayId: task.displayId, reason: failureReason });
-		return { outcome: "timed_out", taskId: task.id, runId, sessionId: session.sessionId, worktreePath };
+		if (timedOut) return { outcome: "timed_out", taskId: task.id, runId, sessionId: session.sessionId, worktreePath };
+		return { outcome: "failed", taskId: task.id, runId, sessionId: session.sessionId, worktreePath, failureReason };
 	}
 	const deckBaseUrl = resolveDeckBaseUrl();
 	const sessionUrl = buildSessionUrl(deckBaseUrl, session.sessionId);
@@ -497,6 +537,24 @@ async function finalizeAutoWorkRun(params: {
 		await notify({ kind: "task_completed", displayId: task.displayId, prNumber });
 	}
 	return { outcome: "completed", taskId: task.id, runId, sessionId: session.sessionId, worktreePath };
+}
+
+/**
+ * Retires persisted runs whose process is no longer executing. The monitor calls
+ * this before displaying history, so a killed session cannot look live forever.
+ * A short grace avoids racing a just-created session before its first turn starts.
+ */
+export function reconcileInactiveAutoWorkRuns(bridge: AgentBridge, now = Date.now()): number {
+	let reconciled = 0;
+	for (const run of listAutoWorkRuns({ status: "running" })) {
+		if (activeRunIds.has(run.id) || now - Date.parse(run.startedAt) < STALE_RUN_GRACE_MS) continue;
+		const handle = bridge.getSession(run.sessionId);
+		if (handle?.isStreamingNow()) continue;
+		failAutoWorkRun(run.id, run.taskId, "session_not_running");
+		log.warn(`run ${run.id} (session ${run.sessionId}) is no longer running; moved task back to backlog`);
+		reconciled += 1;
+	}
+	return reconciled;
 }
 
 /**
@@ -625,6 +683,16 @@ async function resumeOrRetireAutoWorkRun(
 	});
 }
 
+function terminalOutcomeFromEvent(event: unknown): "completed" | "failed" | undefined {
+	if (!event || typeof event !== "object" || !("type" in event)) return undefined;
+	if (event.type !== "turn_end" && event.type !== "agent_end") return undefined;
+	if (!("message" in event) || !event.message || typeof event.message !== "object" || !("stopReason" in event.message)) {
+		return "completed";
+	}
+	const stopReason = event.message.stopReason;
+	return stopReason === "aborted" || stopReason === "error" ? "failed" : "completed";
+}
+
 /**
  * Terminal-state detection reuses the same signal the idle-session reaper
  * tracks internally (`bridge/in-process.ts`'s `turnInFlight`): a `turn_end`
@@ -635,23 +703,26 @@ async function resumeOrRetireAutoWorkRun(
 export function waitForAutoWorkSessionTerminal(
 	handle: SessionHandle,
 	timeoutMs: number,
-): Promise<"completed" | "timed_out"> {
-	return new Promise((resolve) => {
-		let settled = false;
-		const finish = (outcome: "completed" | "timed_out") => {
-			if (settled) return;
-			settled = true;
-			clearTimeout(timer);
-			unsubscribe();
-			resolve(outcome);
-		};
-		const timer = setTimeout(() => finish("timed_out"), timeoutMs);
-		(timer as unknown as { unref?: () => void }).unref?.();
-		const unsubscribe = handle.subscribe((event) => {
-			const type = (event as { type?: string } | undefined)?.type;
-			if (type === "turn_end" || type === "agent_end") finish("completed");
-		});
+): Promise<"completed" | "failed" | "timed_out"> {
+	const { promise, resolve } = Promise.withResolvers<"completed" | "failed" | "timed_out">();
+	let settled = false;
+	let unsubscribe: (() => void) | undefined;
+	const finish = (outcome: "completed" | "failed" | "timed_out") => {
+		if (settled) return;
+		settled = true;
+		clearTimeout(timer);
+		unsubscribe?.();
+		resolve(outcome);
+	};
+	const timer = setTimeout(() => finish("timed_out"), timeoutMs);
+	// Bun timers expose `unref`, unlike browser numeric timer ids.
+	const unrefTimer = timer as typeof timer & { unref?: () => void };
+	unrefTimer.unref?.();
+	unsubscribe = handle.subscribe((event) => {
+		const outcome = terminalOutcomeFromEvent(event);
+		if (outcome) finish(outcome);
 	});
+	return promise;
 }
 
 /**
