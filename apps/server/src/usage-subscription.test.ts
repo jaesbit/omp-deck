@@ -41,6 +41,7 @@ function makeLimit(
 function makeReport(usedFraction: number, resetsAt?: number): UsageReport {
 	return {
 		provider: "anthropic",
+		fetchedAt: Date.now(),
 		limits: [makeLimit("5h", "5 Hour", usedFraction, FIVE_HOURS_MS, resetsAt)],
 	};
 }
@@ -49,6 +50,7 @@ function makeReport(usedFraction: number, resetsAt?: number): UsageReport {
 function makeFullReport(fiveHourFraction: number, sevenDayFraction: number, resetsAt5h?: number, resetsAt7d?: number): UsageReport {
 	return {
 		provider: "anthropic",
+		fetchedAt: Date.now(),
 		limits: [
 			makeLimit("5h", "5 Hour", fiveHourFraction, FIVE_HOURS_MS, resetsAt5h),
 			makeLimit("7d", "7 Day", sevenDayFraction, SEVEN_DAYS_MS, resetsAt7d),
@@ -127,8 +129,8 @@ describe("fetchSubscriptionUsage", () => {
 	});
 
 	test("deduplicates limits with the same id, keeping highest fraction", async () => {
-		const low: UsageReport = { provider: "anthropic", limits: [makeLimit("5h", "5 Hour", 0.2, FIVE_HOURS_MS)] };
-		const high: UsageReport = { provider: "anthropic", limits: [makeLimit("5h", "5 Hour", 0.9, FIVE_HOURS_MS)] };
+		const low: UsageReport = { provider: "anthropic", fetchedAt: Date.now(), limits: [makeLimit("5h", "5 Hour", 0.2, FIVE_HOURS_MS)] };
+		const high: UsageReport = { provider: "anthropic", fetchedAt: Date.now(), limits: [makeLimit("5h", "5 Hour", 0.9, FIVE_HOURS_MS)] };
 		const result = await fetchSubscriptionUsage(fetcher([low, high]));
 		expect(result.available).toBe(true);
 		if (!result.available) return;
@@ -149,6 +151,7 @@ describe("fetchSubscriptionUsage", () => {
 	test("returns available with empty limits and 0% when reports have no usedFraction", async () => {
 		const report: UsageReport = {
 			provider: "anthropic",
+			fetchedAt: Date.now(),
 			limits: [{ id: "5h", label: "5 Hour", scope: { provider: "anthropic" }, amount: { unit: "tokens" } }],
 		};
 		const result = await fetchSubscriptionUsage(fetcher([report]));

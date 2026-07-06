@@ -27,6 +27,7 @@ import { Hono } from "hono";
 import type {
 	AutoWorkConfig,
 	AutoWorkCostEstimateResponse,
+	AutoWorkCycleResult,
 	AutoWorkRunStatus,
 	ListAutoWorkRunsResponse,
 	ModelRef,
@@ -35,8 +36,11 @@ import type {
 } from "@omp-deck/protocol";
 
 import type { AgentBridge } from "./bridge/types.ts";
+import { isCwdAllowed } from "./routes-fs.ts";
 import { getAutoWorkConfig, setAutoWorkConfig } from "./db/auto-work.ts";
 import { getAutoWorkCostEstimate, listAutoWorkRuns } from "./db/auto-work-runs.ts";
+import { runAutoWorkCycle } from "./auto-work/engine.ts";
+import { getSubscriptionUsage, type UsageReportsFetcher } from "./usage-subscription.ts";
 import { logger } from "./log.ts";
 
 const log = logger("routes:auto-work");
@@ -44,7 +48,17 @@ const log = logger("routes:auto-work");
 const TASK_PRIORITIES: TaskPriority[] = ["P0", "P1", "P2", "P3", "P4", "P5"];
 const RUN_STATUSES: AutoWorkRunStatus[] = ["running", "completed", "failed", "timed_out"];
 
-export function buildAutoWorkRouter(bridge: AgentBridge): Hono {
+export interface BuildAutoWorkRouterOptions {
+	/**
+	 * Test-only: override the usage-reports fetcher injected into the
+	 * `/auto-work/trigger` cycle's subscription-usage pre-flight check,
+	 * avoiding the real `getDeckAuthStorage()` call. Mirrors
+	 * `BuildUsageRouterOptions` in `routes-usage.ts`.
+	 */
+	fetcherOverride?: UsageReportsFetcher;
+}
+
+export function buildAutoWorkRouter(bridge: AgentBridge, options: BuildAutoWorkRouterOptions = {}): Hono {
 	const app = new Hono();
 
 	app.get("/auto-work/config", (c) => {
@@ -90,6 +104,7 @@ export function buildAutoWorkRouter(bridge: AgentBridge): Hono {
 				weeklyPctLimit: body.weeklyPctLimit,
 				defaultEstimatePctByPriority: body.defaultEstimatePctByPriority,
 				estimationBuffer: body.estimationBuffer,
+				timeoutMinutesByPriority: body.timeoutMinutesByPriority,
 			});
 			return c.json(config);
 		} catch (err) {
@@ -139,6 +154,31 @@ export function buildAutoWorkRouter(bridge: AgentBridge): Hono {
 		}
 		const response: AutoWorkCostEstimateResponse = getAutoWorkCostEstimate(priorityParam as TaskPriority);
 		return c.json(response);
+	});
+
+	// T-64: fires one auto-work cycle immediately, outside the cron schedule —
+	// callable manually or from a Routine action. Never spins up a *second*
+	// concurrent run for the same workspace; `runAutoWorkCycle`'s pre-flight
+	// mutex check (via `auto_work_runs`) returns `{ outcome: "skipped" }`
+	// instead.
+	app.post("/auto-work/trigger", async (c) => {
+		const cwd = c.req.query("cwd")?.trim();
+		if (!cwd) return c.json({ error: "cwd query param is required" }, 400);
+		if (!isCwdAllowed(cwd)) {
+			return c.json(
+				{ error: `cwd does not exist, isn't a directory, or is outside the home directory: ${cwd}` },
+				400,
+			);
+		}
+		try {
+			const result: AutoWorkCycleResult = await runAutoWorkCycle(cwd, bridge, {
+				getSubscriptionUsage: () => getSubscriptionUsage(options.fetcherOverride),
+			});
+			return c.json(result);
+		} catch (err) {
+			log.error("auto-work trigger failed", err);
+			return c.json({ error: String(err) }, 500);
+		}
 	});
 
 	return app;
@@ -197,6 +237,16 @@ function validateShape(body: SetAutoWorkConfigRequest): string | undefined {
 
 	if (typeof body.estimationBuffer !== "number" || body.estimationBuffer < 1 || body.estimationBuffer > 5) {
 		return "estimationBuffer must be a number between 1 and 5";
+	}
+
+	if (typeof body.timeoutMinutesByPriority !== "object" || body.timeoutMinutesByPriority === null) {
+		return "timeoutMinutesByPriority must be an object";
+	}
+	for (const priority of TASK_PRIORITIES) {
+		const minutes = body.timeoutMinutesByPriority[priority];
+		if (typeof minutes !== "number" || !Number.isFinite(minutes) || minutes <= 0) {
+			return `timeoutMinutesByPriority.${priority} must be a positive number`;
+		}
 	}
 
 	return undefined;

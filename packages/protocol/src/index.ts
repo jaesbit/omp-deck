@@ -1919,6 +1919,13 @@ export interface AutoWorkConfig {
 	defaultEstimatePctByPriority: Record<TaskPriority, number>;
 	/** Safety-buffer multiplier applied to every cost estimate (T-63), e.g. 1.3 = 30% headroom. */
 	estimationBuffer: number;
+	/**
+	 * Per-priority execution timeout, in minutes, the engine (T-64) enforces
+	 * while waiting for an agent session to reach a terminal state. On
+	 * expiry the run is closed `status: "timed_out"` and the task is moved
+	 * to `blocked`.
+	 */
+	timeoutMinutesByPriority: Record<TaskPriority, number>;
 	updatedAt: string;
 }
 
@@ -1931,6 +1938,7 @@ export interface SetAutoWorkConfigRequest {
 	weeklyPctLimit: number;
 	defaultEstimatePctByPriority: Record<TaskPriority, number>;
 	estimationBuffer: number;
+	timeoutMinutesByPriority: Record<TaskPriority, number>;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1996,3 +2004,20 @@ export interface AutoWorkCostEstimateResponse {
 	avgPctConsumed: number | null;
 	sampleSize: number;
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Auto Work execution engine (T-64)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Result of one `runAutoWorkCycle` pass — also the `POST
+ * /api/auto-work/trigger?cwd=` response body. `"skipped"` covers every
+ * pre-flight failure and "nothing eligible/nothing fits" case; `reason` is a
+ * human-readable explanation, not a machine-parseable code (callers that need
+ * to branch on *why* should use the pure `checkAutoWorkPreflight` /
+ * `selectNextAutoWorkTask` functions directly instead of this response).
+ */
+export type AutoWorkCycleResult =
+	| { outcome: "skipped"; reason: string }
+	| { outcome: "completed"; taskId: string; runId: string; sessionId: string; worktreePath: string }
+	| { outcome: "timed_out"; taskId: string; runId: string; sessionId: string; worktreePath: string };
