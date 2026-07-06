@@ -4,7 +4,7 @@ import type { Task, TaskPriority, TaskState } from "@omp-deck/protocol";
 
 import { MarkdownEdit } from "@/components/MarkdownEdit";
 import { Modal } from "@/components/ui/Modal";
-import { candidateDependencyTasks, resolveDependencyTasks } from "@/lib/task-dependencies";
+import { candidateDependencyTasks, resolveDependencyTasks, resolveDependentTasks } from "@/lib/task-dependencies";
 import { cn } from "@/lib/utils";
 
 const PRIORITIES: TaskPriority[] = ["P0", "P1", "P2", "P3", "P4", "P5"];
@@ -72,6 +72,10 @@ export function TaskModal({
 	);
 	const candidateTasks = useMemo(
 		() => (task ? candidateDependencyTasks(task, allTasks) : []),
+		[task, allTasks],
+	);
+	const dependentTasks = useMemo(
+		() => (task ? resolveDependentTasks(task, allTasks) : []),
 		[task, allTasks],
 	);
 
@@ -268,6 +272,39 @@ export function TaskModal({
 					) : null}
 				</div>
 			</div>
+			{dependentTasks.length > 0 && (
+				<div className="shrink-0 border-b border-line px-6 py-3">
+					<div className="mb-2 flex items-center gap-1.5 font-mono text-2xs uppercase tracking-meta text-ink-4">
+						<Link2 className="h-3.5 w-3.5" />
+						<span>Required by</span>
+					</div>
+					<div className="flex flex-wrap items-center gap-1.5">
+						{dependentTasks.map((dep) => {
+							const depState = states.find((s) => s.id === dep.stateId);
+							const isDone = depState?.name.toLowerCase() === "done";
+							return (
+								<span
+									key={dep.id}
+									className="inline-flex items-center gap-1.5 rounded-md border border-line bg-paper-2 py-1 px-2 text-xs text-ink-2"
+									title={dep.title}
+								>
+									{isDone ? (
+										<CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-success" />
+									) : (
+										<Circle
+											className="h-3.5 w-3.5 shrink-0"
+											style={{ color: depState?.color ?? "var(--ink-3, #6e6a62)" }}
+										/>
+									)}
+									<span className="font-mono text-2xs text-ink-4">T-{dep.displayId}</span>
+									<span className="max-w-[16rem] truncate">{dep.title || "Untitled task"}</span>
+									<span className="text-2xs text-ink-4">{depState?.name ?? "?"}</span>
+								</span>
+							);
+						})}
+					</div>
+				</div>
+			)}
 			<div className="min-h-0 flex-1 overflow-y-auto px-6 py-5">
 				<MarkdownEdit
 					value={task.body}

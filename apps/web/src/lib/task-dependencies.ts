@@ -33,3 +33,15 @@ export function candidateDependencyTasks(task: Task, allTasks: Task[]): Task[] {
 		.filter((t) => t.id !== task.id && !existing.has(t.id) && !t.archivedAt)
 		.sort((a, b) => a.displayId - b.displayId);
 }
+
+/**
+ * Tasks that list `task.id` in their own `dependsOn` — i.e. tasks that cannot
+ * run until `task` is done. Sorted by display id for a stable render order.
+ * Includes archived tasks so the caller can see the full picture; filter at
+ * the call-site if needed.
+ */
+export function resolveDependentTasks(task: Task, allTasks: Task[]): Task[] {
+	return allTasks
+		.filter((t) => t.id !== task.id && t.dependsOn.includes(task.id))
+		.sort((a, b) => a.displayId - b.displayId);
+}

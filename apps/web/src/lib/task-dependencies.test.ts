@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { Task } from "@omp-deck/protocol";
 
-import { candidateDependencyTasks, resolveDependencyTasks } from "./task-dependencies";
+import { candidateDependencyTasks, resolveDependencyTasks, resolveDependentTasks } from "./task-dependencies";
 
 function task(overrides: Partial<Task> & { id: string }): Task {
 	return {
@@ -57,5 +57,43 @@ describe("candidateDependencyTasks", () => {
 		const t = task({ id: "t" });
 		const candidates = candidateDependencyTasks(t, [a, b, c, t]);
 		expect(candidates.map((x) => x.id)).toEqual(["b", "c", "a"]);
+	});
+});
+
+describe("resolveDependentTasks", () => {
+	test("returns tasks whose dependsOn includes task.id", () => {
+		const a = task({ id: "a" });
+		const b = task({ id: "b", dependsOn: ["a"] });
+		const c = task({ id: "c", dependsOn: ["a"] });
+		const other = task({ id: "d" });
+		const result = resolveDependentTasks(a, [a, b, c, other]);
+		expect(result.map((t) => t.id)).toEqual(["b", "c"]);
+	});
+
+	test("returns an empty array when no task depends on it", () => {
+		const a = task({ id: "a" });
+		const b = task({ id: "b" });
+		expect(resolveDependentTasks(a, [a, b])).toEqual([]);
+	});
+
+	test("sorts dependents by displayId ascending", () => {
+		const a = task({ id: "a" });
+		const b = task({ id: "b", displayId: 10, dependsOn: ["a"] });
+		const c = task({ id: "c", displayId: 2, dependsOn: ["a"] });
+		const result = resolveDependentTasks(a, [a, b, c]);
+		expect(result.map((t) => t.id)).toEqual(["c", "b"]);
+	});
+
+	test("includes archived dependents (informational, not filtered)", () => {
+		const a = task({ id: "a" });
+		const b = task({ id: "b", dependsOn: ["a"], archivedAt: "2026-01-02T00:00:00.000Z" });
+		const result = resolveDependentTasks(a, [a, b]);
+		expect(result.map((t) => t.id)).toEqual(["b"]);
+	});
+
+	test("does not include the task itself", () => {
+		// Self-dependency is rejected at DB level; guard against stale data.
+		const a = task({ id: "a", dependsOn: ["a"] });
+		expect(resolveDependentTasks(a, [a])).toEqual([]);
 	});
 });
