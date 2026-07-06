@@ -38,21 +38,40 @@ export class WsHub {
 	private startHeartbeat(): void {
 		if (this.heartbeatTimer) return;
 		this.heartbeatTimer = setInterval(() => {
-			const info = getBuildInfo();
-			// Push through the shared bus so any subscriber (the hub itself, future
-			// telemetry, tests) sees the frame, not just connected WS sockets.
-			broadcastBus.broadcast({
-				type: "heartbeat",
-				serverStartedAt: info.serverStartedAt,
-				pid: info.pid,
-				uptimeSecs: getUptimeSecs(),
-				buildSha: info.buildSha,
-				version: info.version,
-				timestamp: new Date().toISOString(),
-			});
+			try {
+				const info = getBuildInfo();
+				// Push through the shared bus so any subscriber (the hub itself, future
+				// telemetry, tests) sees the frame, not just connected WS sockets.
+				broadcastBus.broadcast({
+					type: "heartbeat",
+					serverStartedAt: info.serverStartedAt,
+					pid: info.pid,
+					uptimeSecs: getUptimeSecs(),
+					buildSha: info.buildSha,
+					version: info.version,
+					timestamp: new Date().toISOString(),
+				});
+			} catch (err) {
+				// An uncaught throw here is fatal to the whole process — Bun (like
+				// Node) tears down the process on an unhandled exception inside a
+				// setInterval callback. One bad tick must never take the deck down.
+				log.error(`heartbeat tick failed`, err);
+			}
 		}, HEARTBEAT_INTERVAL_MS);
-		// Don't keep the event loop alive solely for heartbeats.
-		this.heartbeatTimer.unref?.();
+		// Deliberately ref'd (the default) — NOT unref()'d. This is a persistent
+		// server process kept alive by the HTTP listener regardless, so there was
+		// never a real benefit to unref-ing this timer. Previously it was
+		// unref()'d "to not keep the event loop alive solely for heartbeats"; a
+		// production instance (multi-day uptime, heavy memory/swap pressure)
+		// was observed to stop emitting heartbeats entirely — no crash, no error
+		// logged, every other route/WS traffic unaffected — while a freshly
+		// started process running the exact same code reproduced heartbeats
+		// correctly every time. That signature matches the unref'd-timer path
+		// (a narrower, less-exercised feature than Bun's ref'd default) losing
+		// the timer under load rather than a logic bug in this callback. Ref'd
+		// removes that dependency entirely; the try/catch above is an
+		// independent hardening so a future thrown error degrades to a logged
+		// miss instead of crashing the whole server.
 	}
 
 	/** For tests + clean shutdown. After dispose, no more heartbeats fire. */
