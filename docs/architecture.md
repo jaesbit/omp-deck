@@ -8,8 +8,8 @@ Browser tabs (Vite dev :5173 · Bun prod :8787)
    ▼
 Bun server  (apps/server)
    ├─ AgentBridge interface
-   │   └─ InProcessAgentBridge → @oh-my-pi/pi-coding-agent SDK
-   │       └─ Map<sessionId, AgentSession>
+   │   └─ ProcessAgentBridge → one Bun child process per active root session
+   │       └─ InProcessAgentBridge → @oh-my-pi/pi-coding-agent SDK
    ├─ Hono REST router  /api/{health, sessions, tasks, routines, inbox,
    │                         settings, models, marketplace, bridges, slash-commands, fs}
    ├─ Bun.serve WebSocket hub  /ws
@@ -30,7 +30,7 @@ apps/bridges/telegram (standalone Bun process — only when started)
 
 ## Workspaces
 
-- **`apps/server`** — Bun + Hono backend. Embeds the omp SDK.
+- **`apps/server`** — Bun + Hono backend. Supervises per-session child processes that embed the omp SDK.
 - **`apps/web`** — Vite + React + Tailwind frontend. Pure consumer of the WS
   event stream; reduces events into a structured `SessionUi` in
   `lib/reducer.ts`.
@@ -41,14 +41,23 @@ apps/bridges/telegram (standalone Bun process — only when started)
 
 ## The `AgentBridge` interface
 
-`apps/server/src/bridge/types.ts` defines the contract. Current impl is
-`InProcessAgentBridge` which embeds the SDK in the same Bun process. A
-future subprocess-per-session impl (`omp --mode rpc` over stdio) can drop in
-behind the same interface — useful when you want crash isolation per session
-or to run sessions on different machines.
+`apps/server/src/bridge/types.ts` defines the contract. The server uses
+`ProcessAgentBridge`, which starts one Bun child process for every active root
+session. Each child hosts an `InProcessAgentBridge` with exactly one session and
+communicates with the parent through typed Bun IPC request/response/event frames.
+This process boundary is required because omp's `AgentRegistry`, `IrcBus`, and
+subagent lifecycle managers are process-global: separate roots in one JavaScript
+isolate would otherwise share agent names and IRC mailboxes. Children inherit the
+parent's command, cwd, and environment; the parent rejects outstanding requests
+and removes the session if a child exits unexpectedly.
 
 Routes never import `@oh-my-pi/pi-coding-agent` directly. Everything
 sessions-related flows through `AgentBridge` or `SessionHandle`.
+
+Non-session model catalog operations remain in the parent. Session events, UI
+dialogs, and plan-mode frames travel over the owning child's IPC channel. Global
+deck broadcasts produced inside a child are forwarded to the parent's
+`BroadcastBus` exactly once, then fanned out to connected clients normally.
 
 ## Frame model
 

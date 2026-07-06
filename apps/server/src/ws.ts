@@ -137,7 +137,7 @@ export class WsHub {
 				return;
 
 			case "clear_queue":
-				this.handleClearQueue(ws, frame.sessionId);
+				await this.handleClearQueue(ws, frame.sessionId);
 				return;
 
 			case "cancel_queued":
@@ -204,7 +204,7 @@ export class WsHub {
 			const handle = this.bridge.getSession(sessionId);
 			if (handle) {
 				this.bridge.bumpActivity(sessionId);
-				send(ws, { type: "subscribed", sessionId, snapshot: handle.snapshot() });
+				send(ws, { type: "subscribed", sessionId, snapshot: await handle.snapshot() });
 			}
 			return;
 		}
@@ -263,7 +263,7 @@ export class WsHub {
 		};
 		ws.data.subscriptions.set(sessionId, teardown);
 		this.bridge.trackSubscriberAdded(sessionId, connectionId);
-		send(ws, { type: "subscribed", sessionId, snapshot: handle.snapshot() });
+		send(ws, { type: "subscribed", sessionId, snapshot: await handle.snapshot() });
 	}
 
 	private handleUnsubscribe(ws: ServerWebSocket<ConnectionData>, sessionId: string): void {
@@ -363,7 +363,7 @@ export class WsHub {
 		}
 	}
 
-	private handleClearQueue(ws: ServerWebSocket<ConnectionData>, sessionId: string): void {
+	private async handleClearQueue(ws: ServerWebSocket<ConnectionData>, sessionId: string): Promise<void> {
 		const handle = this.bridge.getSession(sessionId);
 		if (!handle) {
 			send(ws, { type: "error", sessionId, error: "session not active" });
@@ -371,7 +371,7 @@ export class WsHub {
 		}
 		this.bridge.bumpActivity(sessionId);
 		try {
-			handle.clearQueue();
+			await handle.clearQueue();
 		} catch (err) {
 			send(ws, { type: "error", sessionId, error: `clear queue failed: ${String(err)}` });
 		}

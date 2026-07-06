@@ -63,8 +63,8 @@
 		"node": ">=18"
 	},
 	"dependencies": {
-		"@oh-my-pi/pi-ai": "16.3.4",
-		"@oh-my-pi/pi-coding-agent": "16.3.4",
+		"@oh-my-pi/pi-ai": "16.3.11",
+		"@oh-my-pi/pi-coding-agent": "16.3.11",
 		"@omp-deck/protocol": "0.6.1",
 		"ajv": "^8.17.1",
 		"ajv-formats": "^3.0.1",
@@ -78,8 +78,5 @@
 	],
 	"devDependencies": {
 		"typescript": "^6.0.3"
-	},
-	"patchedDependencies": {
-		"@oh-my-pi/pi-coding-agent@16.3.4": "patches/@oh-my-pi%2Fpi-coding-agent@16.3.4.patch"
 	}
 }

@@ -9,7 +9,9 @@ loadManagedEnvIntoProcess();
 import type { Server, ServerWebSocket } from "bun";
 import * as path from "node:path";
 
-import { InProcessAgentBridge } from "./bridge/in-process.ts";
+import { runAgentWorker } from "./bridge/agent-worker.ts";
+import { ProcessAgentBridge } from "./bridge/process.ts";
+import type { AgentBridge } from "./bridge/types.ts";
 import { RoutinesRunner } from "./routines-runner.ts";
 import { closeDb, openDb } from "./db/index.ts";
 import { loadConfig } from "./config.ts";
@@ -17,7 +19,8 @@ import { logger } from "./log.ts";
 import { resolveBunExecutable } from "./runtime-bun.ts";
 import { primeUpdateCheckOnBoot } from "./update-check.ts";
 import { buildRouter } from "./routes.ts";
-import { WsHub, type ConnectionData } from "./ws.ts";
+import { WsHub } from "./ws.ts";
+import type { ConnectionData } from "./ws.ts";
 import { MarketplaceService } from "./marketplace-service.ts";
 import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { SkillsService } from "./skills-service.ts";
@@ -97,7 +100,8 @@ async function main(): Promise<void> {
 	notificationService.register(new BrowserNotificationChannel());
 
 
-	const bridge = new InProcessAgentBridge({
+	const bridge: AgentBridge = new ProcessAgentBridge({
+		workerEntryPath: import.meta.path,
 		idleTimeoutMs: config.idleTimeoutMs,
 		autoStartCommand: config.autoStartCommand,
 	});
@@ -288,10 +292,17 @@ const LANDING_HTML = `<!doctype html>
 <p>API base: <code>/api</code> &nbsp;&nbsp; WebSocket: <code>/ws</code></p>
 </body></html>`;
 
-main().catch((err) => {
-	log.error(`fatal`, err);
-	process.exit(1);
-});
+if (process.argv.includes("--agent-worker")) {
+	runAgentWorker().catch((err) => {
+		log.error(`agent worker fatal`, err);
+		process.exit(1);
+	});
+} else {
+	main().catch((err) => {
+		log.error(`fatal`, err);
+		process.exit(1);
+	});
+}
 
 async function serveStatic(req: Request, root: string): Promise<Response> {
 	const url = new URL(req.url);

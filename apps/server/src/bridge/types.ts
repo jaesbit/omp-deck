@@ -3,22 +3,26 @@ import type {
 	AgentSessionEventJson,
 	ContextUsage,
 	ExtUiDialogResponse,
+	GoalModeContextWire,
 	ImageAttachment,
 	ModelInfo,
 	ModelRef,
-	GoalModeContextWire,
 	PendingPlanApprovalWire,
 	PlanModeContextWire,
+	QueuedPromptWire,
 	ServerFrame,
 	SessionHistoryResponse,
 	SessionSnapshot,
 	SessionSummary,
 } from "@omp-deck/protocol";
+import type { GoalAction } from "./goal-mode-bridge.ts";
+
+export type MaybePromise<T> = T | Promise<T>;
 
 /**
- * Abstract bridge to omp. The in-process impl embeds @oh-my-pi/pi-coding-agent
- * directly; a future RPC impl will spawn `omp --mode rpc` subprocesses behind
- * the same surface. Anything the server needs from omp MUST flow through this.
+ * Abstract bridge to omp. Production uses one SDK-hosting child process per
+ * active root session; sessionless catalog and persistence operations stay in
+ * the parent. Anything the server needs from omp MUST flow through this API.
  */
 export interface AgentBridge {
 	createSession(opts: CreateSessionOpts): Promise<SessionHandle>;
@@ -110,33 +114,33 @@ export interface SessionHandle {
 	readonly cwd: string;
 
 	subscribe(listener: EventListener): () => void;
-	snapshot(): SessionSnapshot;
+	snapshot(): MaybePromise<SessionSnapshot>;
 	/**
 	 * One page of message history older than index `before` (exclusive),
 	 * newest-last. Complements the tail-sliced `snapshot()`: the client
 	 * walks `before` backwards (starting at the snapshot's
 	 * `messagesStartIndex`) until `startIndex` reaches 0.
 	 */
-	getHistory(before: number, limit: number): SessionHistoryResponse;
+	getHistory(before: number, limit: number): MaybePromise<SessionHistoryResponse>;
 	prompt(
 		text: string,
 		opts?: { streamingBehavior?: "steer" | "followUp"; images?: ImageAttachment[] },
 	): Promise<void>;
 	/** True iff a turn is currently in-flight. Used by the WS layer to decide
 	 *  whether a freshly-arrived prompt is being queued vs. running immediately. */
-	isStreamingNow(): boolean;
+	isStreamingNow(): MaybePromise<boolean>;
 	/** Number of prompts the SDK currently has queued (steering + follow-up +
 	 *  hidden next-turn). */
-	queuedMessageCount(): number;
+	queuedMessageCount(): MaybePromise<number>;
 	/** Drop every queued prompt. Returns the per-bucket counts that were
 	 *  cleared so the caller can surface a `queue_cleared` event. */
-	clearQueue(): { steering: number; followUp: number };
+	clearQueue(): MaybePromise<{ steering: number; followUp: number }>;
 	/**
 	 * Snapshot of the bridge-tracked shadow queue (the user-visible queue
 	 * mirrored from the SDK). Includes stable `id`s the client can use to
 	 * target a specific entry for cancel/edit. Empty when no turn is in flight.
 	 */
-	getQueueSnapshot(): import("@omp-deck/protocol").QueuedPromptWire[];
+	getQueueSnapshot(): MaybePromise<QueuedPromptWire[]>;
 	/**
 	 * Cancel a single queued prompt by its `id`. Returns true if an entry
 	 * was removed, false if the id was unknown (already drained, etc).
@@ -154,7 +158,7 @@ export interface SessionHandle {
 	editQueuedById(
 		id: string,
 		text: string,
-		images?: import("@omp-deck/protocol").ImageAttachment[],
+		images?: ImageAttachment[],
 	): Promise<boolean>;
 	abort(): Promise<void>;
 	setName(name: string): Promise<void>;
@@ -184,14 +188,14 @@ export interface SessionHandle {
 	 * Snapshot of context-window utilization. Returns `undefined` when the
 	 * underlying model has no declared context window.
 	 */
-	getContextUsage(): ContextUsage | undefined;
+	getContextUsage(): MaybePromise<ContextUsage | undefined>;
 	dispose(): Promise<void>;
 	/** Idempotent enter/exit. No-op when state already matches. */
 	setPlanMode(enabled: boolean): Promise<void>;
 	/** Read the bridge's plan-mode context for snapshot replay. */
-	getPlanModeContext(): PlanModeContextWire | undefined;
+	getPlanModeContext(): MaybePromise<PlanModeContextWire | undefined>;
 	/** Read the unresolved plan-approval card for snapshot replay. */
-	getPendingPlanApproval(): PendingPlanApprovalWire | undefined;
+	getPendingPlanApproval(): MaybePromise<PendingPlanApprovalWire | undefined>;
 	/**
 	 * Settle a plan-approval proposal. Returns `"settled"` on success,
 	 * `"unknown"` when the proposalId does not match the pending entry
@@ -202,9 +206,9 @@ export interface SessionHandle {
 		response: PlanApprovalResponse,
 	): Promise<"settled" | "unknown">;
 	/** Execute a Goal Mode lifecycle action for this session. */
-	actOnGoal(action: import("./goal-mode-bridge.ts").GoalAction): Promise<void>;
+	actOnGoal(action: GoalAction): Promise<void>;
 	/** Read Goal Mode state for snapshot replay. */
-	getGoalModeContext(): GoalModeContextWire | undefined;
+	getGoalModeContext(): MaybePromise<GoalModeContextWire | undefined>;
 }
 
 export type SlashDispatchResult =
