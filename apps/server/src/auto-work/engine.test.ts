@@ -30,6 +30,7 @@ import {
 	resolveAutoWorkModel,
 	resolveAutoWorkTimeoutMinutes,
 	runAutoWorkCycle,
+	runGlobalAutoWorkCycle,
 	selectNextAutoWorkTask,
 } from "./engine.ts";
 
@@ -708,6 +709,56 @@ describe("runAutoWorkCycle", () => {
 		expect(result.outcome).toBe("skipped");
 		if (result.outcome !== "skipped") throw new Error("expected skipped");
 		expect(result.reason).toContain("none fit");
+	});
+});
+
+describe("runGlobalAutoWorkCycle", () => {
+	test("does not call the selector when no workspace has a candidate", async () => {
+		let selectorCalls = 0;
+
+		const result = await runGlobalAutoWorkCycle(fakeBridge(new FakeSessionHandle("unused", 10)), {
+			getSubscriptionUsage: async () => ({ available: true, weeklyPct: 5 }),
+			selectTask: async () => {
+				selectorCalls += 1;
+				return undefined;
+			},
+		});
+
+		expect(result).toEqual({ outcome: "skipped", reason: "no workspace has auto-work enabled" });
+		expect(selectorCalls).toBe(0);
+	});
+
+	test("uses the selector's candidate ID instead of deterministic priority", async () => {
+		const otherRepoCwd = path.join(homeDir, "other-workspace");
+		fs.mkdirSync(otherRepoCwd, { recursive: true });
+		runGit(["init", "-q"], otherRepoCwd);
+		runGit(["config", "user.email", "test@example.com"], otherRepoCwd);
+		runGit(["config", "user.name", "Test"], otherRepoCwd);
+		fs.writeFileSync(path.join(otherRepoCwd, "README.md"), "other\n");
+		runGit(["add", "."], otherRepoCwd);
+		runGit(["commit", "-q", "-m", "init"], otherRepoCwd);
+
+		setAutoWorkConfig(repoCwd, { ...DEFAULT_AUTO_WORK_VALUES, enabled: true });
+		setAutoWorkConfig(otherRepoCwd, { ...DEFAULT_AUTO_WORK_VALUES, enabled: true });
+		const deterministicWinner = createTask({ title: "P0 fallback", cwd: repoCwd, priority: "P0", autoWork: true });
+		const selectorWinner = createTask({ title: "Selector winner", cwd: otherRepoCwd, priority: "P5", autoWork: true });
+		let selectorCandidates: string[] | undefined;
+
+		const result = await runGlobalAutoWorkCycle(fakeBridge(new FakeSessionHandle("global-selector", 10)), {
+			getSubscriptionUsage: async () => ({ available: true, weeklyPct: 5 }),
+			createPullRequest: stubCreatePullRequest,
+			selectTask: async (candidates) => {
+				selectorCandidates = candidates.map((candidate) => candidate.task.id);
+				return selectorWinner.id;
+			},
+		});
+
+		expect(selectorCandidates).toEqual([deterministicWinner.id, selectorWinner.id]);
+		expect(result.outcome).toBe("completed");
+		if (result.outcome !== "completed") throw new Error("expected completed");
+		expect(result.taskId).toBe(selectorWinner.id);
+		expect(getTask(selectorWinner.id)?.stateId).toBe("s_validate");
+		expect(getTask(deterministicWinner.id)?.stateId).toBe("s_backlog");
 	});
 });
 

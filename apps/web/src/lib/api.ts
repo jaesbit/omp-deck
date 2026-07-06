@@ -1,7 +1,9 @@
 import type {
 	AutoWorkConfig,
 	AutoWorkCycleResult,
+	AutoWorkGlobalConfig,
 	AutoWorkRunStatus,
+	AutoWorkScheduleStatus,
 	CreateSessionRequest,
 	CreateSessionResponse,
 	DeckBaseUrlResponse,
@@ -16,7 +18,9 @@ import type {
 	ListWorkspacesResponse,
 	ModelRef,
 	SetAutoWorkConfigRequest,
+	SetAutoWorkGlobalConfigRequest,
 	SetDeckBaseUrlRequest,
+	SubscriptionUsageResponse,
 	TaskPriority,
 	WorkspacePreference,
 } from "@omp-deck/protocol";
@@ -142,10 +146,24 @@ export const api = {
 		const qs = params.toString();
 		return request<ListAutoWorkRunsResponse>(`/auto-work/runs${qs ? `?${qs}` : ""}`);
 	},
-	triggerAutoWork(cwd: string): Promise<AutoWorkCycleResult> {
-		return request<AutoWorkCycleResult>(`/auto-work/trigger?cwd=${encodeURIComponent(cwd)}`, {
-			method: "POST",
+	triggerAutoWork(): Promise<AutoWorkCycleResult> {
+		return request<AutoWorkCycleResult>(`/auto-work/trigger`, { method: "POST" });
+	},
+	getAutoWorkScheduleStatus(): Promise<AutoWorkScheduleStatus> {
+		return request<AutoWorkScheduleStatus>(`/auto-work/schedule-status`);
+	},
+	getAutoWorkGlobalConfig(): Promise<AutoWorkGlobalConfig> {
+		return request<AutoWorkGlobalConfig>(`/auto-work/global-config`);
+	},
+	setAutoWorkGlobalConfig(body: SetAutoWorkGlobalConfigRequest): Promise<AutoWorkGlobalConfig> {
+		return request<AutoWorkGlobalConfig>(`/auto-work/global-config`, {
+			method: "PUT",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify(body),
 		});
+	},
+	getSubscriptionUsage(): Promise<SubscriptionUsageResponse> {
+		return request<SubscriptionUsageResponse>(`/usage/subscription`);
 	},
 	listTasks(): Promise<ListTasksResponse> {
 		return request<ListTasksResponse>("/tasks");

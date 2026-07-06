@@ -1952,6 +1952,45 @@ export interface SetAutoWorkConfigRequest {
 	timeoutMinutesByPriority: Record<TaskPriority, number>;
 }
 
+/**
+ * Global Auto Work scheduler config — one instance for the whole server,
+ * not per-workspace. Controls whether the polling loop runs at all, how
+ * often it fires, and which model (if any) is used to pick the next task
+ * across workspaces when multiple tasks are eligible.
+ */
+export interface AutoWorkGlobalConfig {
+	scheduleEnabled: boolean;
+	/** Polling interval in minutes (min 1). Default 5. */
+	scheduleIntervalMinutes: number;
+	/**
+	 * Model used to pick the next task when multiple workspaces have eligible
+	 * work. `null` = use the server's default model. When set, the LLM receives
+	 * a compact task list and returns the task ID to run next.
+	 */
+	taskSelectionModel: ModelRef | null;
+	updatedAt: string;
+}
+
+/** `PUT /api/auto-work/global-config` body. */
+export interface SetAutoWorkGlobalConfigRequest {
+	scheduleEnabled: boolean;
+	scheduleIntervalMinutes: number;
+	taskSelectionModel: ModelRef | null;
+}
+
+/** `GET /api/auto-work/schedule-status` response (global, not per-workspace). */
+export interface AutoWorkScheduleStatus {
+	scheduleEnabled: boolean;
+	scheduleIntervalMinutes: number;
+	taskSelectionModel: ModelRef | null;
+	/** ISO timestamp of the last scheduler or manual trigger attempt; null if never triggered this process lifetime. */
+	lastTriggeredAt: string | null;
+	/** Result of the last trigger attempt; null if never triggered. */
+	lastOutcome: AutoWorkCycleResult | null;
+	/** Number of enabled workspaces that currently have eligible auto-work tasks. */
+	eligibleWorkspaceCount: number;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Deck base URL (T-61) — configurable host for session deep links
 // ─────────────────────────────────────────────────────────────────────────────

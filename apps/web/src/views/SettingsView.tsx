@@ -3,6 +3,7 @@ import { useSearchParams } from "react-router-dom";
 import { Play, RotateCcw, Save, Square, X } from "lucide-react";
 import type {
 	AutoWorkConfig,
+	AutoWorkGlobalConfig,
 	BridgeInfo,
 	BridgeName,
 	DeckBaseUrlResponse,
@@ -10,12 +11,15 @@ import type {
 	GateKnob,
 	ListEnvSettingsResponse,
 	MaintenanceGateState,
+	ModelInfo,
 	ModelRef,
 	PreludeResponse,
 	SetAutoWorkConfigRequest,
+	SetAutoWorkGlobalConfigRequest,
 	NotificationLevel,
 	StartCommand,
 	TaskPriority,
+	WorkspaceEntry,
 } from "@omp-deck/protocol";
 import type { ProviderInfo } from "@omp-deck/protocol";
 
@@ -1161,6 +1165,116 @@ function shortWorkspacePath(cwd: string): string {
 
 const TASK_PRIORITIES: TaskPriority[] = ["P0", "P1", "P2", "P3", "P4", "P5"];
 
+function GlobalScheduleCard({ onError }: { onError: (msg: string) => void }) {
+	const [config, setConfig] = useState<AutoWorkGlobalConfig | null>(null);
+	const [models, setModels] = useState<ModelInfo[]>([]);
+	const [scheduleEnabled, setScheduleEnabled] = useState(false);
+	const [intervalMinutes, setIntervalMinutes] = useState(5);
+	const [taskSelectionModel, setTaskSelectionModel] = useState<ModelRef | null>(null);
+	const [saving, setSaving] = useState(false);
+
+	useEffect(() => {
+		Promise.all([api.getAutoWorkGlobalConfig(), api.listModels()])
+			.then(([cfg, modelsResp]) => {
+				setConfig(cfg);
+				setScheduleEnabled(cfg.scheduleEnabled);
+				setIntervalMinutes(cfg.scheduleIntervalMinutes);
+				setTaskSelectionModel(cfg.taskSelectionModel);
+				setModels(modelsResp.models.filter((m) => m.isAvailable));
+			})
+			.catch((e: unknown) => onError(String(e)));
+	}, [onError]);
+
+	function save(): void {
+		if (saving || !config) return;
+		setSaving(true);
+		const body: SetAutoWorkGlobalConfigRequest = {
+			scheduleEnabled,
+			scheduleIntervalMinutes: intervalMinutes,
+			taskSelectionModel,
+		};
+		api.setAutoWorkGlobalConfig(body)
+			.then((updated) => {
+				setConfig(updated);
+				setScheduleEnabled(updated.scheduleEnabled);
+				setIntervalMinutes(updated.scheduleIntervalMinutes);
+				setTaskSelectionModel(updated.taskSelectionModel);
+			})
+			.catch((e: unknown) => onError(String(e)))
+			.finally(() => { setSaving(false); });
+	}
+
+	const modelKey = (m: ModelRef) => `${m.provider}/${m.id}`;
+	const selectedKey = taskSelectionModel ? modelKey(taskSelectionModel) : "";
+
+	return (
+		<div className="rounded-md border border-line bg-paper-2 p-4">
+			<h2 className="mb-3 text-sm font-semibold text-ink">Global schedule</h2>
+			<div className="space-y-3">
+				{/* Enabled toggle + interval */}
+				<div className="flex items-center gap-3">
+					<button
+						type="button"
+						role="switch"
+						aria-checked={scheduleEnabled}
+						onClick={() => setScheduleEnabled((v) => !v)}
+						className={cn(
+							"flex h-5 w-9 items-center rounded-full border border-line transition-colors",
+							scheduleEnabled ? "bg-accent-soft" : "bg-paper-3",
+						)}
+					>
+						<span className={cn(
+							"h-3.5 w-3.5 rounded-full bg-ink-2 transition-transform",
+							scheduleEnabled ? "translate-x-4" : "translate-x-0.5",
+						)} />
+					</button>
+					<span className="text-sm text-ink-3">Run automatically every</span>
+					<input
+						type="number"
+						min={1}
+						max={120}
+						value={intervalMinutes}
+						onChange={(e) => setIntervalMinutes(Math.max(1, Number.parseInt(e.target.value, 10) || 1))}
+						disabled={!scheduleEnabled}
+						className="w-16 rounded border border-line bg-paper px-2 py-1 text-center text-sm text-ink focus:outline-none focus:ring-1 focus:ring-accent/50 disabled:opacity-40"
+					/>
+					<span className="text-sm text-ink-3">min</span>
+				</div>
+
+				{/* Task selection model */}
+				<div className="flex items-center gap-3">
+					<span className="w-36 shrink-0 text-sm text-ink-3">Task selection model</span>
+					<select
+						value={selectedKey}
+						onChange={(e) => {
+							if (e.target.value === "") {
+								setTaskSelectionModel(null);
+							} else {
+								const found = models.find((m) => modelKey(m) === e.target.value);
+								if (found) setTaskSelectionModel({ provider: found.provider, id: found.id });
+							}
+						}}
+						className="flex-1 rounded border border-line bg-paper px-2 py-1 text-sm text-ink focus:outline-none focus:ring-1 focus:ring-accent/50"
+					>
+						<option value="">Default (server default model)</option>
+						{models.map((m) => (
+							<option key={modelKey(m)} value={modelKey(m)}>
+								{m.label}
+							</option>
+						))}
+					</select>
+				</div>
+
+				<div className="flex justify-end">
+					<Button variant="ghost" size="sm" disabled={saving || !config} onClick={save}>
+						{saving ? "Saving…" : "Save"}
+					</Button>
+				</div>
+			</div>
+		</div>
+	);
+}
+
 function autoWorkToRequest(config: AutoWorkConfig): SetAutoWorkConfigRequest {
 	return {
 		enabled: config.enabled,
@@ -1176,7 +1290,7 @@ function autoWorkToRequest(config: AutoWorkConfig): SetAutoWorkConfigRequest {
 }
 
 function AutoWorkSection() {
-	const [workspaces, setWorkspaces] = useState<import("@omp-deck/protocol").WorkspaceEntry[]>([]);
+	const [workspaces, setWorkspaces] = useState<WorkspaceEntry[]>([]);
 	const [configs, setConfigs] = useState<Record<string, AutoWorkConfig>>({});
 	const [loading, setLoading] = useState(true);
 	const [error, setError] = useState<string | undefined>();
@@ -1218,11 +1332,11 @@ function AutoWorkSection() {
 
 	return (
 		<div className="mx-auto max-w-3xl">
-			<div className="mb-4">
+			<div className="mb-6">
 				<h1 className="text-lg font-semibold text-ink">Auto Work</h1>
 				<p className="mt-1 text-sm text-ink-3">
-					Per-workspace unattended-run settings: enable, per-priority model overrides, execution
-					window, and spend limits.
+					Unattended task execution. Global schedule runs across all enabled workspaces.
+					Per-workspace settings control eligibility and spend limits.
 				</p>
 			</div>
 			{error ? (
@@ -1230,6 +1344,8 @@ function AutoWorkSection() {
 					{error}
 				</div>
 			) : null}
+			<GlobalScheduleCard onError={setError} />
+			<h2 className="mb-3 mt-6 text-sm font-semibold text-ink">Workspace settings</h2>
 			{loading ? (
 				<div className="py-6 text-center text-sm text-ink-3">Loading…</div>
 			) : workspaces.length === 0 ? (

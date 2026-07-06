@@ -22,11 +22,11 @@ import {
 	CircleDashed,
 	Clock,
 	ExternalLink,
-	FolderGit2,
+	Play,
 	RefreshCw,
 	XCircle,
 } from "lucide-react";
-import type { AutoWorkRun, AutoWorkRunStatus, Task } from "@omp-deck/protocol";
+import type { AutoWorkRun, AutoWorkRunStatus, AutoWorkScheduleStatus, Task } from "@omp-deck/protocol";
 
 import { Layout } from "@/components/Layout";
 import { Sidebar } from "@/components/Sidebar";
@@ -351,31 +351,53 @@ function DetailPane({ run, task }: DetailPaneProps) {
 export function AutoWorkView() {
 	const autoWorkRunsChangeCounter = useStore((s) => s.autoWorkRunsChangeCounter);
 	const tasksChangeCounter = useStore((s) => s.tasksChangeCounter);
+	const workspaces = useStore((s) => s.workspaces);
+	const defaultCwd = useStore((s) => s.defaultCwd);
 
-	const [runs, setRuns] = useState<AutoWorkRun[]>([]);
+	// Workspace filter — controls which runs are visible in the left panel.
+	const [selectedCwd, setSelectedCwd] = useState("");
+	// All runs + full task map (fetched globally, then filtered per workspace).
+	const [allRuns, setAllRuns] = useState<AutoWorkRun[]>([]);
 	const [taskMap, setTaskMap] = useState<Record<string, Task>>({});
 	const [loading, setLoading] = useState(true);
 	const [error, setError] = useState<string | undefined>();
 	const [selectedRunId, setSelectedRunId] = useState<string | undefined>();
+	// Global schedule state.
+	const [scheduleStatus, setScheduleStatus] = useState<AutoWorkScheduleStatus | null>(null);
+	const [triggering, setTriggering] = useState(false);
+
+	// Seed selectedCwd from defaultCwd once workspaces load.
+	useEffect(() => {
+		if (!selectedCwd) {
+			const first = defaultCwd || workspaces[0]?.cwd || "";
+			if (first) setSelectedCwd(first);
+		}
+	}, [defaultCwd, workspaces, selectedCwd]);
+
+	const refreshScheduleStatus = useCallback(async (): Promise<void> => {
+		try {
+			const status = await api.getAutoWorkScheduleStatus();
+			setScheduleStatus(status);
+		} catch { /* non-critical */ }
+	}, []);
+
 
 	const refresh = useCallback(async (): Promise<void> => {
 		try {
 			const [runsRes, tasksRes] = await Promise.all([
-				api.listAutoWorkRuns({ limit: 100 }),
+				api.listAutoWorkRuns({ limit: 200 }),
 				api.listTasks(),
 			]);
 			const sorted = runsRes.runs.slice().sort((a, b) => {
-				// active first, then most recent first
 				if (a.status === "running" && b.status !== "running") return -1;
 				if (a.status !== "running" && b.status === "running") return 1;
 				return new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime();
 			});
-			setRuns(sorted);
+			setAllRuns(sorted);
 			const map: Record<string, Task> = {};
 			for (const t of tasksRes.tasks) map[t.id] = t;
 			setTaskMap(map);
 			setError(undefined);
-			// Auto-select first run on first load
 			setSelectedRunId((prev) => prev ?? sorted[0]?.id);
 		} catch (e) {
 			setError(String(e));
@@ -384,22 +406,49 @@ export function AutoWorkView() {
 		}
 	}, []);
 
-	useEffect(() => {
-		void refresh();
-	}, [refresh, autoWorkRunsChangeCounter, tasksChangeCounter]);
+	useEffect(() => { void refresh(); }, [refresh, autoWorkRunsChangeCounter, tasksChangeCounter]);
+	useEffect(() => { void refreshScheduleStatus(); }, [refreshScheduleStatus, autoWorkRunsChangeCounter]);
 
-	const selectedRun = useMemo(
-		() => runs.find((r) => r.id === selectedRunId),
-		[runs, selectedRunId],
+	// Runs visible in the left panel: filtered by selected workspace.
+	const visibleRuns = useMemo(
+		() => allRuns.filter((r) => !selectedCwd || taskMap[r.taskId]?.cwd === selectedCwd),
+		[allRuns, taskMap, selectedCwd],
 	);
 
-	const activeRuns = runs.filter((r) => r.status === "running");
-	const historyRuns = runs.filter((r) => r.status !== "running");
+	const activeRuns = visibleRuns.filter((r) => r.status === "running");
+	const historyRuns = visibleRuns.filter((r) => r.status !== "running");
+	const anyRunning = allRuns.some((r) => r.status === "running");
+
+	const selectedRun = useMemo(
+		() => visibleRuns.find((r) => r.id === selectedRunId),
+		[visibleRuns, selectedRunId],
+	);
+
+	const handleTrigger = (): void => {
+		if (triggering) return;
+		setTriggering(true);
+		api.triggerAutoWork()
+			.then(() => Promise.all([refreshScheduleStatus(), refresh()]))
+			.catch(() => { /* errors visible via status */ })
+			.finally(() => { setTriggering(false); });
+	};
+
+
+	const lastTriggerLabel = scheduleStatus?.lastTriggeredAt
+		? formatBriefTime(scheduleStatus.lastTriggeredAt)
+		: "Never";
+	const lastOutcomeLabel = scheduleStatus?.lastOutcome
+		? scheduleStatus.lastOutcome.outcome === "skipped"
+			? `Skipped — ${scheduleStatus.lastOutcome.reason.slice(0, 70)}`
+			: scheduleStatus.lastOutcome.outcome
+		: null;
 
 	const content = (
 		<div className="flex h-full overflow-hidden">
-			{/* Left: run list */}
-			<div className="flex w-72 shrink-0 flex-col overflow-hidden border-r border-line">
+
+			{/* Left: global controls + filtered run list */}
+			<div className="flex w-80 shrink-0 flex-col overflow-hidden border-r border-line">
+
 				<div className="flex items-center justify-between border-b border-line px-4 py-3">
 					<div className="flex items-center gap-2">
 						<BotMessageSquare className="h-4 w-4 text-ink-3" />
@@ -415,29 +464,79 @@ export function AutoWorkView() {
 					</button>
 				</div>
 
+				{/* Global controls */}
+				<div className="space-y-2 border-b border-line bg-paper-2 px-3 py-3">
+					{/* Workspace filter (only when multiple workspaces) */}
+					{workspaces.length > 1 && (
+						<select
+							value={selectedCwd}
+							onChange={(e) => setSelectedCwd(e.target.value)}
+							className="w-full rounded border border-line bg-paper px-2 py-1.5 text-xs text-ink focus:outline-none focus:ring-1 focus:ring-accent/50"
+						>
+							{workspaces.map((ws) => (
+								<option key={ws.cwd} value={ws.cwd}>
+									{ws.cwd.split("/").pop() ?? ws.cwd}
+								</option>
+							))}
+						</select>
+					)}
+
+					{/* Status + trigger */}
+					<div className="flex items-center justify-between gap-2">
+						<div className="min-w-0 text-xs">
+							{anyRunning ? (
+								<span className="flex items-center gap-1 text-green-400">
+									<Activity className="h-3 w-3 animate-pulse" />
+									Running
+								</span>
+							) : (
+								<span className="text-ink-3">
+									Last: <span className="text-ink-2">{lastTriggerLabel}</span>
+								</span>
+							)}
+						</div>
+						<button
+							type="button"
+							disabled={triggering || anyRunning}
+							onClick={handleTrigger}
+							className="inline-flex items-center gap-1.5 rounded bg-accent/15 px-2.5 py-1 text-xs font-medium text-accent transition-colors hover:bg-accent/25 disabled:pointer-events-none disabled:opacity-40"
+						>
+							{triggering ? <RefreshCw className="h-3 w-3 animate-spin" /> : <Play className="h-3 w-3" />}
+							Trigger
+						</button>
+					</div>
+
+					{/* Last outcome */}
+					{lastOutcomeLabel && !anyRunning && (
+						<p className="truncate text-xs text-ink-3" title={lastOutcomeLabel}>
+							{lastOutcomeLabel}
+						</p>
+					)}
+
+
+					{/* Eligible workspaces hint */}
+					{scheduleStatus !== null && scheduleStatus.eligibleWorkspaceCount > 0 && (
+						<p className="text-xs text-ink-3">
+							{scheduleStatus.eligibleWorkspaceCount} workspace{scheduleStatus.eligibleWorkspaceCount > 1 ? "s" : ""} with eligible tasks
+						</p>
+					)}
+				</div>
+
+				{/* Run list (filtered by selectedCwd) */}
 				<div className="flex-1 space-y-4 overflow-y-auto p-2">
 					{loading && (
-						<div className="flex items-center justify-center py-8 text-xs text-ink-3">
-							Loading…
-						</div>
+						<div className="flex items-center justify-center py-8 text-xs text-ink-3">Loading…</div>
 					)}
-
 					{!loading && error && (
-						<div className="rounded-md bg-red-500/10 px-3 py-2 text-xs text-red-400">
-							{error}
-						</div>
+						<div className="rounded-md bg-red-500/10 px-3 py-2 text-xs text-red-400">{error}</div>
 					)}
-
-					{!loading && !error && runs.length === 0 && (
+					{!loading && !error && visibleRuns.length === 0 && (
 						<div className="flex flex-col items-center justify-center gap-2 py-12 text-center">
 							<CircleDashed className="h-8 w-8 text-ink-3 opacity-40" />
-							<p className="text-xs text-ink-3">No auto-work runs yet</p>
-							<p className="text-xs text-ink-3 opacity-70">
-								Enable Auto Work in Settings → Workspaces
-							</p>
+							<p className="text-xs text-ink-3">No runs yet</p>
+							<p className="text-xs text-ink-3 opacity-70">Trigger manually or enable the schedule</p>
 						</div>
 					)}
-
 					{activeRuns.length > 0 && (
 						<div>
 							<p className="mb-1.5 px-1 text-xs font-medium uppercase tracking-wide text-green-400">
@@ -445,18 +544,11 @@ export function AutoWorkView() {
 							</p>
 							<div className="space-y-1">
 								{activeRuns.map((run) => (
-									<RunRow
-										key={run.id}
-										run={run}
-										task={taskMap[run.taskId]}
-										selected={selectedRunId === run.id}
-										onSelect={() => setSelectedRunId(run.id)}
-									/>
+									<RunRow key={run.id} run={run} task={taskMap[run.taskId]} selected={selectedRunId === run.id} onSelect={() => setSelectedRunId(run.id)} />
 								))}
 							</div>
 						</div>
 					)}
-
 					{historyRuns.length > 0 && (
 						<div>
 							<p className="mb-1.5 px-1 text-xs font-medium uppercase tracking-wide text-ink-3">
@@ -464,13 +556,7 @@ export function AutoWorkView() {
 							</p>
 							<div className="space-y-1">
 								{historyRuns.map((run) => (
-									<RunRow
-										key={run.id}
-										run={run}
-										task={taskMap[run.taskId]}
-										selected={selectedRunId === run.id}
-										onSelect={() => setSelectedRunId(run.id)}
-									/>
+									<RunRow key={run.id} run={run} task={taskMap[run.taskId]} selected={selectedRunId === run.id} onSelect={() => setSelectedRunId(run.id)} />
 								))}
 							</div>
 						</div>
@@ -478,25 +564,26 @@ export function AutoWorkView() {
 				</div>
 			</div>
 
-			{/* Right: detail */}
+			{/* Right: selected run detail. */}
 			<div className="min-w-0 flex-1 overflow-hidden">
 				{selectedRun ? (
 					<DetailPane run={selectedRun} task={taskMap[selectedRun.taskId]} />
 				) : (
-					<div className="flex h-full flex-col items-center justify-center gap-3 text-ink-3">
-						<FolderGit2 className="h-10 w-10 opacity-30" />
-						<p className="text-sm">Select a run to see details</p>
-					</div>
+					<EmptyDetailPane />
 				)}
 			</div>
 		</div>
 	);
 
+	return <Layout sidebar={<Sidebar />} main={content} inspector={<div />} />;
+}
+
+function EmptyDetailPane() {
 	return (
-		<Layout
-			sidebar={<Sidebar />}
-			main={content}
-			inspector={<div />}
-		/>
+		<div className="flex h-full flex-col items-center justify-center gap-2 text-center text-ink-3">
+			<BotMessageSquare className="h-10 w-10 opacity-30" />
+			<p className="text-sm">Select an Auto Work run</p>
+			<p className="text-xs opacity-60">Choose a run to inspect its task, session, and lifecycle details.</p>
+		</div>
 	);
 }

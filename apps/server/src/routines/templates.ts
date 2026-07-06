@@ -22,7 +22,8 @@ import { parse as parseYaml } from "yaml";
 import type { RoutineSpec } from "@omp-deck/protocol";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const TEMPLATES_DIR = path.join(here, "..", "templates");
+const TEMPLATE_DIRS = [path.join(here, "..", "templates"), path.join(here, "templates")];
+
 
 export interface TemplateSummary {
 	slug: string;
@@ -35,13 +36,14 @@ export interface TemplateSummary {
 
 /** List every .yaml under the templates directory with a summary. */
 export function listTemplates(): TemplateSummary[] {
-	if (!fs.existsSync(TEMPLATES_DIR)) return [];
-	const files = fs.readdirSync(TEMPLATES_DIR).filter((f) => f.endsWith(".yaml"));
+	const templatesDir = TEMPLATE_DIRS.find((dir) => fs.existsSync(dir));
+	if (!templatesDir) return [];
+	const files = fs.readdirSync(templatesDir).filter((f) => f.endsWith(".yaml"));
 	const out: TemplateSummary[] = [];
 	for (const f of files) {
 		const slug = f.replace(/\.yaml$/, "");
 		try {
-			const raw = fs.readFileSync(path.join(TEMPLATES_DIR, f), "utf-8");
+			const raw = fs.readFileSync(path.join(templatesDir, f), "utf-8");
 			const spec = parseYaml(raw) as RoutineSpec;
 			const summary: TemplateSummary = {
 				slug,
@@ -62,7 +64,9 @@ export function listTemplates(): TemplateSummary[] {
 /** Read + parse a template by slug. Returns the spec + raw YAML. */
 export function loadTemplate(slug: string): { spec: RoutineSpec; specYaml: string } | null {
 	if (!/^[a-z][a-z0-9-]*$/.test(slug)) return null;
-	const target = path.join(TEMPLATES_DIR, `${slug}.yaml`);
+	const templatesDir = TEMPLATE_DIRS.find((dir) => fs.existsSync(dir));
+	if (!templatesDir) return null;
+	const target = path.join(templatesDir, `${slug}.yaml`);
 	if (!fs.existsSync(target)) return null;
 	const raw = fs.readFileSync(target, "utf-8");
 	try {

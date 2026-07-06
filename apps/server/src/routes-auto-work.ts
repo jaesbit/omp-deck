@@ -1,25 +1,17 @@
 /**
- * Auto Work REST surface (T-60/T-62). Mounted on the main router at
- * `/api/auto-work/*`.
+ * Auto Work REST surface. Mounted at `/api/auto-work/*`.
  *
- * - `GET /auto-work/config?cwd=<path>` — per-workspace Auto Work
- *   configuration; returns computed defaults when unconfigured (see
- *   `db/auto-work.ts`).
- * - `PUT /auto-work/config?cwd=<path>` — replaces the full configuration.
- *   All fields are required and validated server-side (400 on bad input).
- * - `GET /auto-work/runs?limit=&taskId=&priority=&status=` — run history
- *   (see `db/auto-work-runs.ts`). Recording runs (open on start, close on
- *   finish) is the DB layer's `startAutoWorkRun`/`completeAutoWorkRun` —
- *   the engine that calls them at the right lifecycle moments is T-64.
- * - `GET /auto-work/cost-estimate?priority=` — rolling average
- *   `pctConsumed` over the last 10 completed runs at that priority.
+ * Per-workspace:
+ *   GET  /auto-work/config?cwd=          per-workspace config (defaults when unconfigured)
+ *   PUT  /auto-work/config?cwd=          replace full workspace config
+ *   GET  /auto-work/runs?…               run history, filterable
+ *   GET  /auto-work/cost-estimate?priority=
  *
- * This file is the shared home for the whole Auto Work settings surface —
- * later tickets (T-63 scheduler, T-64 execution, T-66/67 reporting) extend
- * `buildAutoWorkRouter` with more routes rather than spawning parallel
- * files. Keep additions as more `app.<verb>(...)` calls plus small private
- * helpers below, matching this repo's router-per-file convention (see
- * `routes-usage.ts`, `routes-tasks.ts`).
+ * Global:
+ *   GET  /auto-work/global-config        schedule interval, task-selection model
+ *   PUT  /auto-work/global-config        replace global config; reconfigures the scheduler
+ *   POST /auto-work/trigger              run the global cycle immediately
+ *   GET  /auto-work/schedule-status      last trigger, last outcome, eligibleWorkspaceCount
  */
 
 import * as path from "node:path";
@@ -28,10 +20,13 @@ import type {
 	AutoWorkConfig,
 	AutoWorkCostEstimateResponse,
 	AutoWorkCycleResult,
+	AutoWorkGlobalConfig,
 	AutoWorkRunStatus,
+	AutoWorkScheduleStatus,
 	ListAutoWorkRunsResponse,
 	ModelRef,
 	SetAutoWorkConfigRequest,
+	SetAutoWorkGlobalConfigRequest,
 	TaskPriority,
 } from "@omp-deck/protocol";
 
@@ -39,10 +34,12 @@ import type { AgentBridge } from "./bridge/types.ts";
 import type { Config } from "./config.ts";
 import { isCwdAllowed } from "./routes-fs.ts";
 import { getAutoWorkConfig, setAutoWorkConfig } from "./db/auto-work.ts";
+import { getAutoWorkGlobalConfig, setAutoWorkGlobalConfig } from "./db/auto-work-global.ts";
 import { getAutoWorkCostEstimate, listAutoWorkRuns } from "./db/auto-work-runs.ts";
-import { getDeckBaseUrl } from "./db/server-settings.ts";
-import { runAutoWorkCycle } from "./auto-work/engine.ts";
+import { getDeckBaseUrl as getServerDeckBaseUrl } from "./db/server-settings.ts";
+import { runGlobalAutoWorkCycle } from "./auto-work/engine.ts";
 import type { RunAutoWorkCycleOptions } from "./auto-work/engine.ts";
+import { getScheduleStatus, updateGlobalSchedule, recordManualTrigger } from "./auto-work/scheduler.ts";
 import { logger } from "./log.ts";
 
 const log = logger("routes:auto-work");
@@ -53,22 +50,21 @@ const RUN_STATUSES: AutoWorkRunStatus[] = ["running", "completed", "failed", "ti
 export function buildAutoWorkRouter(bridge: AgentBridge, config: Config, cycleOptions: RunAutoWorkCycleOptions = {}): Hono {
 	const app = new Hono();
 
+	// ─── Per-workspace config ─────────────────────────────────────────────────
+
 	app.get("/auto-work/config", (c) => {
 		const cwd = c.req.query("cwd")?.trim();
 		if (!cwd) return c.json({ error: "cwd query param is required" }, 400);
-		// No existence check: the cwd is a pure DB key. Workspaces may be on
-		// NFS or otherwise temporarily inaccessible — their config must still
-		// be readable/writable regardless.
-		const config: AutoWorkConfig = getAutoWorkConfig(cwd);
-		return c.json(config);
+		// No cwd existence check: the cwd is a pure DB key. Workspaces may be on
+		// NFS or temporarily inaccessible — their config must still be readable.
+		const autoWorkConfig: AutoWorkConfig = getAutoWorkConfig(cwd);
+		return c.json(autoWorkConfig);
 	});
 
 	app.put("/auto-work/config", async (c) => {
 		const cwd = c.req.query("cwd")?.trim();
 		if (!cwd) return c.json({ error: "cwd query param is required" }, 400);
-		if (!path.isAbsolute(cwd)) {
-			return c.json({ error: "cwd must be an absolute path" }, 400);
-		}
+		if (!path.isAbsolute(cwd)) return c.json({ error: "cwd must be an absolute path" }, 400);
 
 		let body: SetAutoWorkConfigRequest;
 		try {
@@ -77,7 +73,7 @@ export function buildAutoWorkRouter(bridge: AgentBridge, config: Config, cycleOp
 			return c.json({ error: "invalid json body" }, 400);
 		}
 
-		const shapeError = validateShape(body);
+		const shapeError = validateWorkspaceShape(body);
 		if (shapeError) return c.json({ error: shapeError }, 400);
 
 		for (const priority of TASK_PRIORITIES) {
@@ -88,7 +84,7 @@ export function buildAutoWorkRouter(bridge: AgentBridge, config: Config, cycleOp
 		}
 
 		try {
-			const config = setAutoWorkConfig(cwd, {
+			const saved = setAutoWorkConfig(cwd, {
 				enabled: body.enabled,
 				modelByPriority: body.modelByPriority,
 				timeWindows: body.timeWindows,
@@ -99,12 +95,14 @@ export function buildAutoWorkRouter(bridge: AgentBridge, config: Config, cycleOp
 				estimationBuffer: body.estimationBuffer,
 				timeoutMinutesByPriority: body.timeoutMinutesByPriority,
 			});
-			return c.json(config);
+			return c.json(saved);
 		} catch (err) {
 			log.error("setAutoWorkConfig failed", err);
 			return c.json({ error: String(err) }, 500);
 		}
 	});
+
+	// ─── Run history ─────────────────────────────────────────────────────────
 
 	app.get("/auto-work/runs", (c) => {
 		const limitParam = c.req.query("limit");
@@ -140,6 +138,8 @@ export function buildAutoWorkRouter(bridge: AgentBridge, config: Config, cycleOp
 		return c.json(response);
 	});
 
+	// ─── Cost estimate ────────────────────────────────────────────────────────
+
 	app.get("/auto-work/cost-estimate", (c) => {
 		const priorityParam = c.req.query("priority")?.trim();
 		if (!priorityParam || !TASK_PRIORITIES.includes(priorityParam as TaskPriority)) {
@@ -149,41 +149,80 @@ export function buildAutoWorkRouter(bridge: AgentBridge, config: Config, cycleOp
 		return c.json(response);
 	});
 
-	// T-64: fires one auto-work cycle immediately, outside the cron schedule —
-	// callable manually or from a Routine action. Never spins up a *second*
-	// concurrent run for the same workspace; `runAutoWorkCycle`'s pre-flight
-	// mutex check (via `auto_work_runs`) returns `{ outcome: "skipped" }`
-	// instead.
-	app.post("/auto-work/trigger", async (c) => {
-		const cwd = c.req.query("cwd")?.trim();
-		if (!cwd) return c.json({ error: "cwd query param is required" }, 400);
-		if (!isCwdAllowed(cwd)) {
-			return c.json(
-				{ error: `cwd does not exist, isn't a directory, or is outside the home directory: ${cwd}` },
-				400,
-			);
-		}
+	// ─── Global config ────────────────────────────────────────────────────────
+
+	app.get("/auto-work/global-config", (_c) => {
+		return _c.json(getAutoWorkGlobalConfig());
+	});
+
+	app.put("/auto-work/global-config", async (c) => {
+		let body: SetAutoWorkGlobalConfigRequest;
 		try {
-			const result: AutoWorkCycleResult = await runAutoWorkCycle(cwd, bridge, {
-				getDeckBaseUrl: () => getDeckBaseUrl(config).deckBaseUrl,
+			body = (await c.req.json()) as SetAutoWorkGlobalConfigRequest;
+		} catch {
+			return c.json({ error: "invalid json body" }, 400);
+		}
+
+		const shapeError = validateGlobalShape(body);
+		if (shapeError) return c.json({ error: shapeError }, 400);
+
+		if (body.taskSelectionModel !== null) {
+			const invalid = await validateModelRef(bridge, body.taskSelectionModel);
+			if (invalid) return c.json({ error: `taskSelectionModel: ${invalid}` }, 400);
+		}
+
+		try {
+			const saved: AutoWorkGlobalConfig = setAutoWorkGlobalConfig({
+				scheduleEnabled: body.scheduleEnabled,
+				scheduleIntervalMinutes: body.scheduleIntervalMinutes,
+				taskSelectionModel: body.taskSelectionModel,
+			});
+			// Reconfigure the in-process scheduler immediately.
+			updateGlobalSchedule(saved, bridge, {
+				getDeckBaseUrl: () => getServerDeckBaseUrl(config).deckBaseUrl,
 				...cycleOptions,
 			});
-			return c.json(result);
+			return c.json(saved);
 		} catch (err) {
-			log.error("auto-work trigger failed", err);
+			log.error("setAutoWorkGlobalConfig failed", err);
 			return c.json({ error: String(err) }, 500);
 		}
+	});
+
+	// Fires one global auto-work cycle immediately. The engine iterates all
+	// enabled workspaces and picks the highest-priority eligible task to run.
+	// The per-workspace mutex still prevents double-running a workspace that
+	// already has an active run.
+	app.post("/auto-work/trigger", async (c) => {
+		try {
+			const globalConfig = getAutoWorkGlobalConfig();
+			const result: AutoWorkCycleResult = await runGlobalAutoWorkCycle(bridge, {
+				getDeckBaseUrl: () => getServerDeckBaseUrl(config).deckBaseUrl,
+				taskSelectionModel: globalConfig.taskSelectionModel,
+				...cycleOptions,
+			});
+			recordManualTrigger(result);
+			return c.json(result);
+		} catch (err) {
+			log.error("auto-work global trigger failed", err);
+			return c.json({ error: String(err) }, 500);
+		}
+	});
+
+	// ─── Schedule status ──────────────────────────────────────────────────────
+
+	// Global: last trigger time/outcome and how many workspaces have eligible work.
+	app.get("/auto-work/schedule-status", (_c) => {
+		const status: AutoWorkScheduleStatus = getScheduleStatus();
+		return _c.json(status);
 	});
 
 	return app;
 }
 
-/**
- * Validates field types/ranges only — does not touch the bridge's model
- * catalog (that's `validateModelRef`, called separately since it's async).
- * Returns an error message, or `undefined` when the shape is acceptable.
- */
-function validateShape(body: SetAutoWorkConfigRequest): string | undefined {
+// ─── Validation helpers ───────────────────────────────────────────────────────
+
+function validateWorkspaceShape(body: SetAutoWorkConfigRequest): string | undefined {
 	if (typeof body.enabled !== "boolean") return "enabled must be a boolean";
 
 	if (typeof body.modelByPriority !== "object" || body.modelByPriority === null) {
@@ -212,51 +251,52 @@ function validateShape(body: SetAutoWorkConfigRequest): string | undefined {
 			return `timeWindows: windows must not overlap (${sortedWindows[i - 1]!.start}–${sortedWindows[i - 1]!.end} overlaps ${w.start}–${w.end})`;
 	}
 
-	if (typeof body.sessionPctLimit !== "number" || body.sessionPctLimit < 0 || body.sessionPctLimit > 100) {
+	if (typeof body.sessionPctLimit !== "number" || body.sessionPctLimit < 0 || body.sessionPctLimit > 100)
 		return "sessionPctLimit must be a number between 0 and 100";
-	}
-	if (typeof body.weeklyPctLimit !== "number" || body.weeklyPctLimit < 0 || body.weeklyPctLimit > 100) {
+	if (typeof body.weeklyPctLimit !== "number" || body.weeklyPctLimit < 0 || body.weeklyPctLimit > 100)
 		return "weeklyPctLimit must be a number between 0 and 100";
-	}
-
-	if (typeof body.weeklyPctThreshold !== "number" || body.weeklyPctThreshold < 0 || body.weeklyPctThreshold > 100) {
+	if (typeof body.weeklyPctThreshold !== "number" || body.weeklyPctThreshold < 0 || body.weeklyPctThreshold > 100)
 		return "weeklyPctThreshold must be a number between 0 and 100";
-	}
 
-	if (typeof body.defaultEstimatePctByPriority !== "object" || body.defaultEstimatePctByPriority === null) {
+	if (typeof body.defaultEstimatePctByPriority !== "object" || body.defaultEstimatePctByPriority === null)
 		return "defaultEstimatePctByPriority must be an object";
-	}
 	for (const priority of TASK_PRIORITIES) {
 		const pct = body.defaultEstimatePctByPriority[priority];
-		if (typeof pct !== "number" || pct < 0 || pct > 100) {
+		if (typeof pct !== "number" || pct < 0 || pct > 100)
 			return `defaultEstimatePctByPriority.${priority} must be a number between 0 and 100`;
-		}
 	}
 
-	if (typeof body.estimationBuffer !== "number" || body.estimationBuffer < 1 || body.estimationBuffer > 5) {
+	if (typeof body.estimationBuffer !== "number" || body.estimationBuffer < 1 || body.estimationBuffer > 5)
 		return "estimationBuffer must be a number between 1 and 5";
-	}
 
-	if (typeof body.timeoutMinutesByPriority !== "object" || body.timeoutMinutesByPriority === null) {
+	if (typeof body.timeoutMinutesByPriority !== "object" || body.timeoutMinutesByPriority === null)
 		return "timeoutMinutesByPriority must be an object";
-	}
 	for (const priority of TASK_PRIORITIES) {
 		const minutes = body.timeoutMinutesByPriority[priority];
-		if (typeof minutes !== "number" || !Number.isFinite(minutes) || minutes <= 0) {
+		if (typeof minutes !== "number" || !Number.isFinite(minutes) || minutes <= 0)
 			return `timeoutMinutesByPriority.${priority} must be a positive number`;
-		}
 	}
 
 	return undefined;
 }
 
-/**
- * Validate a `ModelRef` against the bridge's live model catalog. Mirrors
- * `routes.ts`'s private `validateModelRef` (used by `POST /sessions` and
- * `PUT /workspace-preferences`) — duplicated rather than imported since
- * that one isn't exported and this router owns its own small set of
- * private helpers per the repo's router-per-file convention.
- */
+function validateGlobalShape(body: SetAutoWorkGlobalConfigRequest): string | undefined {
+	if (typeof body.scheduleEnabled !== "boolean") return "scheduleEnabled must be a boolean";
+	if (
+		typeof body.scheduleIntervalMinutes !== "number" ||
+		!Number.isInteger(body.scheduleIntervalMinutes) ||
+		body.scheduleIntervalMinutes < 1
+	) return "scheduleIntervalMinutes must be a positive integer";
+	if (body.taskSelectionModel !== null) {
+		if (
+			typeof body.taskSelectionModel !== "object" ||
+			typeof body.taskSelectionModel.provider !== "string" ||
+			typeof body.taskSelectionModel.id !== "string"
+		) return "taskSelectionModel must be null or {provider, id}";
+	}
+	return undefined;
+}
+
 async function validateModelRef(bridge: AgentBridge, ref: ModelRef): Promise<string | undefined> {
 	const models = await bridge.listModels();
 	const match = models.find((m) => m.provider === ref.provider && m.id === ref.id);

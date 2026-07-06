@@ -12,6 +12,7 @@ import { SettingsView } from "./views/SettingsView";
 import { IntegrationsView } from "./views/IntegrationsView";
 import { OnboardingView } from "./views/OnboardingView";
 import { AutoWorkView } from "./views/AutoWorkView";
+import { SubscriptionLimitsView } from "./views/SubscriptionLimitsView";
 import { onboardingApi } from "./lib/onboarding-api";
 
 /**
@@ -57,6 +58,7 @@ const router = createBrowserRouter([
 			{ path: "/kb", element: <KbView /> },
 			{ path: "/integrations", element: <IntegrationsView /> },
 			{ path: "/auto-work", element: <AutoWorkView /> },
+			{ path: "/subscription-limits", element: <SubscriptionLimitsView /> },
 			{ path: "/settings", element: <SettingsView /> },
 			{ path: "/onboarding", element: <OnboardingView /> },
 		],

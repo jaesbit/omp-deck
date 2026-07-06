@@ -1,4 +1,4 @@
-import { BookOpen, BotMessageSquare, Clock, Inbox, KanbanSquare, MessagesSquare, Plug, Settings, Sparkles, Store } from "lucide-react";
+import { BookOpen, BotMessageSquare, ChartNoAxesCombined, Clock, Inbox, KanbanSquare, MessagesSquare, Plug, Settings, Sparkles, Store } from "lucide-react";
 import { NavLink } from "react-router-dom";
 import { cn } from "@/lib/utils";
 
@@ -16,6 +16,7 @@ const ITEMS: ReadonlyArray<{
 	{ to: "/kb", label: "Knowledge", icon: BookOpen },
 	{ to: "/integrations", label: "Integrations", icon: Plug },
 	{ to: "/auto-work", label: "Auto Work", icon: BotMessageSquare },
+	{ to: "/subscription-limits", label: "Subscription limits", icon: ChartNoAxesCombined },
 ];
 
 /**

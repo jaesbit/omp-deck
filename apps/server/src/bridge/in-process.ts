@@ -6,6 +6,7 @@ import {
 	type AgentSession,
 } from "@oh-my-pi/pi-coding-agent";
 import { getLatestTodoPhasesFromEntries } from "@oh-my-pi/pi-coding-agent/tools/todo";
+import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { getEnvApiKey } from "@oh-my-pi/pi-ai";
 import { runExtensionCompact, runExtensionSetModel } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/compact-handler";
 import { getSessionSlashCommands } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/get-commands-handler";
@@ -108,10 +109,12 @@ export class InProcessAgentBridge implements AgentBridge {
 
 	async createSession(opts: CreateSessionOpts): Promise<SessionHandle> {
 		const sessionManager = SessionManager.create(opts.cwd);
+		const agentRegistry = new AgentRegistry();
 		const modelRegistry = await this.ensureModelRegistry();
 		const result = await createAgentSession({
 			cwd: opts.cwd,
 			sessionManager,
+			agentRegistry,
 			modelRegistry,
 			authStorage: modelRegistry.authStorage,
 			// Skip eval-tool Python warmup on session create. On Windows this otherwise
@@ -156,11 +159,13 @@ export class InProcessAgentBridge implements AgentBridge {
 	async resumeSession(opts: ResumeSessionOpts): Promise<SessionHandle> {
 		const sessionManager = await SessionManager.open(opts.sessionPath);
 		const cwd = (sessionManager.getCwd?.() as string | undefined) ?? process.cwd();
+		const agentRegistry = new AgentRegistry();
 		const modelRegistry = await this.ensureModelRegistry();
 		const result = await createAgentSession({
 			cwd,
 			sessionManager,
 			modelRegistry,
+			agentRegistry,
 			authStorage: modelRegistry.authStorage,
 			skipPythonPreflight: true,
 			systemPrompt: (defaults) => [getEffectivePrelude(), ...defaults],

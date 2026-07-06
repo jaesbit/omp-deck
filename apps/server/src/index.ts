@@ -33,6 +33,7 @@ import {
 	BrowserNotificationChannel,
 	notificationService,
 } from "./notifications/index.ts";
+import { initScheduler, disposeScheduler } from "./auto-work/scheduler.ts";
 import type { RestartServerResponse } from "@omp-deck/protocol";
 
 const log = logger("server");
@@ -102,6 +103,7 @@ async function main(): Promise<void> {
 	});
 	const routinesRunner = new RoutinesRunner();
 	routinesRunner.start();
+	initScheduler(bridge);
 	let server: Server<ConnectionData>;
 	const supervisor = buildDefaultBridgeSupervisor();
 	const marketplaceService = new MarketplaceService();
@@ -193,6 +195,11 @@ async function main(): Promise<void> {
 			routinesRunner.dispose();
 		} catch (err) {
 			log.error(`runner dispose threw`, err);
+		}
+		try {
+			disposeScheduler();
+		} catch (err) {
+			log.error(`scheduler dispose threw`, err);
 		}
 		try {
 			skillsWatcherDispose();
