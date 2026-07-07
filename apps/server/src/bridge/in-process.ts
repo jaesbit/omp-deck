@@ -50,6 +50,7 @@ import { getDeckModelRegistry } from "../auth-singleton.ts";
 import { looksLikePlaceholderKey } from "../credential-quality.ts";
 import { getEffectivePrelude } from "../orientation-store.ts";
 import { notificationService } from "../notifications/index.ts";
+import { classifyModelError, getModelCatalogOverlay } from "../model-catalog-overlay.ts";
 import { ExtensionUIBridge } from "./ext-ui-bridge.ts";
 import { GoalModeBridge } from "./goal-mode-bridge.ts";
 import type { GoalAction, GoalModeSessionSurface, GoalModeState } from "./goal-mode-bridge.ts";
@@ -326,7 +327,17 @@ export class InProcessAgentBridge implements AgentBridge {
 	async listModels(opts: { sessionId?: string } = {}): Promise<ModelInfo[]> {
 		const registry = await this.ensureModelRegistry();
 		const current = opts.sessionId ? this.active.get(opts.sessionId)?.handle.snapshot().model : undefined;
-		return registry.getAll().map((model) => modelInfoFromSdk(model as unknown as SdkModel, registry, current));
+		// T-74: filter the registry's working set through the overlay so
+		// shadowed models (4xx-driven, or retired upstream) never reach
+		// the picker. The overlay is transparent to callers: same shape,
+		// same `isCurrent` semantics.
+		const overlay = getModelCatalogOverlay();
+		const visible = await overlay.getModels();
+		const visibleSet = new Set(visible.map((m) => `${m.provider}/${m.id}`));
+		return registry
+			.getAll()
+			.filter((m) => visibleSet.has(`${String(m.provider)}/${m.id}`))
+			.map((model) => modelInfoFromSdk(model as unknown as SdkModel, registry, current));
 	}
 
 	async dispose(): Promise<void> {
@@ -611,13 +622,21 @@ export class InProcessAgentBridge implements AgentBridge {
 			// the operator to switch. Without this, the chat shows the raw 401
 			// inline and the operator has no idea why a fresh ChatGPT-Plus
 			// install rejected their first prompt. See issue #4.
-			if (type === "notice") {
-				const n = event as { level?: string; message?: string };
-				if (n.level === "error" && typeof n.message === "string" && looksLikeAuthError(n.message)) {
-					this.maybeSuggestSubscriptionFallback(session, n.message).catch((err) =>
-						log.warn("subscription-fallback hint failed", err),
-					);
-				}
+			// T-74: feed the model-catalog overlay from real turn outcomes.
+			// Two failure surfaces funnel into recordFailure:
+			//   - `notice` with `level: "error"`: SDK surfaces model errors
+			//     as human-readable notices. We classify the message and,
+			//     if it points at the model (not_found / unauthorized),
+			//     shadow the current model so it stops appearing in the
+			//     picker. A transient 5xx or rate-limit is left alone.
+			//   - `agent_end` with `stopReason: "error"`: the async path
+			//     where the SDK reports the turn terminated due to an
+			//     upstream error after the prompt was accepted.
+			// And one success surface: `agent_end` with any non-error
+			// stopReason records a success for the current model so any
+			// previous shadow on that pair is cleared (auto-revive).
+			if (type === "notice" || type === "agent_end") {
+				observeOverlayOutcome(session, type, event as unknown);
 			}
 		});
 
@@ -768,6 +787,82 @@ export class InProcessAgentBridge implements AgentBridge {
 	}
 }
 
+/**
+ * T-74: react to bridge events by feeding the model-catalog overlay.
+ *
+ * The bridge is the only layer that has both the model currently in use
+ * (from `session.snapshot().model`) and a stream of turn outcomes, so
+ * it owns the transition from "I just called the model" to "the model
+ * is (or isn't) reliable for future picks". Centralizing it here means
+ * the picker is the only consumer; the overlay is the only writer.
+ *
+ * Two failure surfaces and one success surface are recognized; anything
+ * else is a no-op:
+ *
+ * - `notice` (level=error): SDK surfaces model-level errors as human
+ *   notices. Classify the message; if it points at the model
+ *   (not_found / unauthorized), shadow the current model.
+ * - `agent_end` (stopReason=error): async path where the SDK reports a
+ *   post-acceptance error. Same classification, same shadow.
+ * - `agent_end` (any other stopReason): a successful turn for the
+ *   current model. Clear any active shadow on that pair (auto-revive).
+ *
+ * Best-effort: every read is guarded with `typeof`/`in` rather than
+ * inline-cast access, because the event payload is opaque at the
+ * bridge boundary.
+ */
+function observeOverlayOutcome(
+	session: AgentSession,
+	type: string,
+	event: unknown,
+): void {
+	const overlay = getModelCatalogOverlay();
+	if (overlay.isDisabled()) return;
+
+	const current = readCurrentModelRef(session);
+	if (!current) return;
+
+	if (type === "notice") {
+		const level = readStringField(event, "level");
+		const message = readStringField(event, "message");
+		if (level !== "error" || !message) return;
+		overlay.recordFailure({ provider: current.provider, id: current.id }, new Error(message));
+		return;
+	}
+
+	if (type === "agent_end") {
+		const stopReason = readStringField(event, "stopReason");
+		if (stopReason === "error") {
+			const errorMessage = readStringField(event, "errorMessage") ?? readStringField(event, "message") ?? "agent_end error";
+			overlay.recordFailure({ provider: current.provider, id: current.id }, new Error(errorMessage));
+			return;
+		}
+		// Any non-error stopReason counts as a successful turn for the
+		// current model — even aborted turns (the user knows what they
+		// did; not the model's fault).
+		overlay.recordSuccess({ provider: current.provider, id: current.id });
+	}
+}
+
+function readCurrentModelRef(session: AgentSession): { provider: string; id: string } | undefined {
+	if (!session || typeof session !== "object") return undefined;
+	const snap = (session as unknown as { snapshot?: () => { model?: unknown } }).snapshot;
+	if (typeof snap !== "function") return undefined;
+	const out = snap();
+	const m = out?.model;
+	if (!m || typeof m !== "object") return undefined;
+	const provider = (m as { provider?: unknown }).provider;
+	const id = (m as { id?: unknown }).id;
+	if (typeof provider !== "string" || typeof id !== "string") return undefined;
+	return { provider, id };
+}
+
+function readStringField(value: unknown, key: string): string | undefined {
+	if (!value || typeof value !== "object") return undefined;
+	if (!(key in value)) return undefined;
+	const v = (value as Record<string, unknown>)[key];
+	return typeof v === "string" ? v : undefined;
+}
 export class InProcessSessionHandle implements SessionHandle {
 	readonly sessionId: string;
 	readonly cwd: string;
