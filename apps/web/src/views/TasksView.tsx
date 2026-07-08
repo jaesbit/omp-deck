@@ -364,7 +364,7 @@ export function TasksView() {
 							</label>
 							<button
 								type="button"
-								onClick={() => setSortByPriority((v) => !v)}
+								onClick={() => setSortByPriority(!sortByPriority)}
 								className={cn("btn-ghost h-7 px-2 text-xs", sortByPriority && "bg-accent-soft text-accent")}
 								title="Sort each column by priority (P0 first)"
 								aria-pressed={sortByPriority}
