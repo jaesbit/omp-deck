@@ -451,6 +451,7 @@ function failAutoWorkRun(runId: string, taskId: string, failureReason: string): 
 	completeAutoWorkRun(runId, { status: "failed", failureReason });
 	const backlogState = findStateByName("backlog");
 	if (backlogState) moveTask(taskId, backlogState.id, 0);
+	broadcastBus.broadcast({ type: "tasks_changed" });
 	broadcastBus.broadcast({ type: "auto_work_runs_changed" });
 }
 
@@ -486,13 +487,14 @@ async function settleAutoWorkRun(params: {
 		const failureReason = timedOut
 			? `exceeded ${timeoutMinutes}min timeout for priority ${task.priority}`
 			: "agent turn ended with an error or abort";
-		if (timedOut) completeAutoWorkRun(runId, { status: "timed_out", failureReason });
+		if (timedOut) { completeAutoWorkRun(runId, { status: "timed_out", failureReason }); broadcastBus.broadcast({ type: "auto_work_runs_changed" }); }
 		else failAutoWorkRun(runId, task.id, failureReason);
 		const terminalState = findStateByName(timedOut ? "blocked" : "backlog");
 		if (terminalState) moveTask(task.id, terminalState.id, 0);
 		updateTask(task.id, {
 			body: `${task.body}\n\n---\n**Auto Work ${timedOut ? "timeout" : "aborted"}** — run \`${runId}\` ${failureReason}. Session: \`${session.sessionId}\`, worktree: \`${worktreePath}\`.`,
 		});
+		broadcastBus.broadcast({ type: "tasks_changed" });
 		log.warn(`run ${runId} ${timedOut ? "timed out" : "failed"}; T-${task.displayId} moved to ${timedOut ? "blocked" : "backlog"} (${failureReason})`);
 		await notify({ kind: "task_failed", displayId: task.displayId, reason: failureReason });
 		if (timedOut) return { outcome: "timed_out", taskId: task.id, runId, sessionId: session.sessionId, worktreePath };
@@ -527,6 +529,7 @@ async function settleAutoWorkRun(params: {
 	else log.error(`run ${runId}: "validate" task state not found — T-${task.displayId} left in its current state`);
 
 	completeAutoWorkRun(runId, { status: "completed" });
+	broadcastBus.broadcast({ type: "tasks_changed" });
 	broadcastBus.broadcast({ type: "auto_work_runs_changed" });
 	log.info(`run ${runId} completed for T-${task.displayId} — moved to validate`);
 	// Only announces completion once a PR actually exists — a fallback
@@ -726,20 +729,21 @@ export function waitForAutoWorkSessionTerminal(
 }
 
 /**
- * `git worktree add -b auto-work/T<displayId>-<slug> .worktrees/aw-T<displayId>-<slug>`,
- * run from `repoCwd` (the workspace root Auto Work is configured for).
- * Follows this repo's `Bun.spawn` convention (see `routes-fs.ts::runGitLsFiles`,
- * `build-info.ts`) rather than `node:child_process`. First programmatic
- * `git worktree add` call in the codebase — worktrees so far were all
- * created manually.
+ * `git worktree add -b auto-work/T<displayId>-<slug> .worktrees/aw-T<displayId>-<slug>
+ * origin/<default-branch>`, run from `repoCwd`. The start-point is the remote
+ * default branch (resolved via `git ls-remote --symref origin HEAD`), never the
+ * currently checked-out branch in the main worktree — ensures all auto-work
+ * branches share the same clean base regardless of what the developer has
+ * checked out locally, preventing squash-merge conflicts between independent tasks.
  */
 async function createAutoWorkWorktree(repoCwd: string, task: Task): Promise<string> {
 	const slug = slugifyTaskTitle(task.title);
 	const dirName = `aw-T${task.displayId}-${slug}`;
 	const worktreePath = path.join(repoCwd, ".worktrees", dirName);
 	const branch = `auto-work/t${task.displayId}-${slug}`;
+	const defaultBranch = await resolveDefaultBranch(repoCwd);
 
-	const proc = Bun.spawn(["git", "worktree", "add", "-b", branch, worktreePath], {
+	const proc = Bun.spawn(["git", "worktree", "add", "-b", branch, worktreePath, `origin/${defaultBranch}`], {
 		cwd: repoCwd,
 		stdin: "ignore",
 		stdout: "pipe",
@@ -788,20 +792,47 @@ export interface CreatePullRequestResult {
 	number: number;
 }
 
-/** Base branch auto-work PRs target. No per-workspace override exists yet (T-66 scope: `origin/main`). */
-const AUTO_WORK_PR_BASE_BRANCH = "main";
+/**
+ * Resolves the remote default branch for `repoCwd` by parsing
+ * `git ls-remote --symref origin HEAD`. Falls back to `"main"` if the
+ * command fails or the symref is absent (shallow clones, custom remotes).
+ * No dependency on `gh` or any GitHub API.
+ *
+ * Example output:
+ *   ref: refs/heads/main\tHEAD
+ *   <sha>\tHEAD
+ */
+async function resolveDefaultBranch(repoCwd: string): Promise<string> {
+	const proc = Bun.spawn(["git", "ls-remote", "--symref", "origin", "HEAD"], {
+		cwd: repoCwd,
+		stdin: "ignore",
+		stdout: "pipe",
+		stderr: "pipe",
+		windowsHide: true,
+	});
+	const [stdout, exitCode] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
+	if (exitCode !== 0) return "main";
+	for (const line of stdout.split("\n")) {
+		const m = line.match(/^ref:\s+refs\/heads\/(\S+)\s+HEAD$/);
+		if (m) return m[1];
+	}
+	return "main";
+}
 
 /**
- * `gh pr create --base main --title <title> --body <body>`, run from the
- * worktree directory so `gh` infers the PR head from the branch already
- * checked out there (see `createAutoWorkWorktree`). Follows the same
+ * `gh pr create --base <default-branch> --title <title> --body <body>`, run
+ * from the worktree directory so `gh` infers the PR head from the branch
+ * already checked out there (see `createAutoWorkWorktree`). Follows the same
  * `Bun.spawn` convention as `createAutoWorkWorktree`/`removeAutoWorkWorktree`
  * rather than `node:child_process`. Parses the PR number out of the URL
  * `gh pr create` prints on stdout (e.g. `https://github.com/o/r/pull/123`).
+ * The base branch is resolved dynamically from the remote rather than
+ * hardcoded, so repos whose default branch is not `main` work correctly.
  */
 async function createPullRequestViaGh(params: CreatePullRequestParams): Promise<CreatePullRequestResult> {
+	const baseBranch = await resolveDefaultBranch(params.cwd);
 	const proc = Bun.spawn(
-		["gh", "pr", "create", "--base", AUTO_WORK_PR_BASE_BRANCH, "--title", params.title, "--body", params.body],
+		["gh", "pr", "create", "--base", baseBranch, "--title", params.title, "--body", params.body],
 		{ cwd: params.cwd, stdin: "ignore", stdout: "pipe", stderr: "pipe", windowsHide: true },
 	);
 	const [stdout, stderr, exitCode] = await Promise.all([
