@@ -26,6 +26,7 @@ import { getWorkspacePreference, listWorkspacePreferences, setWorkspacePreferenc
 import { getTask } from "./db/tasks.ts";
 import { getTaskRewriteModel } from "./db/server-settings.ts";
 import { waitForAutoWorkSessionTerminal } from "./auto-work/engine.ts";
+import { getModelCatalogOverlay } from "./model-catalog-overlay.ts";
 
 const log = logger("routes");
 
@@ -469,9 +470,22 @@ export function buildRouter(
 async function validateModelRef(bridge: AgentBridge, ref: ModelRef): Promise<string | undefined> {
 	const models = await bridge.listModels();
 	const match = models.find((m) => m.provider === ref.provider && m.id === ref.id);
-	if (!match) return `unknown model: ${ref.provider}/${ref.id}`;
-	if (!match.isAvailable) return `no auth configured for ${ref.provider}/${ref.id}`;
-	return undefined;
+	if (match) {
+		if (!match.isAvailable) return `no auth configured for ${ref.provider}/${ref.id}`;
+		return undefined;
+	}
+	// Not in the picker-visible list. Distinguish "unknown to the SDK"
+	// (bad input) from "shadowed by the catalog overlay" (transient
+	// failure-driven or upstream-removed). The error message only
+	// reaches the server log + the 400 body — the picker doesn't show
+	// it to the user, so the wording is purely operational.
+	const shadowed = getModelCatalogOverlay()
+		.listShadowed()
+		.some((s) => s.provider === ref.provider && s.id === ref.id);
+	if (shadowed) {
+		return `unavailable: ${ref.provider}/${ref.id} (shadowed by catalog overlay)`;
+	}
+	return `unknown model: ${ref.provider}/${ref.id}`;
 }
 
 function deriveLabel(cwd: string): string {

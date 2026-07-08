@@ -41,6 +41,7 @@ import { reconcileInactiveAutoWorkRuns, runGlobalAutoWorkCycle } from "./auto-wo
 import type { RunAutoWorkCycleOptions } from "./auto-work/engine.ts";
 import { getScheduleStatus, updateGlobalSchedule, recordManualTrigger } from "./auto-work/scheduler.ts";
 import { logger } from "./log.ts";
+import { getModelCatalogOverlay } from "./model-catalog-overlay.ts";
 
 const log = logger("routes:auto-work");
 
@@ -299,11 +300,18 @@ function validateGlobalShape(body: SetAutoWorkGlobalConfigRequest): string | und
 	if (typeof body.squeezeEnabled !== "boolean") return "squeezeEnabled must be a boolean";
 	return undefined;
 }
-
 async function validateModelRef(bridge: AgentBridge, ref: ModelRef): Promise<string | undefined> {
 	const models = await bridge.listModels();
 	const match = models.find((m) => m.provider === ref.provider && m.id === ref.id);
-	if (!match) return `unknown model: ${ref.provider}/${ref.id}`;
-	if (!match.isAvailable) return `no auth configured for ${ref.provider}/${ref.id}`;
-	return undefined;
+	if (match) {
+		if (!match.isAvailable) return `no auth configured for ${ref.provider}/${ref.id}`;
+		return undefined;
+	}
+	const shadowed = getModelCatalogOverlay()
+		.listShadowed()
+		.some((s) => s.provider === ref.provider && s.id === ref.id);
+	if (shadowed) {
+		return `unavailable: ${ref.provider}/${ref.id} (shadowed by catalog overlay)`;
+	}
+	return `unknown model: ${ref.provider}/${ref.id}`;
 }
