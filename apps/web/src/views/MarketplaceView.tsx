@@ -12,6 +12,7 @@ import { Button } from "@/components/ui/Button";
 import { Modal } from "@/components/ui/Modal";
 import { marketplaceApi } from "@/lib/marketplace-api";
 import { cn } from "@/lib/utils";
+import { usePersistedViewState } from "@/lib/use-persisted-view-state";
 
 type ScopeFilter = "all" | "installed" | "available";
 
@@ -19,9 +20,9 @@ export function MarketplaceView() {
 	const [data, setData] = useState<ListMarketplaceResponse | null>(null);
 	const [loading, setLoading] = useState(true);
 	const [error, setError] = useState<string | undefined>();
-	const [search, setSearch] = useState("");
-	const [scope, setScope] = useState<ScopeFilter>("all");
-	const [marketplaceFilter, setMarketplaceFilter] = useState<string | "all">("all");
+	const [search, setSearch] = usePersistedViewState("marketplace.search", "");
+	const [scope, setScope] = usePersistedViewState<ScopeFilter>("marketplace.scope", "all");
+	const [marketplaceFilter, setMarketplaceFilter] = usePersistedViewState<string | "all">("marketplace.filter", "all");
 	const [selectedId, setSelectedId] = useState<string | undefined>();
 	const [busyId, setBusyId] = useState<string | undefined>();
 	const [refreshing, setRefreshing] = useState(false);

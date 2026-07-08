@@ -1,8 +1,8 @@
-import { useCallback, useEffect, useState } from "react";
+import { useEffect } from "react";
 
 import type { Task } from "@omp-deck/protocol";
 
-const STORAGE_KEY = "omp-deck:tasks:workspace-filter";
+import { usePersistedViewState } from "./use-persisted-view-state";
 
 /** Returns distinct task workspaces in stable display order. */
 export function taskWorkspaces(tasks: ReadonlyArray<Task>): string[] {
@@ -18,43 +18,19 @@ export function filterTasksByWorkspace(tasks: ReadonlyArray<Task>, cwd: string):
 	return cwd ? tasks.filter((task) => task.cwd === cwd) : [...tasks];
 }
 
-function readStoredWorkspace(): string {
-	if (typeof sessionStorage === "undefined") return "";
-	try {
-		return sessionStorage.getItem(STORAGE_KEY) ?? "";
-	} catch {
-		return "";
-	}
-}
-
-function storeWorkspace(cwd: string): void {
-	if (typeof sessionStorage === "undefined") return;
-	try {
-		if (cwd) sessionStorage.setItem(STORAGE_KEY, cwd);
-		else sessionStorage.removeItem(STORAGE_KEY);
-	} catch {
-		// Disabled storage or private mode: retain the selection in memory only.
-	}
-}
-
-/** Browser-session workspace selection, reset only after task workspaces load. */
+/** Per-session workspace selection, restored when the session is re-opened.
+ * Resets to "all workspaces" if the stored cwd is no longer in the task list. */
 export function useTaskWorkspaceFilter(
 	workspaces: ReadonlyArray<string>,
 	loaded: boolean,
 ): [string, (cwd: string) => void] {
-	const [selectedCwd, setSelectedCwd] = useState(readStoredWorkspace);
+	const [selectedCwd, setSelectedCwd] = usePersistedViewState("tasks.workspace", "");
 
 	useEffect(() => {
 		if (loaded && selectedCwd && !workspaces.includes(selectedCwd)) {
 			setSelectedCwd("");
-			storeWorkspace("");
 		}
-	}, [loaded, selectedCwd, workspaces]);
+	}, [loaded, selectedCwd, workspaces, setSelectedCwd]);
 
-	const select = useCallback((cwd: string) => {
-		setSelectedCwd(cwd);
-		storeWorkspace(cwd);
-	}, []);
-
-	return [selectedCwd, select];
+	return [selectedCwd, setSelectedCwd];
 }

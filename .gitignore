@@ -63,3 +63,6 @@ Restart-OMP-Deck.cmd
 # Linked worktrees and stale local protocol shims are runtime-local, not source.
 /.worktrees/
 /apps/server/packages/
+:memory:
+:memory:-shm
+:memory:-wal

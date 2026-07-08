@@ -11,6 +11,7 @@ import { Markdown } from "@/lib/markdown";
 import { skillsApi } from "@/lib/skills-api";
 import { useStore } from "@/lib/store";
 import { cn } from "@/lib/utils";
+import { usePersistedViewState } from "@/lib/use-persisted-view-state";
 
 type LevelFilter = "all" | "user" | "project";
 
@@ -23,9 +24,9 @@ export function SkillsView() {
 	const [data, setData] = useState<ListSkillsResponse | null>(null);
 	const [loading, setLoading] = useState(true);
 	const [error, setError] = useState<string | undefined>();
-	const [search, setSearch] = useState("");
-	const [providerFilter, setProviderFilter] = useState<string | "all">("all");
-	const [levelFilter, setLevelFilter] = useState<LevelFilter>("all");
+	const [search, setSearch] = usePersistedViewState("skills.search", "");
+	const [providerFilter, setProviderFilter] = usePersistedViewState<string | "all">("skills.providerFilter", "all");
+	const [levelFilter, setLevelFilter] = usePersistedViewState<LevelFilter>("skills.levelFilter", "all");
 	const [selectedId, setSelectedId] = useState<string | undefined>();
 	const [detail, setDetail] = useState<SkillDetailResponse | null>(null);
 	const [detailLoading, setDetailLoading] = useState(false);

@@ -34,6 +34,7 @@ import { useStore } from "@/lib/store";
 import { api } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { formatBriefTime } from "@/lib/time";
+import { usePersistedViewState } from "@/lib/use-persisted-view-state";
 import type { AssistantMsg, TextBlock } from "@/lib/types";
 
 // ─── helpers ────────────────────────────────────────────────────────────────
@@ -352,7 +353,7 @@ export function AutoWorkView() {
 	const workspaces = useStore((s) => s.workspaces);
 
 	// Workspace filter — controls which runs are visible in the left panel.
-	const [selectedCwd, setSelectedCwd] = useState("");
+	const [selectedCwd, setSelectedCwd] = usePersistedViewState("autowork.workspace", "");
 	// All runs + full task map (fetched globally, then filtered per workspace).
 	const [allRuns, setAllRuns] = useState<AutoWorkRun[]>([]);
 	const [taskMap, setTaskMap] = useState<Record<string, Task>>({});
