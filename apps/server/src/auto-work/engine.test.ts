@@ -542,6 +542,15 @@ beforeEach(() => {
 	fs.writeFileSync(path.join(repoCwd, "README.md"), "hello\n");
 	runGit(["add", "."], repoCwd);
 	runGit(["commit", "-q", "-m", "init"], repoCwd);
+
+	// Set up a bare remote so `git worktree add … origin/main` works in tests.
+	// PR #44 introduced `origin/main` in the worktree command but the test fixture
+	// had no remote, causing those tests to fail with "invalid reference: origin/main".
+	const originDir = path.join(homeDir, "origin.git");
+	fs.mkdirSync(originDir);
+	runGit(["init", "--bare", "-q"], originDir);
+	runGit(["remote", "add", "origin", originDir], repoCwd);
+	runGit(["push", "origin", "HEAD:main"], repoCwd);
 });
 
 afterEach(() => {
@@ -628,7 +637,7 @@ describe("runAutoWorkCycle", () => {
 
 		expect(result.outcome).toBe("completed");
 		if (result.outcome !== "completed") throw new Error("expected completed");
-		expect(createSessionCalls).toEqual([{ cwd: result.worktreePath, suppressAutoStart: true }]);
+		expect(createSessionCalls).toEqual([{ cwd: repoCwd, suppressAutoStart: true }]);
 	});
 
 	test("records an aborted agent turn as failed instead of completed", async () => {
@@ -794,6 +803,30 @@ describe("runAutoWorkCycle", () => {
 		if (result.outcome !== "skipped") throw new Error("expected skipped");
 		expect(result.reason).toContain("none fit");
 	});
+	test("reuses an existing registered worktree instead of re-running git worktree add", async () => {
+		setAutoWorkConfig(repoCwd, { ...DEFAULT_AUTO_WORK_VALUES, enabled: true });
+		const task = createTask({ title: "Retry after crash", cwd: repoCwd, priority: "P5", autoWork: true });
+
+		// Simulate the worktree that a previous (crashed) run would have left behind.
+		const slug = task.title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40);
+		const dirName = `aw-T${task.displayId}-${slug}`;
+		const worktreePath = path.join(repoCwd, ".worktrees", dirName);
+		runGit(["worktree", "add", "-b", `auto-work/t${task.displayId}-${slug}`, worktreePath], repoCwd);
+		expect(fs.existsSync(worktreePath)).toBe(true);
+
+		const handle = new FakeSessionHandle("sess_retry", 10);
+		const result = await runAutoWorkCycle(repoCwd, fakeBridge(handle), {
+			getSubscriptionUsage: async () => ({ available: true, weeklyPct: 5 }),
+			createPullRequest: stubCreatePullRequest,
+		});
+
+		expect(result.outcome).toBe("completed");
+		if (result.outcome !== "completed") throw new Error("expected completed");
+		// The engine must reuse the existing worktree — same path, no error.
+		expect(result.worktreePath).toBe(worktreePath);
+		expect(fs.existsSync(worktreePath)).toBe(true);
+	});
+
 });
 
 describe("runGlobalAutoWorkCycle", () => {
@@ -821,6 +854,11 @@ describe("runGlobalAutoWorkCycle", () => {
 		fs.writeFileSync(path.join(otherRepoCwd, "README.md"), "other\n");
 		runGit(["add", "."], otherRepoCwd);
 		runGit(["commit", "-q", "-m", "init"], otherRepoCwd);
+		const otherOriginDir = path.join(homeDir, "other-origin.git");
+		fs.mkdirSync(otherOriginDir);
+		runGit(["init", "--bare", "-q"], otherOriginDir);
+		runGit(["remote", "add", "origin", otherOriginDir], otherRepoCwd);
+		runGit(["push", "origin", "HEAD:main"], otherRepoCwd);
 
 		setAutoWorkConfig(repoCwd, { ...DEFAULT_AUTO_WORK_VALUES, enabled: true });
 		setAutoWorkConfig(otherRepoCwd, { ...DEFAULT_AUTO_WORK_VALUES, enabled: true });
