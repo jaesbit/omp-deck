@@ -3,8 +3,10 @@ import { subscribeWithSelector } from "zustand/middleware";
 
 import type {
 	ExtUiDialogResponse,
+	ImageAttachment,
 	ListSessionsResponse,
 	ListWorkspacesResponse,
+	ModelRef,
 	NotificationLevel,
 	PendingPlanApprovalWire,
 	PlanModeContextWire,
@@ -234,9 +236,11 @@ interface StoreState {
 	createSession(opts: {
 		cwd: string;
 		resumeFromPath?: string;
-		model?: import("@omp-deck/protocol").ModelRef;
+		model?: ModelRef;
 		planMode?: boolean;
 		suppressAutoStart?: boolean;
+		/** Thinking level for session creation (T-73). */
+		thinking?: string;
 	}): Promise<string>;
 	selectSession(id: string): void;
 	/** Retain a session for read-only monitoring. The returned cleanup releases
@@ -265,7 +269,7 @@ interface StoreState {
 	/** Start or stop receiving task-change broadcasts for the mounted Tasks view. */
 	subscribeTasks(): void;
 	unsubscribeTasks(): void;
-	sendPrompt(text: string, images?: import("@omp-deck/protocol").ImageAttachment[]): void;
+	sendPrompt(text: string, images?: ImageAttachment[]): void;
 	abort(): void;
 	/** Drop every queued (followUp / steering) prompt for the active session.
 	 *  Server echoes a `queue_cleared` session event that reconciles
@@ -275,7 +279,7 @@ interface StoreState {
 	 *  a `queue_state` session event with the new ordered queue. */
 	cancelQueued(queuedId: string): void;
 	/** Edit a queued prompt's text (and optionally images) in place. */
-	editQueued(queuedId: string, text: string, images?: import("@omp-deck/protocol").ImageAttachment[]): void;
+	editQueued(queuedId: string, text: string, images?: ImageAttachment[]): void;
 	/** Permanently delete a session (server drops the `.jsonl` file + any
 	 *  live handle — irreversible). Removes the row from both `sessionsById`
 	 *  and the persisted `sessions` list locally; clears `activeId` if it
@@ -434,6 +438,7 @@ export const useStore = create<StoreState>()(
 				...(opts.model ? { model: opts.model } : {}),
 				...(opts.planMode ? { planMode: true } : {}),
 				...(opts.suppressAutoStart ? { suppressAutoStart: true } : {}),
+				...(opts.thinking ? { thinking: opts.thinking } : {}),
 			});
 			const previousActiveId = get().activeId;
 			if (previousActiveId && previousActiveId !== created.sessionId && !get().watchingSessionCounts.has(previousActiveId)) {

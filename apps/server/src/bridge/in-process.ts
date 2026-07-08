@@ -5,6 +5,7 @@ import {
 	settings as ompSettings,
 } from "@oh-my-pi/pi-coding-agent";
 import type { AgentSession, CreateAgentSessionResult } from "@oh-my-pi/pi-coding-agent";
+import { parseConfiguredThinkingLevel } from "@oh-my-pi/pi-coding-agent/thinking";
 import { getLatestTodoPhasesFromEntries } from "@oh-my-pi/pi-coding-agent/tools/todo";
 import { getEnvApiKey } from "@oh-my-pi/pi-ai";
 import { runExtensionCompact, runExtensionSetModel } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/compact-handler";
@@ -18,6 +19,10 @@ type SdkModel = {
 	provider: string | { toString(): string };
 	contextWindow?: number;
 	input?: unknown[];
+	/** True when the model supports thinking/reasoning (T-73). */
+	reasoning?: boolean;
+	/** Thinking metadata — present on reasoning-capable models (T-73). */
+	thinking?: { efforts?: string[] };
 };
 import { executeAcpBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/acp-builtins";
 import type {
@@ -196,6 +201,8 @@ export class InProcessAgentBridge implements AgentBridge {
 						return m ? { model: m } : {};
 					})()
 				: {}),
+			// Forward thinking level if provided (T-73). Parse from string to ConfiguredThinkingLevel.
+			...(opts.thinking ? { thinkingLevel: parseConfiguredThinkingLevel(opts.thinking) } : {}),
 		});
 
 		const session = result.session;
@@ -1466,6 +1473,13 @@ function modelInfoFromSdk(
 	}
 	if (Array.isArray(model.input) && model.input.length > 0) {
 		info.inputModes = model.input.filter((m: unknown): m is "text" | "image" => m === "text" || m === "image");
+	}
+	// Expose supported thinking levels (T-73) — only for reasoning-capable models
+	// that declare explicit efforts (e.g. Anthropic Claude). Models where reasoning
+	// is controlled by routing to a sibling id (effortRouting) expose an empty array
+	// and are excluded so the UI doesn't show an unusable selector.
+	if (model.reasoning && Array.isArray(model.thinking?.efforts) && model.thinking.efforts.length > 0) {
+		info.thinkingLevels = model.thinking.efforts as string[];
 	}
 	if (current && current.provider === info.provider && current.id === info.id) {
 		info.isCurrent = true;

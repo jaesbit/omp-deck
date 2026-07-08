@@ -41,6 +41,8 @@ export interface WorkspaceEntry {
 	sessionCount: number;
 	/** Per-workspace default model override (T-42), when one is configured. */
 	defaultModel?: ModelRef;
+	/** Per-workspace default thinking level (T-73), when one is configured. */
+	defaultThinking?: string;
 }
 
 export interface CreateSessionRequest {
@@ -53,6 +55,9 @@ export interface CreateSessionRequest {
 	planMode?: boolean;
 	/** Do not fire the configured auto-start prompt when this creates a fresh session. */
 	suppressAutoStart?: boolean;
+	/** Thinking level to apply at session creation (T-73). Only valid for
+	 *  models that expose `thinkingLevels`. Omitted or null = SDK default. */
+	thinking?: string | null;
 }
 
 export interface CreateSessionResponse {
@@ -81,12 +86,17 @@ export interface ListWorkspacesResponse {
 export interface WorkspacePreference {
 	cwd: string;
 	model?: ModelRef;
+	/** Persisted thinking level for the workspace default (T-73). */
+	thinking?: string;
 	updatedAt: string;
 }
 
-/** `model: null` clears the override for that cwd. */
+/** `model: null` clears the model override for that cwd.
+ *  `thinking: null` clears the thinking override.
+ *  Fields are independent — clear one without touching the other by omitting it. */
 export interface SetWorkspacePreferenceRequest {
 	model: ModelRef | null;
+	thinking?: string | null;
 }
 
 export interface ListWorkspacePreferencesResponse {
@@ -275,6 +285,12 @@ export interface ModelInfo {
 	isCurrent?: boolean;
 	/** Optional UX hint: input modalities the provider supports for this model. */
 	inputModes?: Array<"text" | "image">;
+	/**
+	 * Thinking/reasoning effort levels this model supports (T-73). Absent when
+	 * the model does not support thinking. Populated from the SDK model's
+	 * `thinking.efforts` array (e.g. `["minimal","low","medium","high","xhigh"]`).
+	 */
+	thinkingLevels?: string[];
 }
 
 export interface ListModelsResponse {

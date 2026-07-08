@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { Check, FolderOpen, Loader2, Search } from "lucide-react";
-import type { ModelRef } from "@omp-deck/protocol";
+import type { ModelInfo, ModelRef } from "@omp-deck/protocol";
 
 import { DirBrowserModal } from "@/components/DirBrowserModal";
 import { Modal } from "@/components/ui/Modal";
@@ -15,6 +15,8 @@ export interface SessionLaunchOpts {
 	planMode: boolean;
 	/** Trimmed, non-empty initial prompt, or `undefined` when left blank. */
 	initialPrompt?: string;
+	/** Thinking level selected at launch time (T-73). Only set when the model supports it. */
+	thinking?: string;
 }
 
 /** Sentinel `<select>` value that switches the workspace picker into
@@ -74,6 +76,8 @@ export function SessionLaunchModal({
 	const [planMode, setPlanMode] = useState(false);
 	const [model, setModel] = useState<ModelRef | undefined>(undefined);
 	const [modelTouched, setModelTouched] = useState(false);
+	const [thinking, setThinking] = useState<string | undefined>(undefined);
+	const [thinkingTouched, setThinkingTouched] = useState(false);
 	const [initialPrompt, setInitialPrompt] = useState("");
 	const [busy, setBusy] = useState(false);
 	const [error, setError] = useState<string | undefined>();
@@ -90,6 +94,8 @@ export function SessionLaunchModal({
 		setPlanMode(false);
 		setModel(undefined);
 		setModelTouched(false);
+		setThinking(undefined);
+		setThinkingTouched(false);
 		setInitialPrompt("");
 		setError(undefined);
 		// eslint-disable-next-line react-hooks/exhaustive-deps
@@ -99,6 +105,10 @@ export function SessionLaunchModal({
 		() => workspaces.find((w) => w.cwd === cwd)?.defaultModel,
 		[workspaces, cwd],
 	);
+	const workspaceDefaultThinking = useMemo(
+		() => workspaces.find((w) => w.cwd === cwd)?.defaultThinking,
+		[workspaces, cwd],
+	);
 
 	// Preselect the workspace's effective default model (T-42) the first time
 	// it becomes known for the chosen cwd, unless the user already picked one.
@@ -106,6 +116,12 @@ export function SessionLaunchModal({
 		if (modelTouched) return;
 		if (workspaceDefaultModel) setModel(workspaceDefaultModel);
 	}, [workspaceDefaultModel, modelTouched]);
+
+	// Preselect the workspace's effective default thinking level (T-73).
+	useEffect(() => {
+		if (thinkingTouched) return;
+		if (workspaceDefaultThinking) setThinking(workspaceDefaultThinking);
+	}, [workspaceDefaultThinking, thinkingTouched]);
 
 	const {
 		loading: modelsLoading,
@@ -122,7 +138,7 @@ export function SessionLaunchModal({
 		setError(undefined);
 		try {
 			const trimmedPrompt = initialPrompt.trim();
-			await onConfirm({ cwd, model, planMode, initialPrompt: trimmedPrompt || undefined });
+			await onConfirm({ cwd, model, planMode, initialPrompt: trimmedPrompt || undefined, thinking });
 		} catch (err) {
 			setError(err instanceof Error ? err.message : String(err));
 		} finally {
@@ -160,11 +176,37 @@ export function SessionLaunchModal({
 		modelItemRefs.current[highlightedIndex]?.scrollIntoView({ block: "nearest" });
 	}, [highlightedIndex]);
 
+	// Derive the full ModelInfo for the currently selected model — needed to
+	// check whether it supports thinking (T-73). The catalog is already loaded.
+	const selectedModelInfo = useMemo<ModelInfo | undefined>(() => {
+		if (!model) return undefined;
+		for (const g of grouped) {
+			const found = g.items.find((m) => m.provider === model.provider && m.id === model.id);
+			if (found) return found;
+		}
+		return undefined;
+	}, [model, grouped]);
+
+	const selectedThinkingLevels = selectedModelInfo?.thinkingLevels;
+
 	function selectEntry(entry: ModelEntry): void {
 		if (entry.kind === "default") {
 			setModel(undefined);
+			// "Use default" model — can't know thinking support, so clear selection.
+			setThinking(undefined);
+			setThinkingTouched(false);
 		} else {
 			setModel({ provider: entry.model.provider, id: entry.model.id });
+			// If the new model doesn't support thinking (or its levels don't include
+			// the current choice), reset thinking so the workspace default can apply.
+			const newLevels = entry.model.thinkingLevels;
+			if (!newLevels || newLevels.length === 0) {
+				setThinking(undefined);
+				setThinkingTouched(false);
+			} else if (thinking && !newLevels.includes(thinking) && thinking !== "off") {
+				setThinking(undefined);
+				setThinkingTouched(false);
+			}
 		}
 		setModelTouched(true);
 	}
@@ -350,6 +392,62 @@ export function SessionLaunchModal({
 						↑↓ navigate · enter pick · ctrl+enter start session
 					</div>
 				</div>
+
+				{selectedThinkingLevels && selectedThinkingLevels.length > 0 ? (
+					<div className="mb-3">
+						<div className="mb-1.5 flex items-center gap-2">
+							<div className="meta">Thinking</div>
+							{workspaceDefaultThinking ? (
+								<span className="font-mono text-2xs text-ink-4">
+									workspace default: {workspaceDefaultThinking}
+								</span>
+							) : (
+								<span className="font-mono text-2xs text-ink-4">use model default</span>
+							)}
+						</div>
+						<div className="flex flex-wrap gap-1">
+							<button
+								type="button"
+								onClick={() => { setThinking(undefined); setThinkingTouched(true); }}
+								className={cn(
+									"rounded border px-2 py-0.5 font-mono text-2xs transition-colors",
+									thinking === undefined
+										? "border-accent bg-accent-soft text-accent"
+										: "border-line text-ink-3 hover:border-line-strong hover:text-ink-2",
+								)}
+							>
+								default
+							</button>
+							<button
+								type="button"
+								onClick={() => { setThinking("off"); setThinkingTouched(true); }}
+								className={cn(
+									"rounded border px-2 py-0.5 font-mono text-2xs transition-colors",
+									thinking === "off"
+										? "border-accent bg-accent-soft text-accent"
+										: "border-line text-ink-3 hover:border-line-strong hover:text-ink-2",
+								)}
+							>
+								off
+							</button>
+							{selectedThinkingLevels.map((level) => (
+								<button
+									key={level}
+									type="button"
+									onClick={() => { setThinking(level); setThinkingTouched(true); }}
+									className={cn(
+										"rounded border px-2 py-0.5 font-mono text-2xs transition-colors",
+										thinking === level
+											? "border-accent bg-accent-soft text-accent"
+											: "border-line text-ink-3 hover:border-line-strong hover:text-ink-2",
+									)}
+								>
+									{level}
+								</button>
+							))}
+						</div>
+					</div>
+				) : null}
 
 				<label className="flex items-center gap-2 text-sm text-ink-2">
 					<input

@@ -990,7 +990,7 @@ function GeneralSection() {
  * > this override > SDK/OMP_MODEL global default (see `routes.ts` `POST /sessions`).
  */
 function WorkspacesSection() {
-	const [workspaces, setWorkspaces] = useState<import("@omp-deck/protocol").WorkspaceEntry[]>([]);
+	const [workspaces, setWorkspaces] = useState<WorkspaceEntry[]>([]);
 	const [loading, setLoading] = useState(true);
 	const [error, setError] = useState<string | undefined>();
 	const [editingCwd, setEditingCwd] = useState<string | undefined>();
@@ -1013,7 +1013,8 @@ function WorkspacesSection() {
 
 	async function clear(cwd: string): Promise<void> {
 		try {
-			await api.setWorkspacePreference(cwd, null);
+			// Pass null for both model and thinking to delete the row entirely.
+			await api.setWorkspacePreference(cwd, null, null);
 			await refresh();
 		} catch (e) {
 			setError(String(e));
@@ -1024,10 +1025,10 @@ function WorkspacesSection() {
 		<div className="mx-auto max-w-3xl">
 			<div className="mb-4">
 				<h1 className="text-lg font-semibold text-ink">Workspaces</h1>
-				<p className="mt-1 text-sm text-ink-3">
-					Pin a default model per exact workspace path. New sessions use it unless a
-					model is chosen explicitly at creation time.
-				</p>
+			<p className="mt-1 text-sm text-ink-3">
+				Pin a default model and thinking level per exact workspace path. New sessions
+				use them unless overridden at creation time.
+			</p>
 			</div>
 			{error ? (
 				<div className="mb-3 rounded-md border border-danger/30 bg-danger/10 px-3 py-2 font-mono text-xs text-danger">
@@ -1041,31 +1042,36 @@ function WorkspacesSection() {
 			) : (
 				<ul className="divide-y divide-line rounded-md border border-line bg-paper-2">
 					{workspaces.map((w) => (
-						<li key={w.cwd} className="flex items-center gap-3 px-3 py-2.5">
-							<div className="min-w-0 flex-1">
-								<div className="truncate text-sm font-medium text-ink">{w.label}</div>
-								<div className="truncate font-mono text-2xs text-ink-3" title={w.cwd}>{w.cwd}</div>
-							</div>
-							<div className="shrink-0 text-right">
-								{w.defaultModel ? (
-									<div className="font-mono text-2xs text-ink-2">
-										{w.defaultModel.provider}/{w.defaultModel.id}
-									</div>
-								) : (
-									<div className="font-mono text-2xs text-ink-4">global/SDK default</div>
-								)}
-							</div>
-							<div className="flex shrink-0 items-center gap-1.5">
-								<Button variant="ghost" size="sm" onClick={() => setEditingCwd(w.cwd)}>
-									Change
+					<li key={w.cwd} className="flex items-center gap-3 px-3 py-2.5">
+						<div className="min-w-0 flex-1">
+							<div className="truncate text-sm font-medium text-ink">{w.label}</div>
+							<div className="truncate font-mono text-2xs text-ink-3" title={w.cwd}>{w.cwd}</div>
+						</div>
+						<div className="shrink-0 text-right">
+							{w.defaultModel ? (
+								<div className="font-mono text-2xs text-ink-2">
+									{w.defaultModel.provider}/{w.defaultModel.id}
+								</div>
+							) : (
+								<div className="font-mono text-2xs text-ink-4">global/SDK default</div>
+							)}
+							{w.defaultThinking ? (
+								<div className="font-mono text-2xs text-ink-3">
+									thinking: {w.defaultThinking}
+								</div>
+							) : null}
+						</div>
+						<div className="flex shrink-0 items-center gap-1.5">
+							<Button variant="ghost" size="sm" onClick={() => setEditingCwd(w.cwd)}>
+								Change
+							</Button>
+							{w.defaultModel || w.defaultThinking ? (
+								<Button variant="ghost" size="sm" onClick={() => void clear(w.cwd)}>
+									Clear
 								</Button>
-								{w.defaultModel ? (
-									<Button variant="ghost" size="sm" onClick={() => void clear(w.cwd)}>
-										Clear
-									</Button>
-								) : null}
-							</div>
-						</li>
+							) : null}
+						</div>
+					</li>
 					))}
 				</ul>
 			)}
@@ -1089,30 +1095,47 @@ function WorkspaceModelPickerModal({
 }) {
 	const open = cwd !== undefined;
 	const { loading, error: catalogError, query, setQuery, grouped } = useModelCatalog(undefined, open);
-	const [busyKey, setBusyKey] = useState<string | undefined>();
+	const [selectedModel, setSelectedModel] = useState<ModelInfo | undefined>();
+	const [selectedThinking, setSelectedThinking] = useState<string | undefined>();
+	const [busy, setBusy] = useState(false);
 	const [error, setError] = useState<string | undefined>();
 
 	useEffect(() => {
 		if (!open) return;
 		setQuery("");
+		setSelectedModel(undefined);
+		setSelectedThinking(undefined);
 		setError(undefined);
 		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, [open]);
 
-	async function pick(provider: string, id: string): Promise<void> {
-		if (!cwd) return;
-		setBusyKey(`${provider}/${id}`);
+	// When the selected model changes, clear thinking if the new model doesn't support it.
+	useEffect(() => {
+		if (!selectedModel?.thinkingLevels?.length) {
+			setSelectedThinking(undefined);
+		}
+	}, [selectedModel]);
+
+	async function save(): Promise<void> {
+		if (!cwd || !selectedModel) return;
+		setBusy(true);
 		setError(undefined);
 		try {
-			await api.setWorkspacePreference(cwd, { provider, id });
+			await api.setWorkspacePreference(
+				cwd,
+				{ provider: selectedModel.provider, id: selectedModel.id },
+				selectedThinking ?? null,
+			);
 			onPicked();
 			onClose();
 		} catch (err) {
 			setError(err instanceof Error ? err.message : String(err));
 		} finally {
-			setBusyKey(undefined);
+			setBusy(false);
 		}
 	}
+
+	const thinkingLevels = selectedModel?.thinkingLevels;
 
 	return (
 		<Modal open={open} onClose={onClose} widthClass="max-w-xl">
@@ -1121,10 +1144,10 @@ function WorkspaceModelPickerModal({
 			</div>
 			<div className="border-b border-line px-3 py-2">
 				<input
-						value={query}
-						onChange={(e) => setQuery(e.target.value)}
-						placeholder="Filter by name, id, or provider"
-						className="field h-8 w-full px-2 text-sm"
+					value={query}
+					onChange={(e) => setQuery(e.target.value)}
+					placeholder="Filter by name, id, or provider"
+					className="field h-8 w-full px-2 text-sm"
 				/>
 			</div>
 			{error ?? catalogError ? (
@@ -1132,27 +1155,96 @@ function WorkspaceModelPickerModal({
 					{error ?? catalogError}
 				</div>
 			) : null}
-			<div className="max-h-[50vh] overflow-y-auto">
+			<div className="max-h-[40vh] overflow-y-auto">
 				{loading ? <div className="px-3 py-6 text-center text-sm text-ink-3">Loading…</div> : null}
 				{grouped.map((g) => (
 					<div key={g.provider}>
 						<div className="border-b border-line bg-paper-2 px-3 py-1 font-mono text-2xs uppercase tracking-meta text-ink-3">
 							{g.provider}
 						</div>
-						{g.items.map((m) => (
+						{g.items.map((m) => {
+							const active = selectedModel?.provider === m.provider && selectedModel?.id === m.id;
+							return (
+								<button
+									key={`${m.provider}/${m.id}`}
+									type="button"
+									onClick={() => setSelectedModel(active ? undefined : m)}
+									className={cn(
+										"flex w-full items-center gap-2 border-b border-line px-3 py-2 text-left text-sm last:border-b-0 transition-colors",
+										active ? "bg-accent-soft/40 text-accent" : "hover:bg-paper-3/60",
+									)}
+								>
+									<span className="min-w-0 flex-1 truncate">{m.label}</span>
+									{m.thinkingLevels?.length ? (
+										<span className="shrink-0 font-mono text-2xs text-thinking/70">thinking</span>
+									) : null}
+									<span className="shrink-0 font-mono text-2xs text-ink-3">{m.id}</span>
+								</button>
+							);
+						})}
+					</div>
+				))}
+			</div>
+			{thinkingLevels && thinkingLevels.length > 0 ? (
+				<div className="border-t border-line px-3 py-2">
+					<div className="mb-1.5 font-mono text-2xs text-ink-3 uppercase tracking-meta">
+						Thinking level
+					</div>
+					<div className="flex flex-wrap gap-1">
+						<button
+							type="button"
+							onClick={() => setSelectedThinking(undefined)}
+							className={cn(
+								"rounded border px-2 py-0.5 font-mono text-2xs transition-colors",
+								selectedThinking === undefined
+									? "border-accent bg-accent-soft text-accent"
+									: "border-line text-ink-3 hover:border-line-strong hover:text-ink-2",
+							)}
+						>
+							default
+						</button>
+						<button
+							type="button"
+							onClick={() => setSelectedThinking("off")}
+							className={cn(
+								"rounded border px-2 py-0.5 font-mono text-2xs transition-colors",
+								selectedThinking === "off"
+									? "border-accent bg-accent-soft text-accent"
+									: "border-line text-ink-3 hover:border-line-strong hover:text-ink-2",
+							)}
+						>
+							off
+						</button>
+						{thinkingLevels.map((level) => (
 							<button
-								key={`${m.provider}/${m.id}`}
+								key={level}
 								type="button"
-								disabled={busyKey === `${m.provider}/${m.id}`}
-								onClick={() => void pick(m.provider, m.id)}
-								className="flex w-full items-center gap-2 border-b border-line px-3 py-2 text-left text-sm last:border-b-0 hover:bg-paper-3/60"
+								onClick={() => setSelectedThinking(level)}
+								className={cn(
+									"rounded border px-2 py-0.5 font-mono text-2xs transition-colors",
+									selectedThinking === level
+										? "border-accent bg-accent-soft text-accent"
+										: "border-line text-ink-3 hover:border-line-strong hover:text-ink-2",
+								)}
 							>
-								<span className="min-w-0 flex-1 truncate">{m.label}</span>
-								<span className="shrink-0 font-mono text-2xs text-ink-3">{m.id}</span>
+								{level}
 							</button>
 						))}
 					</div>
-				))}
+				</div>
+			) : null}
+			<div className="flex items-center justify-end gap-2 border-t border-line bg-paper-2/60 px-3 py-2">
+				<button type="button" onClick={onClose} className="btn-ghost h-8 px-3 text-xs" disabled={busy}>
+					Cancel
+				</button>
+				<button
+					type="button"
+					onClick={() => void save()}
+					disabled={busy || !selectedModel}
+					className={cn("btn-primary h-8 px-3 text-xs", (busy || !selectedModel) && "opacity-60")}
+				>
+					{busy ? "Saving…" : "Save"}
+				</button>
 			</div>
 		</Modal>
 	);

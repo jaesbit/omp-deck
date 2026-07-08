@@ -45,9 +45,10 @@ export async function launchSession(
 		model?: ModelRef;
 		planMode?: boolean;
 		suppressAutoStart?: boolean;
+		thinking?: string;
 	}) => Promise<string>,
 	setPendingDraft: (draft: { text: string; sessionId?: string; autoSend?: boolean } | undefined) => void,
-	opts: { cwd: string; model?: ModelRef; planMode: boolean; initialPrompt?: string },
+	opts: { cwd: string; model?: ModelRef; planMode: boolean; initialPrompt?: string; thinking?: string },
 ): Promise<string> {
 	const suppressAutoStart = Boolean(opts.initialPrompt);
 	const sessionId = await createSession({
@@ -55,6 +56,7 @@ export async function launchSession(
 		model: opts.model,
 		planMode: opts.planMode,
 		suppressAutoStart,
+		...(opts.thinking ? { thinking: opts.thinking } : {}),
 	});
 	if (opts.initialPrompt) {
 		setPendingDraft({

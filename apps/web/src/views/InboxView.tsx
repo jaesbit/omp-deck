@@ -159,6 +159,7 @@ export function InboxView() {
 			model: opts.model,
 			planMode: opts.planMode,
 			suppressAutoStart: true,
+			...(opts.thinking ? { thinking: opts.thinking } : {}),
 		});
 		const stamp = new Date(it.createdAt).toLocaleString();
 		const draft = [
