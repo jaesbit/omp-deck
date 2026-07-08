@@ -18,8 +18,8 @@ import type {
 } from "@omp-deck/protocol";
 
 import {
-	DEFAULT_PRELUDE,
 	MAINTENANCE_GATE_ENV_KEYS,
+	buildDefaultPrelude,
 	getEffectivePrelude,
 	getPreludeFilePath,
 	readMaintenanceGateState,
@@ -43,7 +43,7 @@ export function buildOrientationRouter(): Hono {
 	app.get("/orientation/prelude", (c) => {
 		const body: PreludeResponse = {
 			path: getPreludeFilePath(),
-			default: DEFAULT_PRELUDE,
+			default: buildDefaultPrelude(),
 			override: readPreludeOverride(),
 			effective: getEffectivePrelude(),
 		};
@@ -63,7 +63,7 @@ export function buildOrientationRouter(): Hono {
 		writePreludeOverride(body.value);
 		const resp: PreludeResponse = {
 			path: getPreludeFilePath(),
-			default: DEFAULT_PRELUDE,
+			default: buildDefaultPrelude(),
 			override: readPreludeOverride(),
 			effective: getEffectivePrelude(),
 		};

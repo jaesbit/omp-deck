@@ -24,6 +24,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 import { getDataDir, readManagedEnvFile } from "./env-store.ts";
+import { resolveKbRoot } from "./kb-service.ts";
 
 /**
  * System-prompt block prepended to every omp session created or resumed via
@@ -31,9 +32,9 @@ import { getDataDir, readManagedEnvFile } from "./env-store.ts";
  * and how the kanban / cron / inbox surfaces are shaped — so it can read and
  * mutate them via `bash` + `curl` without needing the user to re-explain.
  *
- * Imperatives belong in the orchestrator (`/start.md`), NOT here — see
- * `kb://system/imperatives-belong-in-orchestrator-not-prelude.md`. This file
- * is reference material; the orchestrator drives the turn.
+ * This is the structural API-reference scaffold. The four canonical orientation
+ * files (working-voice, deck-orientation, projects-hub, org-system-hub) are
+ * prepended at session-create time by `buildDefaultPrelude()`.
  */
 export const DEFAULT_PRELUDE = `# omp-deck context
 
@@ -44,7 +45,7 @@ over HTTP on the loopback interface.
 Local API base: http://127.0.0.1:8787/api  (use the \`bash\` tool with \`curl\`).
 
 ## Knowledge base
-A local llm-wiki at \`~/kb/\` is the deck's long-form memory; the cockpit's \`/kb\` view consumes it. The canonical orientation reads (\`working-voice\`, \`deck-orientation\`, \`projects-hub\`, \`org-system-hub\` — all under \`kb://system/\`) are wired into the \`/start\` slash command and fire on session boot. Re-read any of them directly when you need to re-anchor mid-session.
+A local llm-wiki at \`~/kb/\` is the deck's long-form memory; the cockpit's \`/kb\` view consumes it. The canonical orientation reads (\`working-voice\`, \`deck-orientation\`, \`projects-hub\`, \`org-system-hub\` — all under \`kb://system/\`) are inlined into your system prompt as hard rules. You don't have to read them on boot. Do NOT read \`parent-folder-rules.md\` or anything under \`kb/integrations/\` here either — those are read on-demand later, only when their trigger actually fires (see \`org-system-hub.md\`).
 
 KB read: \`GET /api/kb/file?path=system/<name>.md\` · search: \`GET /api/kb/search?q=…\` · backlinks: \`GET /api/kb/backlinks?path=…\`. The harness also resolves \`kb://\` URIs directly via the read tool.
 
@@ -90,6 +91,49 @@ Each mutation surface above has a preferred path. Use these when the user asks t
 Skills that compose with these: \`skill://create-skill\`, \`skill://handoff\`, \`skill://grill-me\`, \`skill://prototype\`, \`skill://diagnose\`, \`skill://zoom-out\`. Use \`read skill://<name>\` to load any skill's full instructions.
 `;
 
+// The four canonical kb://system files inlined at session-create time.
+const KB_SYSTEM_ORIENTATION_FILES = [
+	"working-voice",
+	"deck-orientation",
+	"projects-hub",
+	"org-system-hub",
+] as const;
+
+/** Strip YAML frontmatter (`--- ... ---` block at file start). */
+function stripFrontmatter(content: string): string {
+	return content.replace(/^---\n[\s\S]*?\n---\n/, "").trimStart();
+}
+
+/**
+ * Builds the default prelude by reading the 4 canonical kb://system orientation
+ * files and prepending their content as inlined hard rules before the
+ * structural API-reference scaffold (`DEFAULT_PRELUDE`).
+ *
+ * Falls back gracefully: if any file is missing or unreadable it is silently
+ * skipped. If none are readable the result equals `DEFAULT_PRELUDE` exactly.
+ *
+ * Called at session-create time by `getEffectivePrelude()` so content is
+ * always fresh relative to the most recent KB edit without needing a restart.
+ */
+export function buildDefaultPrelude(): string {
+	const kbRoot = resolveKbRoot();
+	const systemDir = path.join(kbRoot, "system");
+	const sections: string[] = [];
+
+	for (const name of KB_SYSTEM_ORIENTATION_FILES) {
+		const filePath = path.join(systemDir, `${name}.md`);
+		try {
+			const raw = readFileSync(filePath, "utf8");
+			sections.push(stripFrontmatter(raw));
+		} catch {
+			// File missing or unreadable — silently skip
+		}
+	}
+
+	if (sections.length === 0) return DEFAULT_PRELUDE;
+	return sections.join("\n") + "\n" + DEFAULT_PRELUDE;
+}
+
 // ─── prelude ───────────────────────────────────────────────────────────────
 
 export function getPreludeFilePath(): string {
@@ -106,7 +150,7 @@ export function readPreludeOverride(): string | null {
 	}
 }
 
-/** `null` clears the override; the next read returns DEFAULT_PRELUDE. */
+/** `null` clears the override; the next read returns `buildDefaultPrelude()`. */
 export function writePreludeOverride(value: string | null): void {
 	const p = getPreludeFilePath();
 	if (value === null) {
@@ -123,7 +167,7 @@ export function writePreludeOverride(value: string | null): void {
 
 /** Effective text the bridge prepends to every session's system prompt. */
 export function getEffectivePrelude(): string {
-	return readPreludeOverride() ?? DEFAULT_PRELUDE;
+	return readPreludeOverride() ?? buildDefaultPrelude();
 }
 
 // ─── /start command ────────────────────────────────────────────────────────
