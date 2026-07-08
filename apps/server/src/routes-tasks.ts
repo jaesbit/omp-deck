@@ -162,6 +162,7 @@ export function buildTasksRouter(): Hono {
 		if (!body.name) return c.json({ error: "name required" }, 400);
 		try {
 			const state = createState(body);
+			notifyTasksChanged();
 			return c.json(state, 201);
 		} catch (err) {
 			log.error(`createState failed`, err);
@@ -198,12 +199,14 @@ export function buildTasksRouter(): Hono {
 		}
 		const updated = updateState(c.req.param("id"), body);
 		if (!updated) return c.json({ error: "not found" }, 404);
+		notifyTasksChanged();
 		return c.json(updated);
 	});
 
 	app.delete("/task-states/:id", (c) => {
 		try {
 			const result = deleteState(c.req.param("id"));
+			notifyTasksChanged();
 			return c.json(result);
 		} catch (err) {
 			return c.json({ error: String(err) }, 400);
