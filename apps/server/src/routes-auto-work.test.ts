@@ -81,6 +81,7 @@ function globalConfigBody(
 		scheduleEnabled: true,
 		scheduleIntervalMinutes: 15,
 		taskSelectionModel: { provider: "anthropic", id: "claude-good" },
+		squeezeEnabled: false,
 		...overrides,
 	};
 }
@@ -112,6 +113,7 @@ describe("GET and PUT /auto-work/global-config", () => {
 			scheduleEnabled: false,
 			scheduleIntervalMinutes: 5,
 			taskSelectionModel: null,
+			squeezeEnabled: false,
 		});
 	});
 
@@ -166,6 +168,80 @@ describe("GET and PUT /auto-work/global-config", () => {
 
 		expect(res.status).toBe(400);
 		expect(await res.json()).toEqual({ error: "taskSelectionModel: no auth configured for anthropic/claude-noauth" });
+	});
+
+	test("PUT rejects a non-boolean squeezeEnabled", async () => {
+		const app = buildAutoWorkRouter(fakeBridge([AVAILABLE_MODEL]), fakeConfig());
+
+		const res = await app.request("/auto-work/global-config", {
+			method: "PUT",
+			body: JSON.stringify(globalConfigBody({ squeezeEnabled: "yes" as unknown as boolean })),
+		});
+
+		expect(res.status).toBe(400);
+		expect(await res.json()).toEqual({ error: "squeezeEnabled must be a boolean" });
+	});
+
+	test("PUT rejects a body that omits squeezeEnabled entirely", async () => {
+		const app = buildAutoWorkRouter(fakeBridge([AVAILABLE_MODEL]), fakeConfig());
+
+		// `SetAutoWorkGlobalConfigRequest` marks squeezeEnabled required, so bypass
+		// the TS type to simulate a client that never sends the field at all.
+		const bodyWithoutSqueeze = {
+			...globalConfigBody(),
+			squeezeEnabled: undefined,
+		} as unknown as SetAutoWorkGlobalConfigRequest;
+		const serialized = JSON.stringify(bodyWithoutSqueeze);
+		// Confirm JSON.stringify actually drops undefined-valued keys rather than
+		// assuming it, so this test truly exercises an omitted field, not a
+		// `squeezeEnabled: null`/"undefined" literal on the wire.
+		expect(serialized).not.toContain("squeezeEnabled");
+
+		const res = await app.request("/auto-work/global-config", {
+			method: "PUT",
+			body: serialized,
+		});
+
+		expect(res.status).toBe(400);
+		expect(await res.json()).toEqual({ error: "squeezeEnabled must be a boolean" });
+	});
+
+	test("PUT with squeezeEnabled true persists and round-trips", async () => {
+		const app = buildAutoWorkRouter(fakeBridge([AVAILABLE_MODEL]), fakeConfig());
+		const request = globalConfigBody({ squeezeEnabled: true });
+
+		const putRes = await app.request("/auto-work/global-config", {
+			method: "PUT",
+			body: JSON.stringify(request),
+		});
+		expect(putRes.status).toBe(200);
+		expect(await putRes.json()).toMatchObject({ squeezeEnabled: true });
+
+		const getRes = await app.request("/auto-work/global-config");
+		expect(getRes.status).toBe(200);
+		expect(await getRes.json()).toMatchObject({ squeezeEnabled: true });
+	});
+
+	test("PUT toggles squeezeEnabled from true back to false", async () => {
+		const app = buildAutoWorkRouter(fakeBridge([AVAILABLE_MODEL]), fakeConfig());
+
+		const onRes = await app.request("/auto-work/global-config", {
+			method: "PUT",
+			body: JSON.stringify(globalConfigBody({ squeezeEnabled: true })),
+		});
+		expect(onRes.status).toBe(200);
+		expect(await onRes.json()).toMatchObject({ squeezeEnabled: true });
+
+		const offRes = await app.request("/auto-work/global-config", {
+			method: "PUT",
+			body: JSON.stringify(globalConfigBody({ squeezeEnabled: false })),
+		});
+		expect(offRes.status).toBe(200);
+		expect(await offRes.json()).toMatchObject({ squeezeEnabled: false });
+
+		const getRes = await app.request("/auto-work/global-config");
+		expect(getRes.status).toBe(200);
+		expect(await getRes.json()).toMatchObject({ squeezeEnabled: false });
 	});
 });
 

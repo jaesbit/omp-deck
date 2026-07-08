@@ -13,8 +13,10 @@ import type { AutoWorkCycleResult, AutoWorkGlobalConfig, AutoWorkScheduleStatus 
 
 import type { AgentBridge } from "../bridge/types.ts";
 import { getAutoWorkGlobalConfig } from "../db/auto-work-global.ts";
+import { listAutoWorkConfigs } from "../db/auto-work.ts";
+import { getSubscriptionUsage } from "../usage-subscription.ts";
 import { broadcastBus } from "../broadcast-bus.ts";
-import { runGlobalAutoWorkCycle, countEligibleWorkspaces } from "./engine.ts";
+import { runGlobalAutoWorkCycle, countEligibleWorkspaces, shouldConsiderSqueeze, decideSqueezeTiming } from "./engine.ts";
 import type { RunAutoWorkCycleOptions } from "./engine.ts";
 import { logger } from "../log.ts";
 
@@ -40,7 +42,7 @@ const state: InternalState = { timer: null, lastTriggeredAt: null, lastOutcome: 
 /**
  * Returns the current global schedule status for the REST endpoint.
  * Reads the global config for `scheduleEnabled`, `scheduleIntervalMinutes`,
- * and `taskSelectionModel`; the rest comes from in-process state.
+ * `taskSelectionModel`, and `squeezeEnabled`; the rest comes from in-process state.
  */
 export function getScheduleStatus(): AutoWorkScheduleStatus {
 	const config = getAutoWorkGlobalConfig();
@@ -48,10 +50,71 @@ export function getScheduleStatus(): AutoWorkScheduleStatus {
 		scheduleEnabled: config.scheduleEnabled,
 		scheduleIntervalMinutes: config.scheduleIntervalMinutes,
 		taskSelectionModel: config.taskSelectionModel,
+		squeezeEnabled: config.squeezeEnabled,
 		lastTriggeredAt: state.lastTriggeredAt,
 		lastOutcome: state.lastOutcome,
 		eligibleWorkspaceCount: countEligibleWorkspaces(),
 	};
+}
+
+/** Safety cap on consecutive extra cycles a single squeeze follow-up chain may start. */
+const MAX_SQUEEZE_ITERATIONS = 10;
+
+/**
+ * After a scheduled cycle settles, squeeze mode (T-75) decides whether to
+ * chain another cycle immediately rather than waiting for the next tick.
+ * Loops (bounded) as long as: there is still eligible backlog work, the
+ * pure `shouldConsiderSqueeze` gate sees real unused-capacity risk, the
+ * assigned model agrees, and the resulting cycle actually ran something
+ * (a `"skipped"` outcome means nothing fits right now — further asking is
+ * pointless until state changes, so the loop stops there too).
+ */
+async function runSqueezeFollowUps(
+	config: AutoWorkGlobalConfig,
+	bridge: AgentBridge,
+	cycleOptions: RunAutoWorkCycleOptions,
+): Promise<void> {
+	if (!config.squeezeEnabled) return;
+
+	for (let iteration = 0; iteration < MAX_SQUEEZE_ITERATIONS; iteration++) {
+		const usage = await getSubscriptionUsage();
+		if (!usage.available) break;
+
+		const eligibleWorkspaceCount = countEligibleWorkspaces();
+		const gate = shouldConsiderSqueeze({
+			now: new Date(),
+			scheduleIntervalMinutes: config.scheduleIntervalMinutes,
+			sessionPct: usage.sessionPct,
+			sessionResetAt: usage.sessionResetAt,
+			eligibleWorkspaceCount,
+		});
+		if (!gate) break;
+
+		const enabledWorkspace = listAutoWorkConfigs().find((c) => c.enabled);
+		if (!enabledWorkspace) break;
+
+		const shouldRunNow = await decideSqueezeTiming(
+			bridge,
+			{
+				workspaceCwd: enabledWorkspace.workspaceCwd,
+				sessionPct: usage.sessionPct,
+				sessionResetAt: usage.sessionResetAt,
+				weeklyPct: usage.weeklyPct,
+				weeklyResetAt: usage.weeklyResetAt,
+				eligibleWorkspaceCount,
+				scheduleIntervalMinutes: config.scheduleIntervalMinutes,
+			},
+			config.taskSelectionModel,
+		);
+		if (!shouldRunNow) break;
+
+		log.info(`squeeze mode: starting an extra cycle (${iteration + 1}/${MAX_SQUEEZE_ITERATIONS})`);
+		state.lastTriggeredAt = new Date().toISOString();
+		const outcome = await runGlobalAutoWorkCycle(bridge, { ...cycleOptions, taskSelectionModel: config.taskSelectionModel });
+		state.lastOutcome = outcome;
+		broadcastBus.broadcast({ type: "auto_work_runs_changed" });
+		if (outcome.outcome === "skipped") break;
+	}
 }
 
 /**
@@ -78,8 +141,9 @@ export function updateGlobalSchedule(
 	const tick = (): void => {
 		state.lastTriggeredAt = new Date().toISOString();
 		runGlobalAutoWorkCycle(bridge, { ...cycleOptions, taskSelectionModel: config.taskSelectionModel })
-			.then((outcome) => {
+			.then(async (outcome) => {
 				state.lastOutcome = outcome;
+				await runSqueezeFollowUps(config, bridge, cycleOptions);
 			})
 			.catch((err: unknown) => {
 				log.error(`scheduled global cycle error`, err);

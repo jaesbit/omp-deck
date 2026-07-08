@@ -177,6 +177,7 @@ export function buildAutoWorkRouter(bridge: AgentBridge, config: Config, cycleOp
 				scheduleEnabled: body.scheduleEnabled,
 				scheduleIntervalMinutes: body.scheduleIntervalMinutes,
 				taskSelectionModel: body.taskSelectionModel,
+				squeezeEnabled: body.squeezeEnabled,
 			});
 			// Reconfigure the in-process scheduler immediately.
 			updateGlobalSchedule(saved, bridge, {
@@ -295,6 +296,7 @@ function validateGlobalShape(body: SetAutoWorkGlobalConfigRequest): string | und
 			typeof body.taskSelectionModel.id !== "string"
 		) return "taskSelectionModel must be null or {provider, id}";
 	}
+	if (typeof body.squeezeEnabled !== "boolean") return "squeezeEnabled must be a boolean";
 	return undefined;
 }
 

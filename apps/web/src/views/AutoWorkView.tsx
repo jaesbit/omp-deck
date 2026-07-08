@@ -25,6 +25,7 @@ import {
 	Play,
 	RefreshCw,
 	XCircle,
+	Zap,
 } from "lucide-react";
 import type { AutoWorkRun, AutoWorkRunStatus, AutoWorkScheduleStatus, Task } from "@omp-deck/protocol";
 
@@ -508,8 +509,14 @@ export function AutoWorkView() {
 
 					{/* Eligible workspaces hint */}
 					{scheduleStatus !== null && scheduleStatus.eligibleWorkspaceCount > 0 && (
-						<p className="text-xs text-ink-3">
+						<p className="flex items-center gap-1.5 text-xs text-ink-3">
 							{scheduleStatus.eligibleWorkspaceCount} workspace{scheduleStatus.eligibleWorkspaceCount > 1 ? "s" : ""} with eligible tasks
+							{scheduleStatus.squeezeEnabled && (
+								<span className="inline-flex items-center gap-0.5 rounded bg-accent/15 px-1 py-0.5 text-2xs font-medium text-accent" title="Squeeze mode is active">
+									<Zap className="h-2.5 w-2.5" />
+									squeeze
+								</span>
+							)}
 						</p>
 					)}
 				</div>
