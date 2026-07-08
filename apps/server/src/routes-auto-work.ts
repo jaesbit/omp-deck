@@ -105,7 +105,7 @@ export function buildAutoWorkRouter(bridge: AgentBridge, config: Config, cycleOp
 
 	// ─── Run history ─────────────────────────────────────────────────────────
 
-	app.get("/auto-work/runs", (c) => {
+	app.get("/auto-work/runs", async (c) => {
 		const limitParam = c.req.query("limit");
 		let limit: number | undefined;
 		if (limitParam !== undefined) {
@@ -135,7 +135,7 @@ export function buildAutoWorkRouter(bridge: AgentBridge, config: Config, cycleOp
 			status = statusParam as AutoWorkRunStatus;
 		}
 
-		reconcileInactiveAutoWorkRuns(bridge);
+		await reconcileInactiveAutoWorkRuns(bridge);
 		const response: ListAutoWorkRunsResponse = { runs: listAutoWorkRuns({ limit, taskId, priority, status }) };
 		return c.json(response);
 	});
