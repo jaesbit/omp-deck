@@ -128,7 +128,7 @@ const AUTO_WORK_RULES_BODY = [
 	"  trace back from the kanban card:",
 	"  ```",
 	"  ---",
-	"  **Auto Work** — [session <short-id>](<deckBaseUrl>/sessions/<id>) · PR #N",
+	"  **Auto Work** — [session <short-id>](<deckBaseUrl>/c/<id>) · PR #N",
 	"  ```",
 	"- If anything fails after the commit (PR creation, task move), log the error",
 	"  and leave the task in its current column rather than silently marking it done.",
