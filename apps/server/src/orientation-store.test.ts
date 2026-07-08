@@ -5,6 +5,7 @@ import * as path from "node:path";
 
 import {
 	DEFAULT_PRELUDE,
+	buildDefaultPrelude,
 	getEffectivePrelude,
 	getPreludeFilePath,
 	readMaintenanceGateState,
@@ -17,6 +18,7 @@ import {
 
 const ENV_KEYS = [
 	"OMP_DECK_DATA_DIR",
+	"OMP_DECK_KB_ROOT",
 	"OMP_DECK_MAINTENANCE_GATE_DISABLED",
 	"OMP_MAINTENANCE_GATE_MIN_OP_MSGS",
 	"OMP_MAINTENANCE_GATE_MIN_RELEASE_AGE_MS",
@@ -83,6 +85,62 @@ describe("prelude override", () => {
 	test("clearing an already-absent override is a no-op", () => {
 		expect(() => writePreludeOverride(null)).not.toThrow();
 		expect(readPreludeOverride()).toBeNull();
+	});
+});
+
+describe("buildDefaultPrelude", () => {
+	test("returns DEFAULT_PRELUDE when no KB files exist", () => {
+		// tmpHomeDir/kb/system/ is absent → all reads throw ENOENT → fallback
+		expect(buildDefaultPrelude()).toBe(DEFAULT_PRELUDE);
+	});
+
+	test("prepends all four KB system files when present", () => {
+		const kbSystemDir = path.join(tmpHomeDir, "kb", "system");
+		mkdirSync(kbSystemDir, { recursive: true });
+		writeFileSync(path.join(kbSystemDir, "working-voice.md"), "---\ntype: k\n---\n# Voice\nvoice-content\n");
+		writeFileSync(path.join(kbSystemDir, "deck-orientation.md"), "# Deck\ndeck-content\n");
+		writeFileSync(path.join(kbSystemDir, "projects-hub.md"), "# Projects\nprojects-content\n");
+		writeFileSync(path.join(kbSystemDir, "org-system-hub.md"), "# Org\norg-content\n");
+
+		const result = buildDefaultPrelude();
+		expect(result).toContain("# Voice\nvoice-content");
+		expect(result).not.toContain("---\ntype: k\n---"); // frontmatter stripped
+		expect(result).toContain("# Deck\ndeck-content");
+		expect(result).toContain("# Projects\nprojects-content");
+		expect(result).toContain("# Org\norg-content");
+		expect(result).toContain(DEFAULT_PRELUDE); // structural scaffold still appended
+		// KB content precedes the scaffold
+		expect(result.indexOf("voice-content")).toBeLessThan(result.indexOf("# omp-deck context"));
+	});
+
+	test("skips individual missing files, includes the rest", () => {
+		const kbSystemDir = path.join(tmpHomeDir, "kb", "system");
+		mkdirSync(kbSystemDir, { recursive: true });
+		writeFileSync(path.join(kbSystemDir, "working-voice.md"), "# Voice\nvoice-content\n");
+		// other three absent
+
+		const result = buildDefaultPrelude();
+		expect(result).toContain("voice-content");
+		expect(result).toContain(DEFAULT_PRELUDE);
+	});
+
+	test("getEffectivePrelude returns buildDefaultPrelude output when no override", () => {
+		const kbSystemDir = path.join(tmpHomeDir, "kb", "system");
+		mkdirSync(kbSystemDir, { recursive: true });
+		writeFileSync(path.join(kbSystemDir, "working-voice.md"), "# Voice\nvoice-content\n");
+
+		const result = getEffectivePrelude();
+		expect(result).toContain("voice-content");
+		expect(result).toContain(DEFAULT_PRELUDE);
+	});
+
+	test("getEffectivePrelude prefers override over KB content", () => {
+		const kbSystemDir = path.join(tmpHomeDir, "kb", "system");
+		mkdirSync(kbSystemDir, { recursive: true });
+		writeFileSync(path.join(kbSystemDir, "working-voice.md"), "# Voice\nvoice-content\n");
+		writePreludeOverride("# custom override");
+
+		expect(getEffectivePrelude()).toBe("# custom override");
 	});
 });
 
