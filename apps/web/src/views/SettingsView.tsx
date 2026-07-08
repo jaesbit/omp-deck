@@ -977,9 +977,152 @@ function GeneralSection() {
 					</div>
 				) : null}
 			</div>
+
+			<TaskRewriteModelCard />
 		</div>
 	);
 }
+
+/**
+ * Card within GeneralSection (T-76) — shows the configured model for AI task
+ * rewrites and lets the user pick or clear it.
+ */
+function TaskRewriteModelCard() {
+	const [model, setModel] = useState<ModelRef | null>(null);
+	const [loading, setLoading] = useState(true);
+	const [pickerOpen, setPickerOpen] = useState(false);
+	const [error, setError] = useState<string | undefined>();
+
+	useEffect(() => {
+		let cancelled = false;
+		void api.getTaskRewriteModel()
+			.then((r) => { if (!cancelled) { setModel(r.model); setLoading(false); } })
+			.catch((e) => { if (!cancelled) { setError(e instanceof Error ? e.message : String(e)); setLoading(false); } });
+		return () => { cancelled = true; };
+	}, []);
+
+	async function clearModel(): Promise<void> {
+		setError(undefined);
+		try {
+			const r = await api.setTaskRewriteModel(null);
+			setModel(r.model);
+		} catch (e) {
+			setError(e instanceof Error ? e.message : String(e));
+		}
+	}
+
+	async function onPicked(picked: ModelRef): Promise<void> {
+		setPickerOpen(false);
+		setError(undefined);
+		try {
+			const r = await api.setTaskRewriteModel(picked);
+			setModel(r.model);
+		} catch (e) {
+			setError(e instanceof Error ? e.message : String(e));
+		}
+	}
+
+	return (
+		<>
+			<div className="rounded-md border border-line bg-paper-2 p-4">
+				<div className="meta mb-1">Task rewrite model</div>
+				<p className="mb-3 text-xs text-ink-3">
+					Model used when rewriting tasks via the <strong>Rewrite</strong> button on a
+					task card. Runs a short one-off session — no full session overhead.
+					Leave as SDK default unless you want a cheaper or faster model for this.
+				</p>
+				{error ? (
+					<div className="mb-3 rounded-md border border-danger/30 bg-danger/10 px-3 py-2 font-mono text-xs text-danger">
+						{error}
+					</div>
+				) : null}
+				{loading ? (
+					<div className="py-2 text-sm text-ink-3">Loading…</div>
+				) : (
+					<div className="flex items-center gap-2">
+						<span className="flex-1 font-mono text-xs text-ink-2">
+							{model ? `${model.provider} / ${model.id}` : "(SDK default)"}
+						</span>
+						<Button size="sm" variant="ghost" onClick={() => setPickerOpen(true)}>
+							Change
+						</Button>
+						{model ? (
+							<Button size="sm" variant="ghost" onClick={() => void clearModel()}>
+								Clear
+							</Button>
+						) : null}
+					</div>
+				)}
+			</div>
+			<TaskRewriteModelPickerModal
+				open={pickerOpen}
+				onClose={() => setPickerOpen(false)}
+				onPicked={(m) => void onPicked(m)}
+			/>
+		</>
+	);
+}
+
+function TaskRewriteModelPickerModal({
+	open,
+	onClose,
+	onPicked,
+}: {
+	open: boolean;
+	onClose: () => void;
+	onPicked: (model: ModelRef) => void;
+}) {
+	const { loading, error: catalogError, query, setQuery, grouped } = useModelCatalog(undefined, open);
+
+	useEffect(() => {
+		if (!open) return;
+		setQuery("");
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, [open]);
+
+	return (
+		<Modal open={open} onClose={onClose} widthClass="max-w-xl">
+			<div className="flex h-11 items-center gap-2 border-b border-line px-3">
+				<div className="meta">Task rewrite model</div>
+			</div>
+			<div className="border-b border-line px-3 py-2">
+				<input
+					value={query}
+					onChange={(e) => setQuery(e.target.value)}
+					placeholder="Filter by name, id, or provider"
+					className="field h-8 w-full px-2 text-sm"
+				/>
+			</div>
+			{catalogError ? (
+				<div className="mx-3 my-2 rounded-md border border-danger/30 bg-danger/10 px-3 py-2 font-mono text-xs text-danger">
+					{catalogError}
+				</div>
+			) : null}
+			<div className="max-h-[50vh] overflow-y-auto">
+				{loading ? <div className="px-3 py-6 text-center text-sm text-ink-3">Loading…</div> : null}
+				{grouped.map((g) => (
+					<div key={g.provider}>
+						<div className="border-b border-line bg-paper-2 px-3 py-1 font-mono text-2xs uppercase tracking-meta text-ink-3">
+							{g.provider}
+						</div>
+						{g.items.map((m) => (
+							<button
+								key={`${m.provider}/${m.id}`}
+								type="button"
+								onClick={() => onPicked({ provider: m.provider, id: m.id })}
+								className="flex w-full items-center gap-2 border-b border-line px-3 py-2 text-left text-sm last:border-b-0 hover:bg-paper-3/60"
+							>
+								<span className="min-w-0 flex-1 truncate">{m.label}</span>
+								<span className="shrink-0 font-mono text-2xs text-ink-3">{m.id}</span>
+							</button>
+						))}
+					</div>
+				))}
+			</div>
+		</Modal>
+	);
+}
+
 
 /**
  * Workspaces section (T-42): per-cwd default model override. Lists every

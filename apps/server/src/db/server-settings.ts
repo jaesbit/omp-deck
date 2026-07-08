@@ -3,10 +3,9 @@
  * `workspace-preferences.ts` / `auto-work.ts`, these settings are not keyed
  * by workspace cwd — one value per key, server-wide.
  *
- * First (and so far only) consumer is `deckBaseUrl`, exposed as typed
- * helpers below. Add more typed wrappers around `getServerSetting` /
- * `setServerSetting` as new global settings show up rather than growing
- * ad-hoc tables per setting.
+ * Add typed wrappers around `getServerSetting` / `setServerSetting` as new
+ * global settings show up rather than growing ad-hoc tables per setting.
+ * Current consumers: `deckBaseUrl` (T-61), `taskRewriteModel` (T-76).
  */
 
 import type { Config } from "../config.ts";
@@ -65,4 +64,32 @@ export function setDeckBaseUrl(config: Config, value: string | null): { deckBase
 		setServerSetting(DECK_BASE_URL_KEY, trimmed);
 	}
 	return getDeckBaseUrl(config);
+}
+
+const TASK_REWRITE_MODEL_KEY = "taskRewriteModel";
+
+export type ModelRefRaw = { provider: string; id: string };
+
+/**
+ * Returns the configured model for task rewriting, or `null` when none has
+ * been persisted (the caller should fall back to the SDK default).
+ */
+export function getTaskRewriteModel(): ModelRefRaw | null {
+	const stored = getServerSetting(TASK_REWRITE_MODEL_KEY);
+	if (!stored) return null;
+	try {
+		return JSON.parse(stored) as ModelRefRaw;
+	} catch {
+		return null;
+	}
+}
+
+/** Pass `null` to clear the override. */
+export function setTaskRewriteModel(model: ModelRefRaw | null): ModelRefRaw | null {
+	if (model === null) {
+		deleteServerSetting(TASK_REWRITE_MODEL_KEY);
+	} else {
+		setServerSetting(TASK_REWRITE_MODEL_KEY, JSON.stringify(model));
+	}
+	return getTaskRewriteModel();
 }

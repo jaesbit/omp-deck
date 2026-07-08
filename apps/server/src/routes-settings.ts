@@ -11,6 +11,8 @@ import type {
 	RestartServerResponse,
 	RevealEnvValueResponse,
 	SetDeckBaseUrlRequest,
+	SetTaskRewriteModelRequest,
+	TaskRewriteModelResponse,
 } from "@omp-deck/protocol";
 
 import type { Config } from "./config.ts";
@@ -25,7 +27,7 @@ import {
 	readManagedEnvFile,
 	writeManagedEnvUpdates,
 } from "./env-store.ts";
-import { getDeckBaseUrl, setDeckBaseUrl } from "./db/server-settings.ts";
+import { getDeckBaseUrl, getTaskRewriteModel, setDeckBaseUrl, setTaskRewriteModel } from "./db/server-settings.ts";
 import { setLogLevel } from "./log.ts";
 import type { AgentBridge } from "./bridge/types.ts";
 
@@ -119,6 +121,32 @@ export function buildSettingsRouter(
 		}
 		const response: DeckBaseUrlResponse = setDeckBaseUrl(config, body.deckBaseUrl);
 		return c.json(response);
+	});
+
+	app.get("/settings/task-rewrite-model", (c) => {
+		const model = getTaskRewriteModel();
+		const body: TaskRewriteModelResponse = { model };
+		return c.json(body);
+	});
+
+	app.put("/settings/task-rewrite-model", async (c) => {
+		let body: SetTaskRewriteModelRequest;
+		try {
+			body = (await c.req.json()) as SetTaskRewriteModelRequest;
+		} catch {
+			return c.json({ error: "invalid json body" }, 400);
+		}
+		if (body.model !== null && (typeof body.model !== "object" || typeof body.model.provider !== "string" || typeof body.model.id !== "string")) {
+			return c.json({ error: "model must be {provider: string, id: string} or null" }, 400);
+		}
+		if (body.model !== null) {
+			const catalog = await bridge.listModels();
+			const known = catalog.some((m) => m.provider === body.model!.provider && m.id === body.model!.id);
+			if (!known) return c.json({ error: `model ${body.model.provider}/${body.model.id} is not in the available catalog` }, 400);
+		}
+		const model = setTaskRewriteModel(body.model);
+		const resp: TaskRewriteModelResponse = { model };
+		return c.json(resp);
 	});
 
 	return app;
