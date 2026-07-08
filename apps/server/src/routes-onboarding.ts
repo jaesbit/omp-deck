@@ -32,10 +32,11 @@ import { getOnboardingState, markOnboardingComplete } from "./onboarding-state.t
 const log = logger("routes:onboarding");
 
 /**
- * The four `kb://system/*.md` files inlined into the session system prompt
- * by `buildDefaultPrelude()`. Shipped as blank-ish stubs so the first
- * system-prompt build returns real content rather than ENOENT. Users can
- * edit / replace at will — we never overwrite a file the user has touched.
+ * Starter `kb://system/*.md` files created by onboarding. `buildDefaultPrelude()`
+ * inlines these and every other top-level Markdown file the user adds later.
+ * Shipped as blank-ish stubs so the first system-prompt build returns real
+ * content rather than an empty directory. Users can edit or replace them; we
+ * never overwrite a file the user has touched.
  */
 /**
  * Top-level README written at the kb root by `seed-kb-system`. Same
@@ -63,8 +64,8 @@ const KB_README_BODY = [
 	"  `updated`, `tags` are parsed automatically).",
 	"- `[[some-file]]` resolves by filename stem. `[[dir/path]]` for explicit",
 	"  paths. `[[target|label]]` to rename the rendered text.",
-	"- The `/start` slash command reads `system/*.md` at session boot — drop",
-	"  notes about your voice, projects, and org system there.",
+	"- Every new session inlines `system/*.md` into its system prompt — add",
+	"  rules about your voice, projects, and org system there.",
 	"",
 	"## What this is NOT",
 	"",

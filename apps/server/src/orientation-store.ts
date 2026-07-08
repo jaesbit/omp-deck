@@ -19,7 +19,7 @@
  * and the cost is one stat + small read per `createAgentSession`.
  */
 
-import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
@@ -32,9 +32,9 @@ import { resolveKbRoot } from "./kb-service.ts";
  * and how the kanban / cron / inbox surfaces are shaped — so it can read and
  * mutate them via `bash` + `curl` without needing the user to re-explain.
  *
- * This is the structural API-reference scaffold. The four canonical orientation
- * files (working-voice, deck-orientation, projects-hub, org-system-hub) are
- * prepended at session-create time by `buildDefaultPrelude()`.
+ * This is the structural API-reference scaffold. Every top-level Markdown file
+ * under `kb://system/` is prepended at session-create time by
+ * `buildDefaultPrelude()`.
  */
 export const DEFAULT_PRELUDE = `# omp-deck context
 
@@ -45,7 +45,7 @@ over HTTP on the loopback interface.
 Local API base: http://127.0.0.1:8787/api  (use the \`bash\` tool with \`curl\`).
 
 ## Knowledge base
-A local llm-wiki at \`~/kb/\` is the deck's long-form memory; the cockpit's \`/kb\` view consumes it. The canonical orientation reads (\`working-voice\`, \`deck-orientation\`, \`projects-hub\`, \`org-system-hub\` — all under \`kb://system/\`) are inlined into your system prompt as hard rules. You don't have to read them on boot. Do NOT read \`parent-folder-rules.md\` or anything under \`kb/integrations/\` here either — those are read on-demand later, only when their trigger actually fires (see \`org-system-hub.md\`).
+A local llm-wiki at \`~/kb/\` is the deck's long-form memory; the cockpit's \`/kb\` view consumes it. Every top-level Markdown file under \`kb://system/\` is inlined into your system prompt as a hard rule, so you MUST NOT re-read those files on boot. Files under \`kb/integrations/\` are not inlined; read them on demand only when their owning system rule triggers them.
 
 KB read: \`GET /api/kb/file?path=system/<name>.md\` · search: \`GET /api/kb/search?q=…\` · backlinks: \`GET /api/kb/backlinks?path=…\`. The harness also resolves \`kb://\` URIs directly via the read tool.
 
@@ -91,13 +91,6 @@ Each mutation surface above has a preferred path. Use these when the user asks t
 Skills that compose with these: \`skill://create-skill\`, \`skill://handoff\`, \`skill://grill-me\`, \`skill://prototype\`, \`skill://diagnose\`, \`skill://zoom-out\`. Use \`read skill://<name>\` to load any skill's full instructions.
 `;
 
-// The four canonical kb://system files inlined at session-create time.
-const KB_SYSTEM_ORIENTATION_FILES = [
-	"working-voice",
-	"deck-orientation",
-	"projects-hub",
-	"org-system-hub",
-] as const;
 
 /** Strip YAML frontmatter (`--- ... ---` block at file start). */
 function stripFrontmatter(content: string): string {
@@ -105,28 +98,37 @@ function stripFrontmatter(content: string): string {
 }
 
 /**
- * Builds the default prelude by reading the 4 canonical kb://system orientation
- * files and prepending their content as inlined hard rules before the
- * structural API-reference scaffold (`DEFAULT_PRELUDE`).
+ * Builds the default prelude by reading every top-level Markdown file under
+ * `kb://system/` in deterministic filename order and prepending their content
+ * as inlined hard rules before the structural API-reference scaffold
+ * (`DEFAULT_PRELUDE`).
  *
- * Falls back gracefully: if any file is missing or unreadable it is silently
- * skipped. If none are readable the result equals `DEFAULT_PRELUDE` exactly.
+ * Missing directories and individually unreadable files are skipped. If no
+ * readable, non-empty Markdown content remains, the result equals
+ * `DEFAULT_PRELUDE` exactly.
  *
  * Called at session-create time by `getEffectivePrelude()` so content is
  * always fresh relative to the most recent KB edit without needing a restart.
  */
 export function buildDefaultPrelude(): string {
-	const kbRoot = resolveKbRoot();
-	const systemDir = path.join(kbRoot, "system");
-	const sections: string[] = [];
+	const systemDir = path.join(resolveKbRoot(), "system");
+	let filenames: string[];
+	try {
+		filenames = readdirSync(systemDir, { withFileTypes: true })
+			.filter((entry) => entry.isFile() && entry.name.endsWith(".md"))
+			.map((entry) => entry.name)
+			.sort((a, b) => a.localeCompare(b));
+	} catch {
+		return DEFAULT_PRELUDE;
+	}
 
-	for (const name of KB_SYSTEM_ORIENTATION_FILES) {
-		const filePath = path.join(systemDir, `${name}.md`);
+	const sections: string[] = [];
+	for (const filename of filenames) {
 		try {
-			const raw = readFileSync(filePath, "utf8");
-			sections.push(stripFrontmatter(raw));
+			const section = stripFrontmatter(readFileSync(path.join(systemDir, filename), "utf8"));
+			if (section) sections.push(section);
 		} catch {
-			// File missing or unreadable — silently skip
+			// One unreadable file must not suppress the remaining system rules.
 		}
 	}
 

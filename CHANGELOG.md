@@ -60,6 +60,7 @@ The deck can now create, pause, resume, and cancel autonomous multi-turn goals t
 
 - **Orphaned session handle on resume/create collision.** A resume/create call for a `sessionId` already tracked in the bridge's active map silently overwrote that map entry, orphaning the previous handle — its subscriptions and any in-flight turn kept running forever with no way to reach or abort it. The superseded instance is now disposed before being replaced, so at most one in-process handle ever drives a given session file.
 - **Cross-session IRC/subagent isolation.** Each active deck root session now owns a dedicated Bun child process running the omp SDK. Process-global SDK state (`AgentRegistry`, `IrcBus`, subagent lifecycle) is therefore scoped to one root tree instead of leaking between concurrent browser sessions whose agents reuse names such as `Main` or `Worker`. The parent keeps the existing `AgentBridge` API, proxies it over typed Bun IPC, forwards child broadcast frames once, and tears the child down on session deletion, idle reap, crash, or server shutdown. `@oh-my-pi/pi-coding-agent` / `pi-ai` are upgraded from `16.3.4` to `16.3.11`; the old IRC patch is removed rather than ported.
+- **All `kb://system` rules reach the system prompt.** `buildDefaultPrelude()` now discovers every top-level Markdown file in `kb/system/` instead of reading only four hardcoded filenames. Files are inlined in deterministic filename order with frontmatter stripped; nested and non-Markdown files remain excluded.
 
 ### Docs
 
