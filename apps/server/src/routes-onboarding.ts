@@ -32,10 +32,10 @@ import { getOnboardingState, markOnboardingComplete } from "./onboarding-state.t
 const log = logger("routes:onboarding");
 
 /**
- * The four `kb://system/*.md` files the default `/start` body fetches.
- * Shipped as blank-ish stubs so the agent's read-on-orient flow returns
- * something rather than a stream of 404s. Users can edit / replace at
- * will — we never overwrite a file the user has touched.
+ * The four `kb://system/*.md` files inlined into the session system prompt
+ * by `buildDefaultPrelude()`. Shipped as blank-ish stubs so the first
+ * system-prompt build returns real content rather than ENOENT. Users can
+ * edit / replace at will — we never overwrite a file the user has touched.
  */
 /**
  * Top-level README written at the kb root by `seed-kb-system`. Same

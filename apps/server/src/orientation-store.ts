@@ -8,8 +8,8 @@
  * source of truth for reading + writing all three from outside the bridge.
  *
  * Persistence:
- *   - Prelude override → `<dataDir>/prelude.md` (deck-managed file). Absence
- *     means "fall back to DEFAULT_PRELUDE shipped in this module".
+  *   - Prelude override → `<dataDir>/prelude.md` (deck-managed file). Absence
+  *     means "fall back to `buildDefaultPrelude()` (kb://system files + scaffold)".
  *   - /start command   → `~/.omp/agent/commands/start.md` (the same file the
  *     omp SDK re-reads every time `/start` fires; we don't shadow it).
  *   - Maintenance-gate → managed env file via `env-store.ts`. We just project
