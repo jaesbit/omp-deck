@@ -20,6 +20,7 @@ import { combineWithAutoStart, SESSION_INITIALISATION_COMMAND } from "@/lib/firs
 import { inboxApi } from "@/lib/inbox-api";
 import { useStore } from "@/lib/store";
 import { cn } from "@/lib/utils";
+import { usePersistedViewState } from "@/lib/use-persisted-view-state";
 
 const KIND_ORDER: ReadonlyArray<InboxKind> = [
 	"capture",
@@ -64,8 +65,8 @@ export function InboxView() {
 	const [items, setItems] = useState<InboxItem[]>([]);
 	const [loading, setLoading] = useState(true);
 	const [error, setError] = useState<string | undefined>();
-	const [filter, setFilter] = useState<Filter>("all");
-	const [includeProcessed, setIncludeProcessed] = useState(false);
+	const [filter, setFilter] = usePersistedViewState<Filter>("inbox.filter", "all");
+	const [includeProcessed, setIncludeProcessed] = usePersistedViewState("inbox.includeProcessed", false);
 	const [reader, setReader] = useState<ReaderState>({ mode: "empty" });
 	const [launchTarget, setLaunchTarget] = useState<InboxItem | undefined>();
 

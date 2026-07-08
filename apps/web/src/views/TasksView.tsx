@@ -33,6 +33,7 @@ import {
 import { tasksApi } from "@/lib/tasks-api";
 import { useStore } from "@/lib/store";
 import { cn, shortPath } from "@/lib/utils";
+import { usePersistedViewState } from "@/lib/use-persisted-view-state";
 
 export function TasksView() {
 	const navigate = useNavigate();
@@ -113,8 +114,8 @@ export function TasksView() {
 
 	const workspaces = useMemo(() => taskWorkspaces(tasks), [tasks]);
 	const [selectedWorkspace, setSelectedWorkspace] = useTaskWorkspaceFilter(workspaces, !loading);
-	const [priorityFilter, setPriorityFilter] = useState<TaskPriority | "">("");
-	const [sortByPriority, setSortByPriority] = useState(false);
+	const [priorityFilter, setPriorityFilter] = usePersistedViewState<TaskPriority | "">("tasks.priorityFilter", "");
+	const [sortByPriority, setSortByPriority] = usePersistedViewState("tasks.sortByPriority", false);
 	const visibleTasks = useMemo(() => {
 		const byWorkspace = filterTasksByWorkspace(tasks, selectedWorkspace);
 		return priorityFilter ? byWorkspace.filter((t) => t.priority === priorityFilter) : byWorkspace;

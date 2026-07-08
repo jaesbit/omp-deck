@@ -354,7 +354,6 @@ export interface SetSessionModelRequest {
 	model: ModelRef;
 }
 
-
 // ─────────────────────────────────────────────────────────────────────────────
 // Marketplace (SDK plugin catalog browsing + install/uninstall)
 // ─────────────────────────────────────────────────────────────────────────────
