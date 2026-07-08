@@ -56,6 +56,7 @@ import type { AutoWorkNotificationEvent } from "./notify.ts";
 import { getSubscriptionUsage } from "../usage-subscription.ts";
 import { estimateTaskCostPct } from "./estimate.ts";
 import { broadcastBus } from "../broadcast-bus.ts";
+import { getModelCatalogOverlay } from "../model-catalog-overlay.ts";
 
 const log = logger("auto-work:engine");
 
@@ -929,9 +930,17 @@ export function sanitizeBranchSlug(text: string): string {
 async function validateModelRef(bridge: AgentBridge, ref: ModelRef): Promise<string | undefined> {
 	const models = await bridge.listModels();
 	const match = models.find((m) => m.provider === ref.provider && m.id === ref.id);
-	if (!match) return `unknown model: ${ref.provider}/${ref.id}`;
-	if (!match.isAvailable) return `no auth configured for ${ref.provider}/${ref.id}`;
-	return undefined;
+	if (match) {
+		if (!match.isAvailable) return `no auth configured for ${ref.provider}/${ref.id}`;
+		return undefined;
+	}
+	const shadowed = getModelCatalogOverlay()
+		.listShadowed()
+		.some((s) => s.provider === ref.provider && s.id === ref.id);
+	if (shadowed) {
+		return `unavailable: ${ref.provider}/${ref.id} (shadowed by catalog overlay)`;
+	}
+	return `unknown model: ${ref.provider}/${ref.id}`;
 }
 
 export interface CreatePullRequestParams {
