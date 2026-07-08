@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useState } from "react";
-import { Archive, Bot, CheckCircle2, Circle, Link2, MessageSquarePlus, RotateCcw, Trash2, X, Zap } from "lucide-react";
+import { Archive, Bot, CheckCircle2, Circle, Link2, MessageSquarePlus, RotateCcw, Trash2, Wand2, X, Zap } from "lucide-react";
 import type { Task, TaskPriority, TaskState } from "@omp-deck/protocol";
 
 import { MarkdownEdit } from "@/components/MarkdownEdit";
 import { Modal } from "@/components/ui/Modal";
 import { candidateDependencyTasks, resolveDependencyTasks, resolveDependentTasks } from "@/lib/task-dependencies";
+import { api } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
 const PRIORITIES: TaskPriority[] = ["P0", "P1", "P2", "P3", "P4", "P5"];
@@ -64,6 +65,29 @@ export function TaskModal({
 		setStateId(task.stateId);
 		setCwd(task.cwd ?? "");
 	}, [task]);
+	// Rewrite state: null = idle, loading = in-flight, RewriteTaskResponse = preview pending
+	const [rewrite, setRewrite] = useState<{ title: string; body: string } | "loading" | null>(null);
+
+	async function triggerRewrite(): Promise<void> {
+		if (!task || rewrite === "loading") return;
+		setRewrite("loading");
+		try {
+			const result = await api.rewriteTask(task.id);
+			setRewrite(result);
+		} catch (err) {
+			setRewrite(null);
+			// Surface the error to the user as a dismissible note inline.
+			setRewriteError(err instanceof Error ? err.message : String(err));
+		}
+	}
+	const [rewriteError, setRewriteError] = useState<string | null>(null);
+
+	function acceptRewrite(): void {
+		if (!task || !rewrite || rewrite === "loading") return;
+		onSave({ title: rewrite.title, body: rewrite.body });
+		setTitle(rewrite.title);
+		setRewrite(null);
+	}
 
 	// Resolved-to-full-Task dependency lists for the picker (T-57); pure logic
 	// lives in task-dependencies.ts so it has plain unit tests.
@@ -79,6 +103,12 @@ export function TaskModal({
 		() => (task ? resolveDependentTasks(task, allTasks) : []),
 		[task, allTasks],
 	);
+
+	// Clear rewrite preview/error when a new task opens.
+	useEffect(() => {
+		setRewrite(null);
+		setRewriteError(null);
+	}, [task?.id]);
 
 	if (!task) return null;
 
@@ -157,6 +187,19 @@ export function TaskModal({
 						onClick={onArchive}
 					/>
 					<IconAction label="Delete" icon={Trash2} tone="danger" onClick={onDelete} />
+					<button
+						type="button"
+						onClick={() => void triggerRewrite()}
+						disabled={rewrite === "loading"}
+						className={cn(
+							"btn-ghost h-8 shrink-0 gap-1.5 whitespace-nowrap px-2.5 text-sm",
+							rewrite === "loading" && "opacity-60 cursor-wait",
+						)}
+						title="Rewrite this task with AI to improve clarity and completeness"
+					>
+						<Wand2 className="h-4 w-4 shrink-0" />
+						<span>{rewrite === "loading" ? "Rewriting…" : "Rewrite"}</span>
+					</button>
 					<button
 						type="button"
 						onClick={onSendToAgent}
@@ -319,6 +362,44 @@ export function TaskModal({
 					</div>
 				</div>
 			)}
+			{rewriteError ? (
+				<div className="mx-6 mt-4 flex items-start gap-2 rounded-md border border-danger/30 bg-danger/10 px-3 py-2 text-xs text-danger">
+					<span className="min-w-0 flex-1">Rewrite failed: {rewriteError}</span>
+					<button type="button" onClick={() => setRewriteError(null)} className="shrink-0 hover:text-danger/80"><X className="h-3.5 w-3.5" /></button>
+				</div>
+			) : null}
+			{rewrite && rewrite !== "loading" ? (
+				<div className="mx-6 mt-4 rounded-md border border-accent/40 bg-accent-soft/20 px-3 py-2.5">
+					<div className="mb-1.5 flex items-center justify-between gap-2">
+						<span className="font-mono text-2xs uppercase tracking-meta text-accent">✦ Rewritten — review changes</span>
+						<div className="flex items-center gap-1.5">
+							<button
+								type="button"
+								onClick={acceptRewrite}
+								className="rounded-md bg-accent px-2.5 py-1 text-xs font-medium text-white hover:bg-accent/90"
+							>
+								Accept
+							</button>
+							<button
+								type="button"
+								onClick={() => setRewrite(null)}
+								className="rounded-md border border-line px-2.5 py-1 text-xs text-ink-3 hover:text-ink"
+							>
+								Dismiss
+							</button>
+						</div>
+					</div>
+					{rewrite.title !== task.title ? (
+						<div className="mb-1 text-sm font-medium text-ink">{rewrite.title}</div>
+					) : null}
+					{rewrite.body !== (task.body ?? "") ? (
+						<div className="line-clamp-3 text-xs text-ink-3">{rewrite.body.slice(0, 200)}{rewrite.body.length > 200 ? "…" : ""}</div>
+					) : null}
+					{rewrite.title === task.title && rewrite.body === (task.body ?? "") ? (
+						<div className="text-xs text-ink-3">No changes suggested.</div>
+					) : null}
+				</div>
+			) : null}
 			<div className="min-h-0 flex-1 overflow-y-auto px-6 py-5">
 				<MarkdownEdit
 					value={task.body}

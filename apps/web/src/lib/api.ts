@@ -17,12 +17,16 @@ import type {
 	ListWorkspacePreferencesResponse,
 	ListWorkspacesResponse,
 	ModelRef,
+	RewriteTaskRequest,
+	RewriteTaskResponse,
 	SessionHistoryResponse,
 	SetAutoWorkConfigRequest,
 	SetAutoWorkGlobalConfigRequest,
 	SetDeckBaseUrlRequest,
+	SetTaskRewriteModelRequest,
 	SubscriptionUsageResponse,
 	TaskPriority,
+	TaskRewriteModelResponse,
 	WorkspacePreference,
 } from "@omp-deck/protocol";
 
@@ -173,5 +177,20 @@ export const api = {
 	},
 	listTasks(): Promise<ListTasksResponse> {
 		return request<ListTasksResponse>("/tasks");
+	},
+	rewriteTask(taskId: string, opts: RewriteTaskRequest = {}): Promise<RewriteTaskResponse> {
+		return request<RewriteTaskResponse>(`/tasks/${encodeURIComponent(taskId)}/rewrite`, {
+			method: "POST",
+			body: JSON.stringify(opts),
+		});
+	},
+	getTaskRewriteModel(): Promise<TaskRewriteModelResponse> {
+		return request<TaskRewriteModelResponse>("/settings/task-rewrite-model");
+	},
+	setTaskRewriteModel(model: ModelRef | null): Promise<TaskRewriteModelResponse> {
+		return request<TaskRewriteModelResponse>("/settings/task-rewrite-model", {
+			method: "PUT",
+			body: JSON.stringify({ model } satisfies SetTaskRewriteModelRequest),
+		});
 	},
 };

@@ -1,5 +1,6 @@
 import { Hono } from "hono";
 import type {
+	AgentMessageJson,
 	CreateSessionRequest,
 	CreateSessionResponse,
 	ListModelsResponse,
@@ -8,6 +9,8 @@ import type {
 	ListWorkspacesResponse,
 	ModelRef,
 	RestartServerResponse,
+	RewriteTaskRequest,
+	RewriteTaskResponse,
 	SessionHistoryResponse,
 	SetWorkspacePreferenceRequest,
 	WorkspaceEntry,
@@ -18,8 +21,11 @@ import { logger } from "./log.ts";
 import { broadcastBus } from "./broadcast-bus.ts";
 import { getBuildInfo, getUptimeSecs } from "./build-info.ts";
 import { getUpdateCheck } from "./update-check.ts";
-import type { AgentBridge } from "./bridge/types.ts";
+import type { AgentBridge, SessionHandle } from "./bridge/types.ts";
 import { getWorkspacePreference, listWorkspacePreferences, setWorkspacePreference } from "./db/workspace-preferences.ts";
+import { getTask } from "./db/tasks.ts";
+import { getTaskRewriteModel } from "./db/server-settings.ts";
+import { waitForAutoWorkSessionTerminal } from "./auto-work/engine.ts";
 
 const log = logger("routes");
 
@@ -356,6 +362,81 @@ export function buildRouter(
 		}
 	});
 
+	// ─── Task rewrite (T-76) ──────────────────────────────────────────────
+	// Mounted here (not in buildTasksRouter) because it needs `bridge` and
+	// `config.defaultCwd` which the static task router doesn't carry.
+
+	app.post("/tasks/:id/rewrite", async (c) => {
+		const id = c.req.param("id");
+		const task = getTask(id);
+		if (!task) return c.json({ error: "task not found" }, 404);
+
+		let reqBody: RewriteTaskRequest = {};
+		try {
+			const raw = await c.req.text();
+			if (raw.trim()) reqBody = JSON.parse(raw) as RewriteTaskRequest;
+		} catch {
+			return c.json({ error: "invalid json body" }, 400);
+		}
+
+		// Model resolution: explicit override in request > server-wide setting > SDK default.
+		const configuredModel = getTaskRewriteModel();
+		const model = reqBody.model ?? configuredModel ?? undefined;
+
+		if (model) {
+			const invalid = await validateModelRef(bridge, model);
+			if (invalid) return c.json({ error: invalid }, 400);
+		}
+
+		const cwd = task.cwd ?? config.defaultCwd;
+		const projectContext = task.cwd ? `\nProject path: ${task.cwd}` : "";
+		const prompt = [
+			"You are a technical project manager. Rewrite the following kanban task to be clearer, more specific, and actionable.",
+			"Keep the scope unchanged — do not add or remove work, just improve clarity and completeness.",
+			projectContext,
+			"",
+			`Current title: ${JSON.stringify(task.title)}`,
+			`Current body:\n${task.body ?? "(empty)"}`,
+			"",
+			"Return ONLY a JSON object with exactly these fields — no markdown fences, no prose, no explanation:",
+			'{"title": "<improved one-line title>", "body": "<improved body, markdown allowed>"}',
+		].filter(Boolean).join("\n");
+
+		let session: SessionHandle | undefined;
+		try {
+			session = await bridge.createSession({
+				cwd,
+				suppressAutoStart: true,
+				...(model ? { model } : {}),
+			});
+			const terminal = waitForAutoWorkSessionTerminal(session, 60_000);
+			await session.prompt(prompt);
+			const outcome = await terminal;
+			if (outcome !== "completed") {
+				return c.json({ error: `rewrite session ${outcome}` }, 500);
+			}
+			const snapshot = await session.snapshot();
+			const text = extractLatestAssistantText(snapshot.messages);
+			const parsed = extractJsonObject(text);
+			const parsedTitle = parsed?.["title"];
+			const parsedBody = parsed?.["body"];
+			if (!parsed || typeof parsedTitle !== "string" || typeof parsedBody !== "string") {
+				return c.json({ error: "model did not return expected JSON" }, 500);
+			}
+			const resp: RewriteTaskResponse = { title: parsedTitle, body: parsedBody };
+			return c.json(resp);
+		} catch (err) {
+			log.error("task rewrite failed", err);
+			return c.json({ error: String(err) }, 500);
+		} finally {
+			if (session) {
+				bridge.deleteSession(session.sessionId).catch((err) => {
+					log.warn("task rewrite session cleanup failed", err);
+				});
+			}
+		}
+	});
+
 	app.route("/", buildTasksRouter());
 	app.route("/", buildUploadsRouter({ uploadsRoot: config.uploadsRoot }));
 	app.route("/", buildRoutinesRouter(runner));
@@ -397,4 +478,51 @@ function deriveLabel(cwd: string): string {
 	if (!cwd) return "(unknown)";
 	const parts = cwd.split(/[\\/]/).filter(Boolean);
 	return parts[parts.length - 1] ?? cwd;
+}
+
+/**
+ * Extract the text content of the most recent assistant message. Mirrors the
+ * same logic in `auto-work/engine.ts` for the model-as-selector pattern.
+ */
+function extractLatestAssistantText(messages: AgentMessageJson[]): string {
+	for (let i = messages.length - 1; i >= 0; i--) {
+		const msg = messages[i]!;
+		if (msg.role !== "assistant") continue;
+		if (typeof msg.content === "string") return msg.content;
+		if (!Array.isArray(msg.content)) continue;
+		const text = msg.content.flatMap((b: unknown) => {
+			if (
+				b &&
+				typeof b === "object" &&
+				"type" in b &&
+				b.type === "text" &&
+				"text" in b &&
+				typeof b.text === "string"
+			) return [b.text];
+			return [];
+		}).join("");
+		if (text) return text;
+	}
+	return "";
+}
+
+/**
+ * Try to extract a JSON object from model output. Handles bare JSON,
+ * markdown-fenced JSON, and JSON embedded in prose.
+ */
+function extractJsonObject(text: string): Record<string, unknown> | null {
+	const candidates: string[] = [text.trim()];
+	const fence = /```(?:json)?\s*([\s\S]*?)```/u.exec(text);
+	if (fence?.[1]) candidates.push(fence[1].trim());
+	const obj = /\{[\s\S]*\}/u.exec(text);
+	if (obj?.[0]) candidates.push(obj[0]);
+	for (const c of candidates) {
+		try {
+			const val: unknown = JSON.parse(c);
+			if (val && typeof val === "object" && !Array.isArray(val)) {
+				return val as Record<string, unknown>;
+			}
+		} catch { /* try next candidate */ }
+	}
+	return null;
 }

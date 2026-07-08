@@ -2083,6 +2083,32 @@ export interface SetDeckBaseUrlRequest {
 	deckBaseUrl: string | null;
 }
 
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Task rewrite (T-76) — AI-assisted task body/title improvement
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** `POST /api/tasks/:id/rewrite` request. Omit `model` to use the configured default. */
+export interface RewriteTaskRequest {
+	model?: ModelRef;
+}
+
+/** `POST /api/tasks/:id/rewrite` response — suggested title + body, NOT auto-saved. */
+export interface RewriteTaskResponse {
+	title: string;
+	body: string;
+}
+
+/** `GET /api/settings/task-rewrite-model` response. `model: null` means "use SDK default". */
+export interface TaskRewriteModelResponse {
+	model: ModelRef | null;
+}
+
+/** `PUT /api/settings/task-rewrite-model` body. Pass `model: null` to clear the override. */
+export interface SetTaskRewriteModelRequest {
+	model: ModelRef | null;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Auto Work run history and cost tracking (T-62)
 // ─────────────────────────────────────────────────────────────────────────────
