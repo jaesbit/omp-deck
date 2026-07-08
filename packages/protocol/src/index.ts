@@ -2028,6 +2028,15 @@ export interface AutoWorkGlobalConfig {
 	 * a compact task list and returns the task ID to run next.
 	 */
 	taskSelectionModel: ModelRef | null;
+	/**
+	 * Squeeze mode (T-75): when true, after each scheduled cycle the engine
+	 * asks `taskSelectionModel` ("the model assigned for decision-making")
+	 * whether to start another cycle immediately instead of waiting for the
+	 * next scheduled tick, so unused subscription capacity isn't wasted when
+	 * a usage window resets. Default false — the schedule's fixed interval
+	 * is the only cadence.
+	 */
+	squeezeEnabled: boolean;
 	updatedAt: string;
 }
 
@@ -2036,6 +2045,7 @@ export interface SetAutoWorkGlobalConfigRequest {
 	scheduleEnabled: boolean;
 	scheduleIntervalMinutes: number;
 	taskSelectionModel: ModelRef | null;
+	squeezeEnabled: boolean;
 }
 
 /** `GET /api/auto-work/schedule-status` response (global, not per-workspace). */
@@ -2043,6 +2053,7 @@ export interface AutoWorkScheduleStatus {
 	scheduleEnabled: boolean;
 	scheduleIntervalMinutes: number;
 	taskSelectionModel: ModelRef | null;
+	squeezeEnabled: boolean;
 	/** ISO timestamp of the last scheduler or manual trigger attempt; null if never triggered this process lifetime. */
 	lastTriggeredAt: string | null;
 	/** Result of the last trigger attempt; null if never triggered. */

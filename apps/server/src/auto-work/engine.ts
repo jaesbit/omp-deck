@@ -221,6 +221,42 @@ export function classifyRunningAutoWorkRun(
 	return worktreeExists ? "resume" : "reconnect";
 }
 
+export interface SqueezeGateInput {
+	/** Wall-clock time to evaluate against. */
+	now: Date;
+	/** The normal polling cadence (minutes) — the horizon squeeze mode measures against. */
+	scheduleIntervalMinutes: number;
+	/** % consumed so far in the shortest (session) usage window, 0-100. */
+	sessionPct: number;
+	/** ISO-8601 reset time for the session window. */
+	sessionResetAt: string;
+	/** Workspaces with at least one eligible backlog task right now. */
+	eligibleWorkspaceCount: number;
+}
+
+/** Below this session-window usage, unused capacity is still worth squeezing. */
+const SQUEEZE_SESSION_PCT_CEILING = 70;
+/** Ask only when the session window resets within this many normal polling ticks. */
+const SQUEEZE_TICK_HORIZON = 2;
+
+/**
+ * Pure pre-filter for squeeze mode (T-75): is it even worth the cost of an
+ * LLM call to ask whether Auto Work should start another cycle right now
+ * instead of waiting for the next scheduled tick? Only true when the
+ * session usage window is close enough to reset that the normal cadence
+ * risks leaving real unused capacity on the table — resetting within under
+ * `SQUEEZE_TICK_HORIZON` ticks while still under `SQUEEZE_SESSION_PCT_CEILING`%
+ * consumed — AND there is eligible backlog work to spend it on.
+ */
+export function shouldConsiderSqueeze(input: SqueezeGateInput): boolean {
+	if (input.eligibleWorkspaceCount <= 0) return false;
+	if (input.sessionPct >= SQUEEZE_SESSION_PCT_CEILING) return false;
+	const minutesToReset = (Date.parse(input.sessionResetAt) - input.now.getTime()) / 60_000;
+	if (!Number.isFinite(minutesToReset) || minutesToReset <= 0) return false;
+	const intervalMinutes = Math.max(1, input.scheduleIntervalMinutes);
+	return minutesToReset < intervalMinutes * SQUEEZE_TICK_HORIZON;
+}
+
 // ─── Orchestrator (IO) ──────────────────────────────────────────────────────
 
 export interface RunAutoWorkCycleOptions {
@@ -1033,8 +1069,81 @@ async function selectTaskWithModel(
 	}
 }
 
+
+export interface SqueezeDecisionInput {
+	/** Any enabled workspace's cwd — only hosts the ephemeral decision session, no repo content is sent. */
+	workspaceCwd: string;
+	sessionPct: number;
+	sessionResetAt: string;
+	weeklyPct: number;
+	weeklyResetAt: string;
+	eligibleWorkspaceCount: number;
+	scheduleIntervalMinutes: number;
+}
+
+/**
+ * Ask a short-lived agent session — the global `taskSelectionModel` ("the
+ * model assigned for decision-making") — whether Auto Work should start
+ * another cycle immediately instead of waiting for the next scheduled tick
+ * (T-75 "squeeze" mode). Only called after `shouldConsiderSqueeze` already
+ * confirmed real unused-capacity risk; the model makes the nuanced call the
+ * pure heuristic can't (how much runway is realistically left, whether it's
+ * worth starting a task that might not finish before the window resets
+ * anyway). Any model/session failure or ambiguous response defaults to
+ * `false` — squeeze mode only ever shortens idle time between scheduled
+ * cycles, it never forces work the normal cadence wouldn't otherwise reach.
+ */
+export async function decideSqueezeTiming(
+	bridge: AgentBridge,
+	input: SqueezeDecisionInput,
+	model: ModelRef | null,
+): Promise<boolean> {
+	const prompt = [
+		"Auto Work just finished a cycle. Decide whether to start the next eligible task right now,",
+		"instead of waiting for the next scheduled poll, so unused subscription capacity isn't wasted",
+		"when the usage window resets.",
+		`Session usage window: ${input.sessionPct.toFixed(1)}% used, resets at ${input.sessionResetAt}.`,
+		`Weekly usage window: ${input.weeklyPct.toFixed(1)}% used, resets at ${input.weeklyResetAt}.`,
+		`Normal poll interval: ${input.scheduleIntervalMinutes} minute(s).`,
+		`Workspaces with eligible backlog work right now: ${input.eligibleWorkspaceCount}.`,
+		"Reply with exactly one word: YES to start another task now, or NO to wait for the next scheduled poll.",
+	].join("\n");
+
+	let session: SessionHandle | undefined;
+	try {
+		session = await bridge.createSession({
+			cwd: input.workspaceCwd,
+			suppressAutoStart: true,
+			...(model ? { model } : {}),
+		});
+		const terminal = waitForAutoWorkSessionTerminal(session, 30_000);
+		await session.prompt(prompt);
+		const outcome = await terminal;
+		if (outcome !== "completed") {
+			log.warn("squeeze timing decision timed out; deferring to the next scheduled tick");
+			return false;
+		}
+		const response = latestAssistantText((await session.snapshot()).messages).trim().toUpperCase();
+		if (response.startsWith("YES")) return true;
+		if (response.startsWith("NO")) return false;
+		log.warn(`squeeze timing decision returned an unexpected response ${JSON.stringify(response)}; deferring`);
+		return false;
+	} catch (err) {
+		log.warn("squeeze timing decision failed; deferring to the next scheduled tick", err);
+		return false;
+	} finally {
+		if (session) {
+			try {
+				await bridge.deleteSession(session.sessionId);
+			} catch (err) {
+				log.warn("squeeze timing decision cleanup failed", err);
+			}
+		}
+	}
+}
+
 /** Extract text from the most recent assistant message without unchecked casts. */
-function latestAssistantText(messages: ReadonlyArray<{ role: string; content: unknown }>): string {
+export function latestAssistantText(messages: ReadonlyArray<{ role: string; content: unknown }>): string {
 	for (let index = messages.length - 1; index >= 0; index--) {
 		const message = messages[index]!;
 		if (message.role !== "assistant") continue;

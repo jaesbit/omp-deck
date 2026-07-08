@@ -10,7 +10,7 @@
  *    `AgentBridge` standing in for a live agent session. No real agent
  *    session is ever spun up.
  */
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, jest, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -27,14 +27,17 @@ import {
 	checkAutoWorkPreflight,
 	classifyRunningAutoWorkRun,
 	costFitsAutoWorkBudget,
+	decideSqueezeTiming,
 	reconcileInactiveAutoWorkRuns,
 	resolveAutoWorkModel,
 	resolveAutoWorkTimeoutMinutes,
 	runAutoWorkCycle,
 	runGlobalAutoWorkCycle,
 	selectNextAutoWorkTask,
+	shouldConsiderSqueeze,
 	waitForAutoWorkSessionTerminal,
 } from "./engine.ts";
+import type { SqueezeDecisionInput } from "./engine.ts";
 
 // ─── Fixtures ───────────────────────────────────────────────────────────────
 
@@ -419,6 +422,149 @@ describe("classifyRunningAutoWorkRun", () => {
 	});
 });
 
+describe("shouldConsiderSqueeze", () => {
+	const now = new Date("2026-01-01T00:00:00.000Z");
+
+	test("true on the happy path: low usage, reset well within the 2-tick horizon, eligible work waiting", () => {
+		expect(
+			shouldConsiderSqueeze({
+				now,
+				scheduleIntervalMinutes: 15,
+				sessionPct: 20,
+				sessionResetAt: "2026-01-01T00:10:00.000Z", // 10 min out, horizon is 30 min
+				eligibleWorkspaceCount: 2,
+			}),
+		).toBe(true);
+	});
+
+	for (const eligibleWorkspaceCount of [0, -1]) {
+		test(`false when there is no eligible backlog work (eligibleWorkspaceCount=${eligibleWorkspaceCount}), even with every other condition favorable`, () => {
+			expect(
+				shouldConsiderSqueeze({
+					now,
+					scheduleIntervalMinutes: 15,
+					sessionPct: 10,
+					sessionResetAt: "2026-01-01T00:05:00.000Z",
+					eligibleWorkspaceCount,
+				}),
+			).toBe(false);
+		});
+	}
+
+	test("false when sessionPct is exactly at the ceiling (70)", () => {
+		expect(
+			shouldConsiderSqueeze({
+				now,
+				scheduleIntervalMinutes: 15,
+				sessionPct: 70,
+				sessionResetAt: "2026-01-01T00:10:00.000Z",
+				eligibleWorkspaceCount: 2,
+			}),
+		).toBe(false);
+	});
+
+	test("true when sessionPct is just under the ceiling (69.9)", () => {
+		expect(
+			shouldConsiderSqueeze({
+				now,
+				scheduleIntervalMinutes: 15,
+				sessionPct: 69.9,
+				sessionResetAt: "2026-01-01T00:10:00.000Z",
+				eligibleWorkspaceCount: 2,
+			}),
+		).toBe(true);
+	});
+
+	test("false when sessionResetAt has already passed", () => {
+		expect(
+			shouldConsiderSqueeze({
+				now,
+				scheduleIntervalMinutes: 15,
+				sessionPct: 10,
+				sessionResetAt: "2025-12-31T23:59:00.000Z",
+				eligibleWorkspaceCount: 2,
+			}),
+		).toBe(false);
+	});
+
+	test("false when sessionResetAt equals now exactly (zero runway)", () => {
+		expect(
+			shouldConsiderSqueeze({
+				now,
+				scheduleIntervalMinutes: 15,
+				sessionPct: 10,
+				sessionResetAt: now.toISOString(),
+				eligibleWorkspaceCount: 2,
+			}),
+		).toBe(false);
+	});
+
+	test("false when sessionResetAt is unparseable (Date.parse -> NaN)", () => {
+		expect(
+			shouldConsiderSqueeze({
+				now,
+				scheduleIntervalMinutes: 15,
+				sessionPct: 10,
+				sessionResetAt: "not-a-date",
+				eligibleWorkspaceCount: 2,
+			}),
+		).toBe(false);
+	});
+
+	test("false exactly at the 2-tick horizon boundary (minutesToReset === scheduleIntervalMinutes * 2)", () => {
+		// interval=10 -> horizon is exactly 20 minutes; the gate is strictly "<", so landing precisely on it must fail.
+		expect(
+			shouldConsiderSqueeze({
+				now,
+				scheduleIntervalMinutes: 10,
+				sessionPct: 10,
+				sessionResetAt: "2026-01-01T00:20:00.000Z",
+				eligibleWorkspaceCount: 2,
+			}),
+		).toBe(false);
+	});
+
+	test("true just inside the 2-tick horizon boundary", () => {
+		expect(
+			shouldConsiderSqueeze({
+				now,
+				scheduleIntervalMinutes: 10,
+				sessionPct: 10,
+				sessionResetAt: "2026-01-01T00:19:59.000Z",
+				eligibleWorkspaceCount: 2,
+			}),
+		).toBe(true);
+	});
+
+	test("false when the reset is comfortably beyond the 2-tick horizon, even with low usage and eligible work", () => {
+		expect(
+			shouldConsiderSqueeze({
+				now,
+				scheduleIntervalMinutes: 15,
+				sessionPct: 5,
+				sessionResetAt: "2026-01-01T02:00:00.000Z", // 120 min out, horizon is only 30
+				eligibleWorkspaceCount: 3,
+			}),
+		).toBe(false);
+	});
+
+	for (const scheduleIntervalMinutes of [0, -5]) {
+		test(`clamps a non-positive scheduleIntervalMinutes (${scheduleIntervalMinutes}) to a 1-minute floor instead of collapsing the horizon to zero`, () => {
+			// Without the Math.max(1, …) clamp, a horizon of 0 (or negative) would
+			// make this always false regardless of how soon the window resets.
+			expect(
+				shouldConsiderSqueeze({
+					now,
+					scheduleIntervalMinutes,
+					sessionPct: 10,
+					sessionResetAt: "2026-01-01T00:00:30.000Z", // 30s out, well under a clamped 2-minute horizon
+					eligibleWorkspaceCount: 2,
+				}),
+			).toBe(true);
+		});
+	}
+});
+
 // ─── Orchestrator (real DB + real git worktree + stub bridge) ──────────────
 
 const AVAILABLE_MODEL: ModelInfo = {
@@ -437,6 +583,7 @@ class FakeSessionHandle {
 	constructor(
 		sessionId: string,
 		private readonly terminalDelayMs: number | null,
+		private readonly assistantResponse: string = "",
 	) {
 		this.sessionId = sessionId;
 	}
@@ -455,6 +602,11 @@ class FakeSessionHandle {
 	}
 
 	async prompt(): Promise<void> {}
+
+	/** Minimal snapshot stand-in — enough for `latestAssistantText` to read the configured response. */
+	async snapshot(): Promise<{ messages: Array<{ role: string; content: unknown }> }> {
+		return { messages: [{ role: "assistant", content: this.assistantResponse }] };
+	}
 }
 
 function fakeBridge(
@@ -462,6 +614,10 @@ function fakeBridge(
 	opts: {
 		models?: ModelInfo[];
 		createSessionCalls?: CreateSessionOpts[];
+		/** Forces `createSession` to throw instead of returning `handle`, simulating a bridge/session-creation failure. */
+		createSessionError?: Error;
+		/** Records every `sessionId` passed to `deleteSession`, in call order. */
+		deleteSessionCalls?: string[];
 		/** Live in-process handles, keyed by sessionId — what `bridge.getSession` finds without a restart. */
 		liveSessions?: Map<string, FakeSessionHandle>;
 		/** Persisted (on-disk) session summaries `bridge.listSessions`/`resumeSession` can see across a restart. */
@@ -474,6 +630,7 @@ function fakeBridge(
 			return models;
 		},
 		async createSession(createOpts: CreateSessionOpts) {
+			if (opts.createSessionError) throw opts.createSessionError;
 			opts.createSessionCalls?.push(createOpts);
 			return handle as unknown as SessionHandle;
 		},
@@ -491,6 +648,10 @@ function fakeBridge(
 			if (!resumedHandle) throw new Error(`no fake handle registered for persisted session ${match.id}`);
 			return resumedHandle as unknown as SessionHandle;
 		},
+		async deleteSession(sessionId: string) {
+			opts.deleteSessionCalls?.push(sessionId);
+			return { deleted: true };
+		},
 	} as unknown as AgentBridge;
 }
 
@@ -505,6 +666,113 @@ describe("waitForAutoWorkSessionTerminal", () => {
 			expect(await terminal).toBe("failed");
 		});
 	}
+});
+
+describe("decideSqueezeTiming", () => {
+	function baseInput(overrides: Partial<SqueezeDecisionInput> = {}): SqueezeDecisionInput {
+		return {
+			workspaceCwd: "/tmp/squeeze-ws",
+			sessionPct: 20,
+			sessionResetAt: "2026-01-01T00:10:00.000Z",
+			weeklyPct: 30,
+			weeklyResetAt: "2026-01-08T00:00:00.000Z",
+			eligibleWorkspaceCount: 2,
+			scheduleIntervalMinutes: 15,
+			...overrides,
+		};
+	}
+
+	test("resolves true on an assistant response of exactly YES, and cleans up the session", async () => {
+		const handle = new FakeSessionHandle("sess_squeeze_yes", 10, "YES");
+		const deleteSessionCalls: string[] = [];
+		const result = await decideSqueezeTiming(fakeBridge(handle, { deleteSessionCalls }), baseInput(), null);
+		expect(result).toBe(true);
+		expect(deleteSessionCalls).toEqual(["sess_squeeze_yes"]);
+	});
+
+	test("resolves true when the response is YES followed by trailing prose", async () => {
+		const handle = new FakeSessionHandle("sess_squeeze_yes_prose", 10, "YES, there's clear runway left.");
+		const result = await decideSqueezeTiming(fakeBridge(handle), baseInput(), null);
+		expect(result).toBe(true);
+	});
+
+	test("resolves false on an assistant response of NO, and cleans up the session", async () => {
+		const handle = new FakeSessionHandle("sess_squeeze_no", 10, "NO");
+		const deleteSessionCalls: string[] = [];
+		const result = await decideSqueezeTiming(fakeBridge(handle, { deleteSessionCalls }), baseInput(), null);
+		expect(result).toBe(false);
+		expect(deleteSessionCalls).toEqual(["sess_squeeze_no"]);
+	});
+
+	test("resolves false without throwing on an ambiguous response, and still cleans up the session", async () => {
+		const handle = new FakeSessionHandle("sess_squeeze_maybe", 10, "MAYBE");
+		const deleteSessionCalls: string[] = [];
+		const result = await decideSqueezeTiming(fakeBridge(handle, { deleteSessionCalls }), baseInput(), null);
+		expect(result).toBe(false);
+		expect(deleteSessionCalls).toEqual(["sess_squeeze_maybe"]);
+	});
+
+	test("resolves false without throwing on an empty response", async () => {
+		const handle = new FakeSessionHandle("sess_squeeze_empty", 10, "");
+		const result = await decideSqueezeTiming(fakeBridge(handle), baseInput(), null);
+		expect(result).toBe(false);
+	});
+
+	test("resolves false and still cleans up the session when it never reaches a terminal state before the internal timeout", async () => {
+		jest.useFakeTimers();
+		try {
+			const handle = new FakeSessionHandle("sess_squeeze_timeout", null); // never emits turn_end
+			const deleteSessionCalls: string[] = [];
+			const resultPromise = decideSqueezeTiming(fakeBridge(handle, { deleteSessionCalls }), baseInput(), null);
+			// Flush the microtask hops between session creation and the internal
+			// waitForAutoWorkSessionTerminal 30s timer being armed, then fire it.
+			await Promise.resolve();
+			await Promise.resolve();
+			await Promise.resolve();
+			jest.advanceTimersByTime(30_000);
+			const result = await resultPromise;
+			expect(result).toBe(false);
+			expect(deleteSessionCalls).toEqual(["sess_squeeze_timeout"]);
+		} finally {
+			jest.useRealTimers();
+		}
+	});
+
+	test("resolves false without throwing when bridge.createSession itself fails, and skips cleanup (nothing was created)", async () => {
+		const handle = new FakeSessionHandle("sess_squeeze_unused", 10, "YES");
+		const deleteSessionCalls: string[] = [];
+		const result = await decideSqueezeTiming(
+			fakeBridge(handle, { createSessionError: new Error("bridge unavailable"), deleteSessionCalls }),
+			baseInput(),
+			null,
+		);
+		expect(result).toBe(false);
+		expect(deleteSessionCalls).toEqual([]);
+	});
+
+	test("omits the model key entirely from createSession opts when model is null", async () => {
+		const handle = new FakeSessionHandle("sess_squeeze_model_null", 10, "YES");
+		const createSessionCalls: CreateSessionOpts[] = [];
+		await decideSqueezeTiming(
+			fakeBridge(handle, { createSessionCalls }),
+			baseInput({ workspaceCwd: "/tmp/squeeze-null" }),
+			null,
+		);
+		expect(createSessionCalls).toEqual([{ cwd: "/tmp/squeeze-null", suppressAutoStart: true }]);
+	});
+
+	test("passes the model through verbatim in createSession opts when non-null", async () => {
+		const handle = new FakeSessionHandle("sess_squeeze_model_set", 10, "YES");
+		const createSessionCalls: CreateSessionOpts[] = [];
+		await decideSqueezeTiming(
+			fakeBridge(handle, { createSessionCalls }),
+			baseInput({ workspaceCwd: "/tmp/squeeze-model" }),
+			{ provider: "anthropic", id: "claude-good" },
+		);
+		expect(createSessionCalls).toEqual([
+			{ cwd: "/tmp/squeeze-model", suppressAutoStart: true, model: { provider: "anthropic", id: "claude-good" } },
+		]);
+	});
 });
 
 // Stubs `gh pr create` for every `runAutoWorkCycle` test that reaches the

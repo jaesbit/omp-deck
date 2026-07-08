@@ -56,6 +56,11 @@ The deck can now create, pause, resume, and cancel autonomous multi-turn goals t
 
 - **Configurable stop-streaming shortcut.** The "stop streaming" keybinding was hardcoded to Ctrl+/ (itself a fix for an earlier Ctrl+. collision with fcitx5's emoji picker). Since IME bindings can't be enumerated in advance, the key is now user-configurable instead: Settings → Appearance → Keyboard shortcuts, click Change, press any single key (Esc cancels), with a "Reset to default" once you've diverged from `/`. Persisted per-browser in `localStorage`.
 
+### Auto Work — squeeze mode (T-75)
+
+- **Squeeze subscription toggle** in Settings → Auto Work → Global schedule. When enabled, after each scheduled cycle the global scheduler asks the assigned task-selection model whether to start another cycle immediately instead of waiting for the next scheduled poll, so unused subscription capacity isn't wasted when a usage window resets. A pure pre-filter (`shouldConsiderSqueeze`) keeps the model call off the hot path unless the session usage window is genuinely close to resetting (under two normal poll intervals away) with meaningful capacity still unused; the chain is capped at 10 extra cycles per settle so a misbehaving model or a deep backlog can't loop forever.
+- New `AutoWorkGlobalConfig.squeezeEnabled` / `SetAutoWorkGlobalConfigRequest.squeezeEnabled` / `AutoWorkScheduleStatus.squeezeEnabled` protocol fields (migration `020-auto-work-squeeze.sql`). The Auto Work monitor's eligible-workspaces hint shows a small "squeeze" badge while the mode is active.
+
 ### Fixed
 
 - **Orphaned session handle on resume/create collision.** A resume/create call for a `sessionId` already tracked in the bridge's active map silently overwrote that map entry, orphaning the previous handle — its subscriptions and any in-flight turn kept running forever with no way to reach or abort it. The superseded instance is now disposed before being replaced, so at most one in-process handle ever drives a given session file.

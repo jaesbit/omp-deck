@@ -1263,6 +1263,7 @@ function GlobalScheduleCard({ onError }: { onError: (msg: string) => void }) {
 	const [scheduleEnabled, setScheduleEnabled] = useState(false);
 	const [intervalMinutes, setIntervalMinutes] = useState(5);
 	const [taskSelectionModel, setTaskSelectionModel] = useState<ModelRef | null>(null);
+	const [squeezeEnabled, setSqueezeEnabled] = useState(false);
 	const [saving, setSaving] = useState(false);
 
 	useEffect(() => {
@@ -1272,6 +1273,7 @@ function GlobalScheduleCard({ onError }: { onError: (msg: string) => void }) {
 				setScheduleEnabled(cfg.scheduleEnabled);
 				setIntervalMinutes(cfg.scheduleIntervalMinutes);
 				setTaskSelectionModel(cfg.taskSelectionModel);
+				setSqueezeEnabled(cfg.squeezeEnabled);
 				setModels(modelsResp.models.filter((m) => m.isAvailable));
 			})
 			.catch((e: unknown) => onError(String(e)));
@@ -1284,6 +1286,7 @@ function GlobalScheduleCard({ onError }: { onError: (msg: string) => void }) {
 			scheduleEnabled,
 			scheduleIntervalMinutes: intervalMinutes,
 			taskSelectionModel,
+			squeezeEnabled,
 		};
 		api.setAutoWorkGlobalConfig(body)
 			.then((updated) => {
@@ -1291,6 +1294,7 @@ function GlobalScheduleCard({ onError }: { onError: (msg: string) => void }) {
 				setScheduleEnabled(updated.scheduleEnabled);
 				setIntervalMinutes(updated.scheduleIntervalMinutes);
 				setTaskSelectionModel(updated.taskSelectionModel);
+				setSqueezeEnabled(updated.squeezeEnabled);
 			})
 			.catch((e: unknown) => onError(String(e)))
 			.finally(() => { setSaving(false); });
@@ -1355,6 +1359,34 @@ function GlobalScheduleCard({ onError }: { onError: (msg: string) => void }) {
 							</option>
 						))}
 					</select>
+				</div>
+
+				{/* Squeeze mode */}
+				<div className="flex items-start gap-3">
+					<button
+						type="button"
+						role="switch"
+						aria-checked={squeezeEnabled}
+						onClick={() => setSqueezeEnabled((v) => !v)}
+						disabled={!scheduleEnabled}
+						className={cn(
+							"mt-0.5 flex h-5 w-9 shrink-0 items-center rounded-full border border-line transition-colors disabled:opacity-40",
+							squeezeEnabled ? "bg-accent-soft" : "bg-paper-3",
+						)}
+					>
+						<span className={cn(
+							"h-3.5 w-3.5 rounded-full bg-ink-2 transition-transform",
+							squeezeEnabled ? "translate-x-4" : "translate-x-0.5",
+						)} />
+					</button>
+					<div className="text-sm">
+						<p className="text-ink-3">Squeeze subscription</p>
+						<p className="text-xs text-ink-4">
+							When a usage window is close to resetting with capacity to spare, ask the task
+							selection model whether to start another task immediately instead of waiting for
+							the next scheduled poll.
+						</p>
+					</div>
 				</div>
 
 				<div className="flex justify-end">
