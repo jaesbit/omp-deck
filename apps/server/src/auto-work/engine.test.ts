@@ -582,6 +582,15 @@ class FakeSessionHandle {
 	private listeners = new Set<EventListener>();
 	private readonly subscription = Promise.withResolvers<void>();
 	readonly subscriptionStarted = this.subscription.promise;
+	/** Settles when the turn actually ends (terminal event or abort) — the real
+	 *  `SessionHandle.prompt()` resolves exactly then, never before. */
+	private readonly turnEnded = Promise.withResolvers<void>();
+	/** Every prompt text sent through `prompt()`, in call order. */
+	readonly prompts: string[] = [];
+	/** Number of `abort()` calls received. */
+	abortCalls = 0;
+	/** What `isStreamingNow()` reports — set true to model a resumed handle whose turn is still in flight. */
+	streaming = false;
 
 	constructor(
 		sessionId: string,
@@ -595,16 +604,33 @@ class FakeSessionHandle {
 		this.listeners.add(listener);
 		this.subscription.resolve();
 		if (this.terminalDelayMs !== null) {
-			setTimeout(() => listener({ type: "turn_end" } as never), this.terminalDelayMs);
+			setTimeout(() => this.emit({ type: "turn_end" }), this.terminalDelayMs);
 		}
 		return () => this.listeners.delete(listener);
 	}
 
 	emit(event: Parameters<EventListener>[0]): void {
 		for (const listener of this.listeners) listener(event);
+		// A terminal event ends the turn, which is what settles an in-flight
+		// `prompt()` — mirroring the real contract, where the event always
+		// reaches subscribers before (or as) the prompt promise resolves.
+		if (event.type === "turn_end" || event.type === "agent_end") this.turnEnded.resolve();
 	}
 
-	async prompt(): Promise<void> {}
+	/** Resolves only once the turn ends — a never-terminal fake's prompt never resolves, exactly like the real bridge. */
+	async prompt(text: string): Promise<void> {
+		this.prompts.push(text);
+		await this.turnEnded.promise;
+	}
+
+	async isStreamingNow(): Promise<boolean> {
+		return this.streaming;
+	}
+
+	async abort(): Promise<void> {
+		this.abortCalls += 1;
+		this.turnEnded.resolve();
+	}
 
 	/** Minimal snapshot stand-in — enough for `latestAssistantText` to read the configured response. */
 	async snapshot(): Promise<{ messages: Array<{ role: string; content: unknown }> }> {
@@ -669,6 +695,38 @@ describe("waitForAutoWorkSessionTerminal", () => {
 			expect(await terminal).toBe("failed");
 		});
 	}
+
+	test("startTurn rejection settles the wait as failed", async () => {
+		const handle = new FakeSessionHandle("sess_prompt_reject", null);
+		const terminal = await waitForAutoWorkSessionTerminal(handle as unknown as SessionHandle, 60_000, () =>
+			Promise.reject(new Error("prompt transport died")),
+		);
+		expect(terminal).toBe("failed");
+	});
+
+	test("startTurn resolution with no terminal event settles the wait as completed", async () => {
+		const handle = new FakeSessionHandle("sess_prompt_resolves", null);
+		const terminal = await waitForAutoWorkSessionTerminal(handle as unknown as SessionHandle, 60_000, async () => {});
+		expect(terminal).toBe("completed");
+	});
+
+	test("a stopReason error event emitted just before the prompt resolves wins the race — failed, not completed", async () => {
+		const handle = new FakeSessionHandle("sess_error_wins", null);
+		const terminal = waitForAutoWorkSessionTerminal(handle as unknown as SessionHandle, 60_000, () => handle.prompt("go"));
+		// Emitting the terminal event also resolves the in-flight prompt() (the
+		// real contract); the event's precise stopReason must still win.
+		handle.emit({ type: "turn_end", message: { stopReason: "error" } });
+		expect(await terminal).toBe("failed");
+	});
+
+	test("turn_end arriving before prompt() resolves — the real-world ordering — settles as completed, not timed_out", async () => {
+		const handle = new FakeSessionHandle("sess_event_first", null);
+		// Short timeout on purpose: the pre-fix code (await prompt, then
+		// subscribe) missed this event and could only ever time out here.
+		const terminal = waitForAutoWorkSessionTerminal(handle as unknown as SessionHandle, 250, () => handle.prompt("go"));
+		handle.emit({ type: "turn_end" });
+		expect(await terminal).toBe("completed");
+	});
 });
 
 describe("decideSqueezeTiming", () => {
@@ -1084,7 +1142,7 @@ afterEach(() => {
 });
 
 describe("reconcileInactiveAutoWorkRuns", () => {
-	test("retires an expired persisted run without a live session and returns its task to backlog", () => {
+	test("retires an expired persisted run without a live session and returns its task to backlog", async () => {
 		const task = createTask({ title: "Expired Auto Work run", cwd: repoCwd, priority: "P5", autoWork: true });
 		moveTask(task.id, "s_active", 0);
 		expect(getTask(task.id)?.stateId).toBe("s_active");
@@ -1097,7 +1155,7 @@ describe("reconcileInactiveAutoWorkRuns", () => {
 		const startedAt = listAutoWorkRuns({ taskId: task.id })[0]?.startedAt;
 		if (!startedAt) throw new Error("expected persisted Auto Work run");
 
-		const reconciled = reconcileInactiveAutoWorkRuns(
+		const reconciled = await reconcileInactiveAutoWorkRuns(
 			fakeBridge(new FakeSessionHandle("sess_unused", null)),
 			Date.parse(startedAt) + 60_001,
 		);
@@ -1107,6 +1165,37 @@ describe("reconcileInactiveAutoWorkRuns", () => {
 		expect(runs).toHaveLength(1);
 		expect(runs[0]).toEqual(expect.objectContaining({ id: runId, status: "failed", failureReason: "session_not_running" }));
 		expect(getTask(task.id)?.stateId).toBe("s_backlog");
+	});
+
+	test("leaves a running row alone when its session still exists persisted — resumable, owned by the scheduler", async () => {
+		const task = createTask({ title: "Resumable Auto Work run", cwd: repoCwd, priority: "P5", autoWork: true });
+		moveTask(task.id, "s_active", 0);
+		const worktreePath = path.join(repoCwd, ".worktrees", "aw-resumable");
+		const runId = startAutoWorkRun({
+			taskId: task.id,
+			taskPriority: "P5",
+			sessionId: "sess_persisted",
+			worktreePath,
+		});
+		const startedAt = listAutoWorkRuns({ taskId: task.id })[0]?.startedAt;
+		if (!startedAt) throw new Error("expected persisted Auto Work run");
+
+		const persisted: SessionSummary = {
+			id: "sess_persisted",
+			path: "/tmp/sessions/sess_persisted.jsonl",
+			cwd: worktreePath,
+			createdAt: startedAt,
+			updatedAt: startedAt,
+			messageCount: 2,
+		};
+		const reconciled = await reconcileInactiveAutoWorkRuns(
+			fakeBridge(new FakeSessionHandle("sess_unused", null), { persistedSessions: [persisted] }),
+			Date.parse(startedAt) + 60_001,
+		);
+
+		expect(reconciled).toBe(0);
+		expect(listAutoWorkRuns({ taskId: task.id })[0]).toEqual(expect.objectContaining({ id: runId, status: "running" }));
+		expect(getTask(task.id)?.stateId).toBe("s_active");
 	});
 });
 
@@ -1175,6 +1264,28 @@ describe("runAutoWorkCycle", () => {
 		expect(listAutoWorkRuns({ taskId: task.id })[0]?.status).toBe("failed");
 	});
 
+	test("settles the run as completed when turn_end is emitted before prompt() resolves (the real-world ordering)", async () => {
+		setAutoWorkConfig(repoCwd, { ...DEFAULT_AUTO_WORK_VALUES, enabled: true });
+		const task = createTask({ title: "Event lands before prompt resolution", cwd: repoCwd, priority: "P5", autoWork: true });
+		const handle = new FakeSessionHandle("sess_event_ordering", null); // terminal only via explicit emit
+		const cycle = runAutoWorkCycle(repoCwd, fakeBridge(handle), {
+			getSubscriptionUsage: async () => ({ available: true, weeklyPct: 5 }),
+			createPullRequest: stubCreatePullRequest,
+		});
+		await handle.subscriptionStarted;
+		// The engine subscribed before starting the turn, so this terminal event
+		// — delivered while prompt() is still pending, as in production — must
+		// settle the run as completed instead of leaking into the timeout (the
+		// production bug: every successful run was recorded timed_out).
+		expect(handle.prompts).toHaveLength(1);
+		handle.emit({ type: "turn_end", message: { stopReason: "end_turn" } });
+		const result = await cycle;
+
+		expect(result.outcome).toBe("completed");
+		expect(getTask(task.id)?.stateId).toBe("s_validate");
+		expect(listAutoWorkRuns({ taskId: task.id })[0]?.status).toBe("completed");
+	});
+
 	test("moves the task to blocked with a reason and closes the run as timed_out on timeout", async () => {
 		setAutoWorkConfig(repoCwd, {
 			...DEFAULT_AUTO_WORK_VALUES,
@@ -1207,6 +1318,10 @@ describe("runAutoWorkCycle", () => {
 
 		// A timed-out/failed run never opens a PR — nothing to review (T-66).
 		expect(prCreateCalls).toBe(0);
+
+		// The still-running session must actually be stopped when the run is
+		// written off — otherwise the agent keeps working past the timeout.
+		expect(handle.abortCalls).toBe(1);
 	});
 
 	test("on PR creation failure, still moves the completed task to validate with a fallback note (T-66)", async () => {
@@ -1267,6 +1382,12 @@ describe("runAutoWorkCycle", () => {
 		expect(result.taskId).toBe(activeTask.id);
 		expect(result.runId).toBe(priorRunId);
 		expect(result.sessionId).toBe("already-running");
+
+		// The resumed handle was idle (not streaming), so the engine must kick
+		// it with a continuation prompt naming the worktree to resume in.
+		expect(liveHandle.prompts).toHaveLength(1);
+		expect(liveHandle.prompts[0]).toMatch(/reinici/);
+		expect(liveHandle.prompts[0]).toContain(worktreePath);
 
 		// The unrelated queued task must not have been touched or started —
 		// the mutex still holds for a genuinely live running row.
@@ -1481,6 +1602,12 @@ describe("runAutoWorkCycle session continuation (T-65)", () => {
 		expect(result.runId).toBe(priorRunId);
 		expect(result.worktreePath).toBe(worktreePath);
 
+		// The resumed handle was idle — its turn died with the old server
+		// process — so the engine must send the continuation prompt.
+		expect(liveHandle.prompts).toHaveLength(1);
+		expect(liveHandle.prompts[0]).toMatch(/reinici/);
+		expect(liveHandle.prompts[0]).toContain(worktreePath);
+
 		const runs = listAutoWorkRuns({ taskId: task.id });
 		expect(runs).toHaveLength(1);
 		expect(runs[0]?.status).toBe("completed");
@@ -1517,8 +1644,43 @@ describe("runAutoWorkCycle session continuation (T-65)", () => {
 		if (result.outcome !== "completed") throw new Error("expected completed");
 		expect(result.sessionId).toBe("sess_alive");
 		expect(result.worktreePath).toBe(worktreePath);
+		// Idle resumed handle → continuation prompt, still pointing at the
+		// (now missing) worktree path recorded on the run.
+		expect(liveHandle.prompts).toHaveLength(1);
+		expect(liveHandle.prompts[0]).toMatch(/reinici/);
+		expect(liveHandle.prompts[0]).toContain(worktreePath);
 		// Nothing was ever created under .worktrees for this run.
 		expect(fs.existsSync(path.join(repoCwd, ".worktrees"))).toBe(false);
+	});
+
+	test("reattaching to a still-streaming session sends no continuation prompt and settles on its own events", async () => {
+		setAutoWorkConfig(repoCwd, { ...DEFAULT_AUTO_WORK_VALUES, enabled: true });
+		const task = createTask({ title: "Still streaming", cwd: repoCwd, priority: "P5", autoWork: true });
+		moveTask(task.id, "s_active", 0);
+		const worktreePath = path.join(repoCwd, ".worktrees", "aw-streaming");
+		fs.mkdirSync(worktreePath, { recursive: true });
+		const priorRunId = startAutoWorkRun({
+			taskId: task.id,
+			taskPriority: "P5",
+			sessionId: "sess_streaming",
+			worktreePath,
+		});
+
+		const liveHandle = new FakeSessionHandle("sess_streaming", 10);
+		liveHandle.streaming = true;
+		const decoyHandle = new FakeSessionHandle("sess_fresh", 10);
+		const result = await runAutoWorkCycle(
+			repoCwd,
+			fakeBridge(decoyHandle, { liveSessions: new Map([["sess_streaming", liveHandle]]) }),
+			{ getSubscriptionUsage: async () => ({ available: true, weeklyPct: 5 }), createPullRequest: stubCreatePullRequest },
+		);
+
+		expect(result.outcome).toBe("completed");
+		if (result.outcome !== "completed") throw new Error("expected completed");
+		expect(result.runId).toBe(priorRunId);
+		// A live, still-streaming turn is only observed — prompting it again
+		// would inject a second instruction into the in-flight work.
+		expect(liveHandle.prompts).toHaveLength(0);
 	});
 
 	test("marks a lost run stale: task returns to backlog, worktree is removed, run is failed", async () => {

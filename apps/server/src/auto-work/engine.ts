@@ -458,30 +458,19 @@ export async function runAutoWorkCycle(
 		model: model ? `${model.provider}/${model.id}` : "default",
 	});
 
-	activeRunIds.add(runId);
-	try {
-		const prompt = `Trabaja en T-${task.displayId}: ${task.title}\n\n(contexto completo disponible via GET /api/tasks/${task.id})\n\nEl worktree para esta tarea ya está configurado en \`${worktreePath}\` (rama \`auto-work/t${task.displayId}-${branchSlug}\`). Usa ese directorio para todos los commits y cambios de fichero.`;
-		await session.prompt(prompt);
-
-		const timeoutMinutes = resolveAutoWorkTimeoutMinutes(task.priority, config);
-		return await finalizeAutoWorkRun({
-			runId,
-			task,
-			session,
-			worktreePath,
-			timeoutMinutes,
-			resolveDeckBaseUrl,
-			createPullRequest,
-			notify,
-		});
-	} catch (err) {
-		const failureReason = `session prompt failed: ${String(err)}`;
-		failAutoWorkRun(runId, task.id, failureReason);
-		await notify({ kind: "task_failed", displayId: task.displayId, reason: failureReason });
-		return { outcome: "failed", taskId: task.id, runId, sessionId: session.sessionId, worktreePath, failureReason };
-	} finally {
-		activeRunIds.delete(runId);
-	}
+	const prompt = `Trabaja en T-${task.displayId}: ${task.title}\n\n(contexto completo disponible via GET /api/tasks/${task.id})\n\nEl worktree para esta tarea ya está configurado en \`${worktreePath}\` (rama \`auto-work/t${task.displayId}-${branchSlug}\`). Usa ese directorio para todos los commits y cambios de fichero.`;
+	const timeoutMinutes = resolveAutoWorkTimeoutMinutes(task.priority, config);
+	return await finalizeAutoWorkRun({
+		runId,
+		task,
+		session,
+		worktreePath,
+		timeoutMinutes,
+		startTurn: () => session.prompt(prompt),
+		resolveDeckBaseUrl,
+		createPullRequest,
+		notify,
+	});
 }
 
 // ─── Small IO helpers ───────────────────────────────────────────────────────
@@ -515,6 +504,10 @@ function finalizeAutoWorkRun(params: {
 	session: SessionHandle;
 	worktreePath: string;
 	timeoutMinutes: number;
+	/** Starts the agent turn (e.g. `session.prompt(...)`) AFTER the terminal
+	 *  listener is subscribed. Omitted when reattaching to an already-streaming
+	 *  session (T-65 resume of a live turn). */
+	startTurn?: () => Promise<unknown>;
 	resolveDeckBaseUrl: () => string;
 	createPullRequest: (params: CreatePullRequestParams) => Promise<CreatePullRequestResult>;
 	notify: (event: AutoWorkNotificationEvent) => Promise<void>;
@@ -529,20 +522,28 @@ async function settleAutoWorkRun(params: {
 	session: SessionHandle;
 	worktreePath: string;
 	timeoutMinutes: number;
+	startTurn?: () => Promise<unknown>;
 	resolveDeckBaseUrl: () => string;
 	createPullRequest: (params: CreatePullRequestParams) => Promise<CreatePullRequestResult>;
 	notify: (event: AutoWorkNotificationEvent) => Promise<void>;
 }): Promise<AutoWorkCycleResult> {
-	const { runId, task, session, worktreePath, timeoutMinutes, resolveDeckBaseUrl, createPullRequest, notify } = params;
-	const terminal = await waitForAutoWorkSessionTerminal(session, timeoutMinutes * 60_000);
+	const { runId, task, session, worktreePath, timeoutMinutes, startTurn, resolveDeckBaseUrl, createPullRequest, notify } =
+		params;
+	const terminal = await waitForAutoWorkSessionTerminal(session, timeoutMinutes * 60_000, startTurn);
 
 	if (terminal !== "completed") {
 		const timedOut = terminal === "timed_out";
 		const failureReason = timedOut
 			? `exceeded ${timeoutMinutes}min timeout for priority ${task.priority}`
 			: "agent turn ended with an error or abort";
-		if (timedOut) { completeAutoWorkRun(runId, { status: "timed_out", failureReason }); broadcastBus.broadcast({ type: "auto_work_runs_changed" }); }
-		else failAutoWorkRun(runId, task.id, failureReason);
+		if (timedOut) {
+			// Abort the still-running session so reality matches the record —
+			// otherwise the agent keeps working (and spending) after the run
+			// was already written off, and may even finish the task.
+			await session.abort().catch((err) => log.warn(`run ${runId}: abort after timeout failed`, err));
+			completeAutoWorkRun(runId, { status: "timed_out", failureReason });
+			broadcastBus.broadcast({ type: "auto_work_runs_changed" });
+		} else failAutoWorkRun(runId, task.id, failureReason);
 		const terminalState = findStateByName(timedOut ? "blocked" : "backlog");
 		if (terminalState) moveTask(task.id, terminalState.id, 0);
 		updateTask(task.id, {
@@ -597,16 +598,21 @@ async function settleAutoWorkRun(params: {
 }
 
 /**
- * Retires persisted runs whose process is no longer executing. The monitor calls
- * this before displaying history, so a killed session cannot look live forever.
- * A short grace avoids racing a just-created session before its first turn starts.
+ * Retires persisted runs whose session is truly gone. The monitor calls this
+ * before displaying history, so a killed session cannot look live forever.
+ * A short grace avoids racing a just-created session before its first turn
+ * starts. A run whose session still exists as a persisted `.jsonl` is left
+ * alone — it is resumable, and the scheduler's next cycle owns picking it up
+ * (`resumeOrRetireAutoWorkRun`); failing it here would race that resume, which
+ * is exactly how completed runs used to end up `failed: session_not_running`.
  */
-export function reconcileInactiveAutoWorkRuns(bridge: AgentBridge, now = Date.now()): number {
+export async function reconcileInactiveAutoWorkRuns(bridge: AgentBridge, now = Date.now()): Promise<number> {
 	let reconciled = 0;
 	for (const run of listAutoWorkRuns({ status: "running" })) {
 		if (activeRunIds.has(run.id) || now - Date.parse(run.startedAt) < STALE_RUN_GRACE_MS) continue;
 		const handle = bridge.getSession(run.sessionId);
-		if (handle?.isStreamingNow()) continue;
+		if (handle && (await handle.isStreamingNow())) continue;
+		if (await findPersistedAutoWorkSession(bridge, run)) continue;
 		failAutoWorkRun(run.id, run.taskId, "session_not_running");
 		log.warn(`run ${run.id} (session ${run.sessionId}) is no longer running; moved task back to backlog`);
 		reconciled += 1;
@@ -727,6 +733,15 @@ async function resumeOrRetireAutoWorkRun(
 			`session ${run.sessionId}${worktreeExists ? "" : " (worktree missing)"}`,
 	);
 
+	// A resumed handle whose turn died with the previous server process is
+	// idle: no event will ever arrive, so waiting alone would always end in a
+	// bogus timeout. Kick it with a continuation prompt; if the work was in
+	// fact already finished, the agent verifies and ends the turn quickly.
+	const streaming = await handle.isStreamingNow();
+	const continuationPrompt =
+		`La sesión de Auto Work para T-${task.displayId} ("${task.title}") se interrumpió (reinicio del servidor). ` +
+		`Continúa el trabajo en el worktree \`${run.worktreePath}\`. Si la tarea ya estaba terminada, verifica el estado (commits, tests) y concluye. ` +
+		`(contexto completo via GET /api/tasks/${task.id})`;
 	const timeoutMinutes = resolveAutoWorkTimeoutMinutes(run.taskPriority, config);
 	return finalizeAutoWorkRun({
 		runId: run.id,
@@ -734,6 +749,7 @@ async function resumeOrRetireAutoWorkRun(
 		session: handle,
 		worktreePath: run.worktreePath,
 		timeoutMinutes,
+		...(streaming ? {} : { startTurn: () => handle.prompt(continuationPrompt) }),
 		resolveDeckBaseUrl: completion.resolveDeckBaseUrl,
 		createPullRequest: completion.createPullRequest,
 		notify: completion.notify,
@@ -756,10 +772,19 @@ function terminalOutcomeFromEvent(event: unknown): "completed" | "failed" | unde
  * or `agent_end` event on the session's own stream marks the end of a turn.
  * For a one-shot auto-work session, that first turn completing *is* the
  * terminal state we're waiting for.
+ *
+ * `startTurn` (when given) is invoked AFTER the event subscription is in
+ * place — `SessionHandle.prompt()` resolves only when the whole turn has
+ * finished, so subscribing after it settles misses every event and used to
+ * turn every successful run into a 45-minute `timed_out`. The prompt promise
+ * itself doubles as a completion signal: events win the race (they carry
+ * `stopReason`), but if none was delivered, its settlement still resolves the
+ * wait instead of leaking into the timeout.
  */
 export function waitForAutoWorkSessionTerminal(
 	handle: SessionHandle,
 	timeoutMs: number,
+	startTurn?: () => Promise<unknown>,
 ): Promise<"completed" | "failed" | "timed_out"> {
 	const { promise, resolve } = Promise.withResolvers<"completed" | "failed" | "timed_out">();
 	let settled = false;
@@ -779,6 +804,17 @@ export function waitForAutoWorkSessionTerminal(
 		const outcome = terminalOutcomeFromEvent(event);
 		if (outcome) finish(outcome);
 	});
+	if (startTurn) {
+		startTurn().then(
+			// Defer one tick so a terminal event emitted just before the prompt
+			// promise settles (it carries the precise stopReason) wins the race.
+			() => setTimeout(() => finish("completed"), 0),
+			(err) => {
+				log.warn("auto-work turn prompt failed", err);
+				setTimeout(() => finish("failed"), 0);
+			},
+		);
+	}
 	return promise;
 }
 
@@ -886,9 +922,8 @@ export async function generateBranchSlugWithModel(
 			systemPromptOverride: rules,
 			...(model ? { model } : {}),
 		});
-		const terminal = waitForAutoWorkSessionTerminal(session, 20_000);
-		await session.prompt(prompt);
-		const outcome = await terminal;
+		const s = session;
+		const outcome = await waitForAutoWorkSessionTerminal(s, 20_000, () => s.prompt(prompt));
 		if (outcome !== "completed") {
 			log.warn(`branch slug generation timed out for T-${task.displayId}; using deterministic fallback`);
 			return fallback();
@@ -977,7 +1012,7 @@ async function resolveDefaultBranch(repoCwd: string): Promise<string> {
 	if (exitCode !== 0) return "main";
 	for (const line of stdout.split("\n")) {
 		const m = line.match(/^ref:\s+refs\/heads\/(\S+)\s+HEAD$/);
-		if (m) return m[1];
+		if (m?.[1]) return m[1];
 	}
 	return "main";
 }
@@ -1205,9 +1240,8 @@ async function selectTaskWithModel(
 			suppressAutoStart: true,
 			...(model ? { model } : {}),
 		});
-		const terminal = waitForAutoWorkSessionTerminal(session, 30_000);
-		await session.prompt(prompt);
-		const outcome = await terminal;
+		const s = session;
+		const outcome = await waitForAutoWorkSessionTerminal(s, 30_000, () => s.prompt(prompt));
 		if (outcome !== "completed") {
 			log.warn("global task selector timed out; using priority order");
 			return undefined;
@@ -1280,9 +1314,8 @@ export async function decideSqueezeTiming(
 			suppressAutoStart: true,
 			...(model ? { model } : {}),
 		});
-		const terminal = waitForAutoWorkSessionTerminal(session, 30_000);
-		await session.prompt(prompt);
-		const outcome = await terminal;
+		const s = session;
+		const outcome = await waitForAutoWorkSessionTerminal(s, 30_000, () => s.prompt(prompt));
 		if (outcome !== "completed") {
 			log.warn("squeeze timing decision timed out; deferring to the next scheduled tick");
 			return false;
