@@ -90,38 +90,62 @@ describe("prelude override", () => {
 
 describe("buildDefaultPrelude", () => {
 	test("returns DEFAULT_PRELUDE when no KB files exist", () => {
-		// tmpHomeDir/kb/system/ is absent → all reads throw ENOENT → fallback
+		// The system directory is absent, so there are no readable Markdown files.
 		expect(buildDefaultPrelude()).toBe(DEFAULT_PRELUDE);
 	});
 
-	test("prepends all four KB system files when present", () => {
+	test("inlines every top-level Markdown file in deterministic filename order", () => {
 		const kbSystemDir = path.join(tmpHomeDir, "kb", "system");
 		mkdirSync(kbSystemDir, { recursive: true });
-		writeFileSync(path.join(kbSystemDir, "working-voice.md"), "---\ntype: k\n---\n# Voice\nvoice-content\n");
-		writeFileSync(path.join(kbSystemDir, "deck-orientation.md"), "# Deck\ndeck-content\n");
-		writeFileSync(path.join(kbSystemDir, "projects-hub.md"), "# Projects\nprojects-content\n");
-		writeFileSync(path.join(kbSystemDir, "org-system-hub.md"), "# Org\norg-content\n");
+		// Deliberately create these out of filename order. The arbitrary filename
+		// proves discovery is not limited to a predefined set of system files.
+		const files = [
+			["working-voice.md", "# Voice\nvoice-content\n"],
+			["projects-hub.md", "# Projects\nprojects-content\n"],
+			["arbitrary-guidance.md", "---\ntype: k\n---\n# Arbitrary\narbitrary-content\n"],
+			["org-system-hub.md", "# Org\norg-content\n"],
+			["deck-orientation.md", "# Deck\ndeck-content\n"],
+		] as const;
+		for (const [filename, content] of files) {
+			writeFileSync(path.join(kbSystemDir, filename), content);
+		}
 
 		const result = buildDefaultPrelude();
-		expect(result).toContain("# Voice\nvoice-content");
-		expect(result).not.toContain("---\ntype: k\n---"); // frontmatter stripped
-		expect(result).toContain("# Deck\ndeck-content");
-		expect(result).toContain("# Projects\nprojects-content");
-		expect(result).toContain("# Org\norg-content");
-		expect(result).toContain(DEFAULT_PRELUDE); // structural scaffold still appended
-		// KB content precedes the scaffold
-		expect(result.indexOf("voice-content")).toBeLessThan(result.indexOf("# omp-deck context"));
+		expect(result).toContain("# Arbitrary\narbitrary-content");
+		expect(result).not.toContain("---\ntype: k\n---");
+		expect(result).toBe(
+			[
+				"# Arbitrary\narbitrary-content\n",
+				"# Deck\ndeck-content\n",
+				"# Org\norg-content\n",
+				"# Projects\nprojects-content\n",
+				"# Voice\nvoice-content\n",
+			].join("\n") +
+				"\n" +
+				DEFAULT_PRELUDE,
+		);
 	});
 
-	test("skips individual missing files, includes the rest", () => {
+	test("ignores non-Markdown files and Markdown files below subdirectories", () => {
 		const kbSystemDir = path.join(tmpHomeDir, "kb", "system");
-		mkdirSync(kbSystemDir, { recursive: true });
+		const nestedDir = path.join(kbSystemDir, "nested");
+		mkdirSync(nestedDir, { recursive: true });
 		writeFileSync(path.join(kbSystemDir, "working-voice.md"), "# Voice\nvoice-content\n");
-		// other three absent
+		writeFileSync(path.join(kbSystemDir, "notes.txt"), "non-markdown-content\n");
+		writeFileSync(path.join(nestedDir, "nested.md"), "nested-markdown-content\n");
 
 		const result = buildDefaultPrelude();
-		expect(result).toContain("voice-content");
-		expect(result).toContain(DEFAULT_PRELUDE);
+		expect(result).toBe("# Voice\nvoice-content\n\n" + DEFAULT_PRELUDE);
+		expect(result).not.toContain("non-markdown-content");
+		expect(result).not.toContain("nested-markdown-content");
+	});
+
+	test("skips a Markdown path that cannot be read as a file and includes readable files", () => {
+		const kbSystemDir = path.join(tmpHomeDir, "kb", "system");
+		mkdirSync(path.join(kbSystemDir, "deck-orientation.md"), { recursive: true });
+		writeFileSync(path.join(kbSystemDir, "working-voice.md"), "# Voice\nvoice-content\n");
+
+		expect(buildDefaultPrelude()).toBe("# Voice\nvoice-content\n\n" + DEFAULT_PRELUDE);
 	});
 
 	test("getEffectivePrelude returns buildDefaultPrelude output when no override", () => {
