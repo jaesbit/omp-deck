@@ -419,7 +419,7 @@ export async function runAutoWorkCycle(
 	const worktreePath = await createAutoWorkWorktree(cwd, task);
 
 	const session = await bridge.createSession({
-		cwd: worktreePath,
+		cwd,
 		suppressAutoStart: true,
 		...(model ? { model } : {}),
 	});
@@ -442,7 +442,7 @@ export async function runAutoWorkCycle(
 
 	activeRunIds.add(runId);
 	try {
-		const prompt = `Trabaja en T-${task.displayId}: ${task.title}\n\n(contexto completo disponible via GET /api/tasks/${task.id})`;
+		const prompt = `Trabaja en T-${task.displayId}: ${task.title}\n\n(contexto completo disponible via GET /api/tasks/${task.id})\n\nEl worktree para esta tarea ya está configurado en \`${worktreePath}\` (rama \`auto-work/t${task.displayId}-${slugifyTaskTitle(task.title)}\`). Usa ese directorio para todos los commits y cambios de fichero.`;
 		await session.prompt(prompt);
 
 		const timeoutMinutes = resolveAutoWorkTimeoutMinutes(task.priority, config);
@@ -777,6 +777,15 @@ async function createAutoWorkWorktree(repoCwd: string, task: Task): Promise<stri
 	const dirName = `aw-T${task.displayId}-${slug}`;
 	const worktreePath = path.join(repoCwd, ".worktrees", dirName);
 	const branch = `auto-work/t${task.displayId}-${slug}`;
+
+	// Reuse an existing registered worktree rather than failing with exit 255
+	// when a previous run left the branch/path in place (retry or crashed session).
+	const existing = await findExistingWorktreePath(repoCwd, worktreePath);
+	if (existing) {
+		log.info(`reusing existing worktree at ${worktreePath} (branch ${branch})`);
+		return existing;
+	}
+
 	const defaultBranch = await resolveDefaultBranch(repoCwd);
 
 	const proc = Bun.spawn(["git", "worktree", "add", "-b", branch, worktreePath, `origin/${defaultBranch}`], {
@@ -791,6 +800,28 @@ async function createAutoWorkWorktree(repoCwd: string, task: Task): Promise<stri
 		throw new Error(`git worktree add failed (exit ${exitCode}) for T-${task.displayId}: ${stderr.trim()}`);
 	}
 	return worktreePath;
+}
+
+/**
+ * Returns `worktreePath` when it is already registered in `git worktree list`,
+ * otherwise returns `undefined`. Used by `createAutoWorkWorktree` to detect
+ * a leftover worktree from a previous (possibly crashed) run so it can be
+ * reused instead of calling `git worktree add` again (which would fail with
+ * exit 255 if the branch or directory already exists).
+ */
+async function findExistingWorktreePath(repoCwd: string, worktreePath: string): Promise<string | undefined> {
+	if (!fs.existsSync(worktreePath)) return undefined;
+	const proc = Bun.spawn(["git", "worktree", "list", "--porcelain"], {
+		cwd: repoCwd,
+		stdin: "ignore",
+		stdout: "pipe",
+		stderr: "pipe",
+		windowsHide: true,
+	});
+	const [stdout, exitCode] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
+	if (exitCode !== 0) return undefined;
+	// Each entry starts with "worktree <path>\n"; entries separated by blank lines.
+	return stdout.split("\n").some((line) => line === `worktree ${worktreePath}`) ? worktreePath : undefined;
 }
 
 function slugifyTaskTitle(title: string): string {
