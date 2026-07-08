@@ -2023,9 +2023,10 @@ export interface AutoWorkGlobalConfig {
 	/** Polling interval in minutes (min 1). Default 5. */
 	scheduleIntervalMinutes: number;
 	/**
-	 * Model used to pick the next task when multiple workspaces have eligible
-	 * work. `null` = use the server's default model. When set, the LLM receives
-	 * a compact task list and returns the task ID to run next.
+	 * Model used for every internal auto-work decision that isn't the task's
+	 * own execution: picking the next task when multiple workspaces have
+	 * eligible work, squeeze-timing (below), and branch-name slug generation
+	 * (T-77). `null` = use the server's default model.
 	 */
 	taskSelectionModel: ModelRef | null;
 	/**

@@ -102,6 +102,14 @@ export interface CreateSessionOpts {
 	suppressAutoStart?: boolean;
 	/** Thinking level forwarded to the SDK's `createAgentSession` (T-73). */
 	thinking?: string;
+	/**
+	 * Replaces the deck's normal `kb/system` prelude (`getEffectivePrelude()`)
+	 * for this session only. For lightweight internal one-shot sessions (e.g.
+	 * T-77's branch-name slug generator) that need a narrow, purpose-built
+	 * system prompt instead of the full org-wide prelude. Leave unset for
+	 * every normal user-facing session.
+	 */
+	systemPromptOverride?: string;
 }
 
 export interface ResumeSessionOpts {

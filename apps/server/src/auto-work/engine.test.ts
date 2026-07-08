@@ -22,17 +22,20 @@ import { DEFAULT_AUTO_WORK_VALUES, setAutoWorkConfig } from "../db/auto-work.ts"
 import { getAutoWorkCostEstimate, listAutoWorkRuns, startAutoWorkRun } from "../db/auto-work-runs.ts";
 import { closeDb, openDb } from "../db/index.ts";
 import { createTask, getTask, moveTask } from "../db/tasks.ts";
+import { BRANCH_NAMING_RULES_BODY } from "../kb-templates.ts";
 import type { AutoWorkNotificationEvent } from "./notify.ts";
 import {
 	checkAutoWorkPreflight,
 	classifyRunningAutoWorkRun,
 	costFitsAutoWorkBudget,
 	decideSqueezeTiming,
+	generateBranchSlugWithModel,
 	reconcileInactiveAutoWorkRuns,
 	resolveAutoWorkModel,
 	resolveAutoWorkTimeoutMinutes,
 	runAutoWorkCycle,
 	runGlobalAutoWorkCycle,
+	sanitizeBranchSlug,
 	selectNextAutoWorkTask,
 	shouldConsiderSqueeze,
 	waitForAutoWorkSessionTerminal,
@@ -775,6 +778,252 @@ describe("decideSqueezeTiming", () => {
 	});
 });
 
+describe("sanitizeBranchSlug", () => {
+	test("lowercases, kebab-cases, and strips punctuation from a mixed-case response", () => {
+		expect(sanitizeBranchSlug("Fix Login Bug!!")).toBe("fix-login-bug");
+	});
+
+	test("trims leading and trailing separator-derived dashes", () => {
+		expect(sanitizeBranchSlug("  --Deploy Now--  ")).toBe("deploy-now");
+	});
+
+	test("collapses consecutive non-alphanumeric runs into a single dash", () => {
+		expect(sanitizeBranchSlug("foo___bar   baz")).toBe("foo-bar-baz");
+	});
+
+	test("uses only the first line of a multi-line response", () => {
+		expect(sanitizeBranchSlug("First line\nSecond line ignored")).toBe("first-line");
+	});
+
+	test("caps at exactly 40 characters when the cut doesn't land on a separator", () => {
+		const long = "thisisaveryveryverylongsentencewithoutanyseparatorsatallwhichkeepsgoingandgoing";
+		const result = sanitizeBranchSlug(long);
+		expect(result).toBe(long.slice(0, 40));
+		expect(result).toHaveLength(40);
+	});
+
+	test("trims a dangling trailing dash left over from the 40-char cap", () => {
+		const input = `${"a".repeat(39)} b-word-that-continues-long-past-the-cap`;
+		const result = sanitizeBranchSlug(input);
+		expect(result).toBe("a".repeat(39));
+		expect(result.endsWith("-")).toBe(false);
+	});
+
+	test("returns an empty string for empty input", () => {
+		expect(sanitizeBranchSlug("")).toBe("");
+	});
+
+	test("returns an empty string for input that is entirely non-alphanumeric", () => {
+		expect(sanitizeBranchSlug("!!!???...")).toBe("");
+	});
+});
+
+describe("generateBranchSlugWithModel", () => {
+	// Sandboxes OMP_DECK_KB_ROOT to an empty temp dir per test so
+	// `resolveKbRoot()` never touches the real user's `~/kb` — with no
+	// `rules/branch-naming.md` present, the function must fall back to the
+	// in-process `BRANCH_NAMING_RULES_BODY` constant, letting these tests
+	// assert the exact `systemPromptOverride` content instead of just "some string".
+	let savedKbRoot: string | undefined;
+	let kbRootDir: string;
+
+	beforeEach(() => {
+		savedKbRoot = process.env.OMP_DECK_KB_ROOT;
+		kbRootDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-deck-branch-slug-kb-"));
+		process.env.OMP_DECK_KB_ROOT = kbRootDir;
+	});
+
+	afterEach(() => {
+		if (savedKbRoot === undefined) delete process.env.OMP_DECK_KB_ROOT;
+		else process.env.OMP_DECK_KB_ROOT = savedKbRoot;
+		fs.rmSync(kbRootDir, { recursive: true, force: true });
+	});
+
+	test("returns the sanitized slug from the model's response, requesting a suppressed-autostart session with the branch-naming rules as the system prompt override", async () => {
+		const task = baseTask({ title: "Arreglar el error de inicio de sesión" });
+		const handle = new FakeSessionHandle("sess_branch_happy", 10, "Fix Login Bug!!");
+		const createSessionCalls: CreateSessionOpts[] = [];
+		const deleteSessionCalls: string[] = [];
+
+		const result = await generateBranchSlugWithModel(
+			fakeBridge(handle, { createSessionCalls, deleteSessionCalls }),
+			"/tmp/branch-slug-ws",
+			task,
+			null,
+		);
+
+		expect(result).toBe("fix-login-bug");
+		expect(createSessionCalls).toEqual([
+			{ cwd: "/tmp/branch-slug-ws", suppressAutoStart: true, systemPromptOverride: BRANCH_NAMING_RULES_BODY },
+		]);
+		expect(deleteSessionCalls).toEqual(["sess_branch_happy"]);
+	});
+
+	test("reads kb/rules/branch-naming.md from the sandboxed KB root when present, instead of the in-process fallback constant", async () => {
+		const customRules = "# Custom branch naming rules\n\nAlways return `custom-slug`.\n";
+		fs.mkdirSync(path.join(kbRootDir, "rules"), { recursive: true });
+		fs.writeFileSync(path.join(kbRootDir, "rules", "branch-naming.md"), customRules, "utf8");
+
+		const task = baseTask({ title: "Whatever" });
+		const handle = new FakeSessionHandle("sess_branch_custom_rules", 10, "custom-slug");
+		const createSessionCalls: CreateSessionOpts[] = [];
+
+		await generateBranchSlugWithModel(fakeBridge(handle, { createSessionCalls }), "/tmp/branch-slug-ws", task, null);
+
+		expect(createSessionCalls).toEqual([
+			{ cwd: "/tmp/branch-slug-ws", suppressAutoStart: true, systemPromptOverride: customRules },
+		]);
+	});
+
+	test("omits the model key entirely from createSession opts when model is null", async () => {
+		const task = baseTask({ title: "Model passthrough null" });
+		const handle = new FakeSessionHandle("sess_branch_model_null", 10, "Some Slug");
+		const createSessionCalls: CreateSessionOpts[] = [];
+
+		await generateBranchSlugWithModel(
+			fakeBridge(handle, { createSessionCalls }),
+			"/tmp/branch-slug-model-null",
+			task,
+			null,
+		);
+
+		expect(createSessionCalls).toEqual([
+			{ cwd: "/tmp/branch-slug-model-null", suppressAutoStart: true, systemPromptOverride: BRANCH_NAMING_RULES_BODY },
+		]);
+	});
+
+	test("passes the model through verbatim in createSession opts when non-null", async () => {
+		const task = baseTask({ title: "Model passthrough set" });
+		const handle = new FakeSessionHandle("sess_branch_model_set", 10, "Some Slug");
+		const createSessionCalls: CreateSessionOpts[] = [];
+
+		await generateBranchSlugWithModel(
+			fakeBridge(handle, { createSessionCalls }),
+			"/tmp/branch-slug-model-set",
+			task,
+			{ provider: "anthropic", id: "claude-good" },
+		);
+
+		expect(createSessionCalls).toEqual([
+			{
+				cwd: "/tmp/branch-slug-model-set",
+				suppressAutoStart: true,
+				systemPromptOverride: BRANCH_NAMING_RULES_BODY,
+				model: { provider: "anthropic", id: "claude-good" },
+			},
+		]);
+	});
+
+	test("falls back to the deterministic naive slug and still cleans up the session when it never reaches a terminal state before the internal 20s timeout", async () => {
+		jest.useFakeTimers();
+		try {
+			const task = baseTask({ title: "Slow Model Response Never Arrives" });
+			const expectedFallback = task.title
+				.toLowerCase()
+				.replace(/[^a-z0-9]+/g, "-")
+				.replace(/^-+|-+$/g, "")
+				.slice(0, 40);
+			const handle = new FakeSessionHandle("sess_branch_timeout", null); // never emits turn_end
+			const deleteSessionCalls: string[] = [];
+			const resultPromise = generateBranchSlugWithModel(
+				fakeBridge(handle, { deleteSessionCalls }),
+				"/tmp/branch-slug-timeout",
+				task,
+				null,
+			);
+			// Flush the microtask hops between session creation and the internal
+			// waitForAutoWorkSessionTerminal 20s timer being armed, then fire it.
+			await Promise.resolve();
+			await Promise.resolve();
+			await Promise.resolve();
+			jest.advanceTimersByTime(20_000);
+			const result = await resultPromise;
+			expect(result).toBe(expectedFallback);
+			expect(deleteSessionCalls).toEqual(["sess_branch_timeout"]);
+		} finally {
+			jest.useRealTimers();
+		}
+	});
+
+	test("falls back to the deterministic naive slug without throwing when bridge.createSession itself fails, and skips cleanup (nothing was created)", async () => {
+		const task = baseTask({ title: "Bridge Unavailable" });
+		const expectedFallback = task.title
+			.toLowerCase()
+			.replace(/[^a-z0-9]+/g, "-")
+			.replace(/^-+|-+$/g, "")
+			.slice(0, 40);
+		const handle = new FakeSessionHandle("sess_branch_unused", 10, "Fix Login Bug!!");
+		const deleteSessionCalls: string[] = [];
+
+		const result = await generateBranchSlugWithModel(
+			fakeBridge(handle, { createSessionError: new Error("bridge unavailable"), deleteSessionCalls }),
+			"/tmp/branch-slug-error",
+			task,
+			null,
+		);
+
+		expect(result).toBe(expectedFallback);
+		expect(deleteSessionCalls).toEqual([]);
+	});
+
+	test("falls back to the deterministic naive slug when the assistant response is empty", async () => {
+		const task = baseTask({ title: "Empty Model Response" });
+		const expectedFallback = task.title
+			.toLowerCase()
+			.replace(/[^a-z0-9]+/g, "-")
+			.replace(/^-+|-+$/g, "")
+			.slice(0, 40);
+		const handle = new FakeSessionHandle("sess_branch_empty", 10, "");
+		const deleteSessionCalls: string[] = [];
+
+		const result = await generateBranchSlugWithModel(
+			fakeBridge(handle, { deleteSessionCalls }),
+			"/tmp/branch-slug-empty",
+			task,
+			null,
+		);
+
+		expect(result).toBe(expectedFallback);
+		expect(deleteSessionCalls).toEqual(["sess_branch_empty"]);
+	});
+
+	test("falls back to the deterministic naive slug when the assistant response sanitizes to nothing (entirely punctuation)", async () => {
+		const task = baseTask({ title: "Punctuation Only Response" });
+		const expectedFallback = task.title
+			.toLowerCase()
+			.replace(/[^a-z0-9]+/g, "-")
+			.replace(/^-+|-+$/g, "")
+			.slice(0, 40);
+		const handle = new FakeSessionHandle("sess_branch_punct", 10, "!!!");
+		const deleteSessionCalls: string[] = [];
+
+		const result = await generateBranchSlugWithModel(
+			fakeBridge(handle, { deleteSessionCalls }),
+			"/tmp/branch-slug-punct",
+			task,
+			null,
+		);
+
+		expect(result).toBe(expectedFallback);
+		expect(deleteSessionCalls).toEqual(["sess_branch_punct"]);
+	});
+
+	test("swallows a deleteSession failure without throwing out of generateBranchSlugWithModel", async () => {
+		const task = baseTask({ title: "Delete Cleanup Fails" });
+		const handle = new FakeSessionHandle("sess_branch_delete_fail", 10, "Fix Login Bug!!");
+		const bridge: AgentBridge = {
+			...fakeBridge(handle),
+			deleteSession: async () => {
+				throw new Error("delete failed");
+			},
+		};
+
+		const result = await generateBranchSlugWithModel(bridge, "/tmp/branch-slug-delete-fail", task, null);
+
+		expect(result).toBe("fix-login-bug");
+	});
+});
+
 // Stubs `gh pr create` for every `runAutoWorkCycle` test that reaches the
 // success path (T-66) — a test must NEVER let the real default run, since
 // that would shell out to `gh` and attempt to open an actual GitHub PR.
@@ -1095,6 +1344,32 @@ describe("runAutoWorkCycle", () => {
 		expect(fs.existsSync(worktreePath)).toBe(true);
 	});
 
+	test("uses the injected generateBranchSlug for the worktree/branch name, without an extra bridge.createSession call for it", async () => {
+		setAutoWorkConfig(repoCwd, { ...DEFAULT_AUTO_WORK_VALUES, enabled: true });
+		const task = createTask({ title: "Arreglar el login roto", cwd: repoCwd, priority: "P5", autoWork: true });
+		const createSessionCalls: CreateSessionOpts[] = [];
+		const generateBranchSlugCalls: Task[] = [];
+
+		const handle = new FakeSessionHandle("sess_injected_slug", 10);
+		const result = await runAutoWorkCycle(repoCwd, fakeBridge(handle, { createSessionCalls }), {
+			getSubscriptionUsage: async () => ({ available: true, weeklyPct: 5 }),
+			createPullRequest: stubCreatePullRequest,
+			generateBranchSlug: async (t) => {
+				generateBranchSlugCalls.push(t);
+				return "fix-broken-login";
+			},
+		});
+
+		expect(result.outcome).toBe("completed");
+		if (result.outcome !== "completed") throw new Error("expected completed");
+		expect(result.worktreePath).toContain(`aw-T${task.displayId}-fix-broken-login`);
+		expect(generateBranchSlugCalls).toEqual([expect.objectContaining({ id: task.id })]);
+		// Only the one real task session — the injected fn stands in for the LLM
+		// call `generateBranchSlugWithModel` would otherwise make, so there's no
+		// extra bridge.createSession beyond it.
+		expect(createSessionCalls).toEqual([{ cwd: repoCwd, suppressAutoStart: true }]);
+	});
+
 });
 
 describe("runGlobalAutoWorkCycle", () => {
@@ -1149,6 +1424,28 @@ describe("runGlobalAutoWorkCycle", () => {
 		expect(result.taskId).toBe(selectorWinner.id);
 		expect(getTask(selectorWinner.id)?.stateId).toBe("s_validate");
 		expect(getTask(deterministicWinner.id)?.stateId).toBe("s_backlog");
+	});
+
+	test("wires in the real LLM-backed branch slug generator by default (T-77) — the resulting branch reflects the model's sanitized slug, not a naive slugify of the task title", async () => {
+		setAutoWorkConfig(repoCwd, { ...DEFAULT_AUTO_WORK_VALUES, enabled: true });
+		const task = createTask({ title: "Arreglar error de inicio de sesión", cwd: repoCwd, priority: "P5", autoWork: true });
+		const handle = new FakeSessionHandle("sess_global_branch_slug", 10, "Fix Login Error!!");
+
+		const result = await runGlobalAutoWorkCycle(fakeBridge(handle), {
+			getSubscriptionUsage: async () => ({ available: true, weeklyPct: 5 }),
+			createPullRequest: stubCreatePullRequest,
+		});
+
+		expect(result.outcome).toBe("completed");
+		if (result.outcome !== "completed") throw new Error("expected completed");
+		expect(result.worktreePath).toContain(`aw-T${task.displayId}-fix-login-error`);
+
+		const naiveSlug = task.title
+			.toLowerCase()
+			.replace(/[^a-z0-9]+/g, "-")
+			.replace(/^-+|-+$/g, "")
+			.slice(0, 40);
+		expect(result.worktreePath).not.toContain(naiveSlug);
 	});
 });
 

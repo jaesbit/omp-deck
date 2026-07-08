@@ -44,6 +44,8 @@ import type { AgentBridge, SessionHandle } from "../bridge/types.ts";
 import { loadConfig } from "../config.ts";
 import { buildSessionUrl } from "../deck-links.ts";
 import { getAutoWorkConfig } from "../db/auto-work.ts";
+import { resolveKbRoot } from "../kb-service.ts";
+import { BRANCH_NAMING_RULES_BODY } from "../kb-templates.ts";
 import { completeAutoWorkRun, listAutoWorkRuns, startAutoWorkRun } from "../db/auto-work-runs.ts";
 import { getDeckBaseUrl as getServerDeckBaseUrl } from "../db/server-settings.ts";
 import { findStateByName, getTask, listTasks, moveTask, updateTask } from "../db/tasks.ts";
@@ -284,6 +286,18 @@ export interface RunAutoWorkCycleOptions {
 	 * to `gh` and attempt to open an actual GitHub PR.
 	 */
 	createPullRequest?: (params: CreatePullRequestParams) => Promise<CreatePullRequestResult>;
+	/**
+	 * Global auto-work model — reused for task selection, squeeze timing, and
+	 * branch-name slug generation (T-77). `null`/unset = bridge/server default.
+	 */
+	taskSelectionModel?: ModelRef | null;
+	/**
+	 * Injectable seam for the branch-name slug generator (T-77). Defaults to
+	 * the real LLM-backed `generateBranchSlugWithModel`, which spends an
+	 * extra `bridge.createSession` call. Tests inject a deterministic stub
+	 * to skip that call and keep worktree/branch names predictable.
+	 */
+	generateBranchSlug?: (task: Task) => Promise<string>;
 }
 
 /** Candidate supplied to the optional cross-workspace task selector. */
@@ -298,8 +312,6 @@ export type GlobalTaskSelector = (candidates: GlobalAutoWorkCandidate[]) => Prom
 
 /** Options specific to global scheduling; extends the ordinary per-workspace cycle options. */
 export interface RunGlobalAutoWorkCycleOptions extends RunAutoWorkCycleOptions {
-	/** Model that chooses among cross-workspace candidates. Null = bridge/server default. */
-	taskSelectionModel?: ModelRef | null;
 	/** Test seam or alternate policy. Return a candidate task ID, or undefined to use priority order. */
 	selectTask?: GlobalTaskSelector;
 }
@@ -416,7 +428,12 @@ export async function runAutoWorkCycle(
 		}
 	}
 
-	const worktreePath = await createAutoWorkWorktree(cwd, task);
+	// Default here is the plain synchronous slug (no model call): this keeps
+	// `runAutoWorkCycle`'s own unit tests fast and deterministic without a
+	// second `bridge.createSession` call. `runGlobalAutoWorkCycle` — the real
+	// production entry point — injects the LLM-backed generator by default.
+	const branchSlug = options.generateBranchSlug ? await options.generateBranchSlug(task) : slugifyTaskTitle(task.title);
+	const worktreePath = await createAutoWorkWorktree(cwd, task, branchSlug);
 
 	const session = await bridge.createSession({
 		cwd,
@@ -442,7 +459,7 @@ export async function runAutoWorkCycle(
 
 	activeRunIds.add(runId);
 	try {
-		const prompt = `Trabaja en T-${task.displayId}: ${task.title}\n\n(contexto completo disponible via GET /api/tasks/${task.id})\n\nEl worktree para esta tarea ya está configurado en \`${worktreePath}\` (rama \`auto-work/t${task.displayId}-${slugifyTaskTitle(task.title)}\`). Usa ese directorio para todos los commits y cambios de fichero.`;
+		const prompt = `Trabaja en T-${task.displayId}: ${task.title}\n\n(contexto completo disponible via GET /api/tasks/${task.id})\n\nEl worktree para esta tarea ya está configurado en \`${worktreePath}\` (rama \`auto-work/t${task.displayId}-${branchSlug}\`). Usa ese directorio para todos los commits y cambios de fichero.`;
 		await session.prompt(prompt);
 
 		const timeoutMinutes = resolveAutoWorkTimeoutMinutes(task.priority, config);
@@ -772,8 +789,7 @@ export function waitForAutoWorkSessionTerminal(
  * branches share the same clean base regardless of what the developer has
  * checked out locally, preventing squash-merge conflicts between independent tasks.
  */
-async function createAutoWorkWorktree(repoCwd: string, task: Task): Promise<string> {
-	const slug = slugifyTaskTitle(task.title);
+async function createAutoWorkWorktree(repoCwd: string, task: Task, slug: string): Promise<string> {
 	const dirName = `aw-T${task.displayId}-${slug}`;
 	const worktreePath = path.join(repoCwd, ".worktrees", dirName);
 	const branch = `auto-work/t${task.displayId}-${slug}`;
@@ -831,6 +847,77 @@ function slugifyTaskTitle(title: string): string {
 		.replace(/^-+|-+$/g, "")
 		.slice(0, 40);
 	return slug || "task";
+}
+
+/**
+ * Ask a short-lived agent session — the global `taskSelectionModel` reused
+ * across every internal auto-work decision (T-77) — for a short English
+ * kebab-case branch-name slug. The session's system prompt is entirely
+ * replaced by `kb/rules/branch-naming.md`'s content (`systemPromptOverride`)
+ * instead of the normal `kb/system` prelude, so this stays a narrow, cheap
+ * call that runs on every cycle. Any model/session failure or unusable
+ * response falls back to `slugifyTaskTitle(task.title)` — the exact naive
+ * slug the engine always produced before this existed, so a misconfigured
+ * or unreachable model degrades to the old behavior instead of blocking
+ * the cycle.
+ */
+export async function generateBranchSlugWithModel(
+	bridge: AgentBridge,
+	cwd: string,
+	task: Task,
+	model: ModelRef | null,
+): Promise<string> {
+	const fallback = () => slugifyTaskTitle(task.title);
+	const prompt = [`Task: T-${task.displayId} — ${task.title}`, "Reply with ONLY the slug, nothing else."].join("\n");
+
+	let session: SessionHandle | undefined;
+	try {
+		const rulesPath = path.join(resolveKbRoot(), "rules", "branch-naming.md");
+		let rules: string;
+		try {
+			rules = fs.readFileSync(rulesPath, "utf8");
+		} catch {
+			rules = BRANCH_NAMING_RULES_BODY;
+		}
+		session = await bridge.createSession({
+			cwd,
+			suppressAutoStart: true,
+			systemPromptOverride: rules,
+			...(model ? { model } : {}),
+		});
+		const terminal = waitForAutoWorkSessionTerminal(session, 20_000);
+		await session.prompt(prompt);
+		const outcome = await terminal;
+		if (outcome !== "completed") {
+			log.warn(`branch slug generation timed out for T-${task.displayId}; using deterministic fallback`);
+			return fallback();
+		}
+		const response = latestAssistantText((await session.snapshot()).messages);
+		const slug = sanitizeBranchSlug(response);
+		return slug || fallback();
+	} catch (err) {
+		log.warn(`branch slug generation failed for T-${task.displayId}; using deterministic fallback`, err);
+		return fallback();
+	} finally {
+		if (session) {
+			try {
+				await bridge.deleteSession(session.sessionId);
+			} catch (err) {
+				log.warn("branch slug generation cleanup failed", err);
+			}
+		}
+	}
+}
+
+/** Lowercase kebab-case ASCII, first line only, capped at 40 chars. */
+export function sanitizeBranchSlug(text: string): string {
+	const firstLine = text.trim().split("\n")[0] ?? "";
+	return firstLine
+		.toLowerCase()
+		.replace(/[^a-z0-9]+/g, "-")
+		.replace(/^-+|-+$/g, "")
+		.slice(0, 40)
+		.replace(/-+$/g, "");
 }
 
 /**
@@ -1057,11 +1144,17 @@ export async function runGlobalAutoWorkCycle(
 	);
 
 	// Run the cycle for the winning workspace, sharing the already-fetched usage.
+	// This is the production entry point (scheduler + manual trigger), so unless
+	// a caller already injected its own `generateBranchSlug` (e.g. a test), wire
+	// in the real LLM-backed generator using the same global model.
 	const cachedUsage = usage;
 	return runAutoWorkCycle(winner.workspaceCwd, bridge, {
 		...options,
 		now: () => now,
 		getSubscriptionUsage: () => Promise.resolve(cachedUsage),
+		generateBranchSlug:
+			options.generateBranchSlug ??
+			((task) => generateBranchSlugWithModel(bridge, winner.workspaceCwd, task, options.taskSelectionModel ?? null)),
 	});
 }
 

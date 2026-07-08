@@ -188,7 +188,7 @@ export class InProcessAgentBridge implements AgentBridge {
 			// Skip eval-tool Python warmup on session create. On Windows this otherwise
 			// flashes a python.exe console window each turn-zero; on demand spawn is fine.
 			skipPythonPreflight: true,
-			systemPrompt: (defaults) => [getEffectivePrelude(), ...defaults],
+			systemPrompt: (defaults) => [opts.systemPromptOverride ?? getEffectivePrelude(), ...defaults],
 			// Tell the SDK this session has a UI — gates the `ask` tool registration
 			// and any extension that calls `ctx.ui.*`. The actual ExtensionUIContext
 			// is installed via `setToolUIContext(...)` below.

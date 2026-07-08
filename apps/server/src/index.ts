@@ -26,6 +26,7 @@ import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-coding-agent/mode
 import { SkillsService } from "./skills-service.ts";
 import { startSkillsWatcher } from "./skills-watcher.ts";
 import { KbService, resolveKbRoot } from "./kb-service.ts";
+import { seedKbTemplates } from "./kb-templates.ts";
 import { startKbWatcher } from "./kb-watcher.ts";
 import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import { KbProtocolHandler } from "./kb-protocol.ts";
@@ -93,6 +94,22 @@ async function main(): Promise<void> {
 	// is safe on every boot. Disable with OMP_DECK_INSTALL_STARTER_SKILLS=0.
 	await installStarterSkills();
 	await installStarterExtensions();
+
+	// Seed README + kb/system/*.md + kb/rules/*.md templates at the resolved
+	// KB root. Idempotent — never overwrites an existing file — so a fresh
+	// bootstrap and an upgrade of an existing install both end up with every
+	// template file present, not just users who visit the onboarding wizard.
+	// Disable with OMP_DECK_SEED_KB_TEMPLATES=0.
+	if (process.env.OMP_DECK_SEED_KB_TEMPLATES !== "0") {
+		try {
+			const seeded = seedKbTemplates(resolveKbRoot());
+			if (seeded.created.length > 0) {
+				log.info(`seeded kb templates: ${seeded.created.join(", ")}`);
+			}
+		} catch (err) {
+			log.warn(`kb template seeding failed`, err);
+		}
+	}
 
 	// Register the default browser notification channel. It broadcasts a
 	// `notification` ServerFrame to every connected web client. Future channels
