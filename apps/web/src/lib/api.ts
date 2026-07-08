@@ -114,10 +114,10 @@ export const api = {
 	listWorkspacePreferences(): Promise<ListWorkspacePreferencesResponse> {
 		return request<ListWorkspacePreferencesResponse>("/workspace-preferences");
 	},
-	setWorkspacePreference(cwd: string, model: ModelRef | null): Promise<WorkspacePreference> {
+	setWorkspacePreference(cwd: string, model: ModelRef | null, thinking?: string | null): Promise<WorkspacePreference> {
 		return request<WorkspacePreference>(`/workspace-preferences?cwd=${encodeURIComponent(cwd)}`, {
 			method: "PUT",
-			body: JSON.stringify({ model }),
+			body: JSON.stringify({ model, ...(thinking !== undefined ? { thinking } : {}) }),
 		});
 	},
 	getAutoWorkConfig(cwd: string): Promise<AutoWorkConfig> {

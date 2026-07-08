@@ -91,7 +91,7 @@ export function buildRouter(
 		const known = new Set<string>([config.defaultCwd, ...config.extraWorkspaces]);
 		for (const cwd of counts.keys()) known.add(cwd);
 
-		const preferenceByCwd = new Map(listWorkspacePreferences().map((p) => [p.cwd, p.model]));
+		const preferenceByCwd = new Map(listWorkspacePreferences().map((p) => [p.cwd, p]));
 
 		const workspaces: WorkspaceEntry[] = Array.from(known)
 			.map((cwd) => {
@@ -100,8 +100,9 @@ export function buildRouter(
 					label: deriveLabel(cwd),
 					sessionCount: counts.get(cwd) ?? 0,
 				};
-				const defaultModel = preferenceByCwd.get(cwd);
-				if (defaultModel) entry.defaultModel = defaultModel;
+				const pref = preferenceByCwd.get(cwd);
+				if (pref?.model) entry.defaultModel = pref.model;
+				if (pref?.thinking) entry.defaultThinking = pref.thinking;
 				return entry;
 			})
 			.sort((a, b) => b.sessionCount - a.sessionCount || a.label.localeCompare(b.label));
@@ -139,8 +140,14 @@ export function buildRouter(
 			const invalid = await validateModelRef(bridge, body.model);
 			if (invalid) return c.json({ error: invalid }, 400);
 		}
+		// Validate thinking level when provided and not null.
+		const rawThinking = body.thinking;
+		const VALID_THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "auto"] as const;
+		if (rawThinking !== undefined && rawThinking !== null && !(VALID_THINKING_LEVELS as readonly string[]).includes(rawThinking)) {
+			return c.json({ error: `invalid thinking level: ${rawThinking}` }, 400);
+		}
 		try {
-			const preference = setWorkspacePreference(cwd, body.model);
+			const preference = setWorkspacePreference(cwd, body.model, rawThinking);
 			return c.json(preference);
 		} catch (err) {
 			log.error(`setWorkspacePreference failed`, err);
@@ -217,8 +224,12 @@ export function buildRouter(
 		// (T-42) > undefined (SDK/OMP_MODEL picks its own default). Only when
 		// creating fresh — resume never takes a model.
 		let resolvedModel: ModelRef | undefined;
+		let resolvedThinking: string | undefined;
 		if (!body.resumeFromPath) {
-			resolvedModel = body.model ?? getWorkspacePreference(cwd)?.model;
+			const workspacePref = getWorkspacePreference(cwd);
+			resolvedModel = body.model ?? workspacePref?.model;
+			// Thinking: explicit request > workspace default > undefined.
+			resolvedThinking = (body.thinking ?? workspacePref?.thinking) ?? undefined;
 			if (resolvedModel) {
 				const invalid = await validateModelRef(bridge, resolvedModel);
 				if (invalid) return c.json({ error: invalid }, 400);
@@ -233,6 +244,7 @@ export function buildRouter(
 						...(resolvedModel ? { model: resolvedModel } : {}),
 						...(body.planMode ? { planMode: true } : {}),
 						...(body.suppressAutoStart ? { suppressAutoStart: true } : {}),
+						...(resolvedThinking ? { thinking: resolvedThinking } : {}),
 					});
 			const resp: CreateSessionResponse = {
 				sessionId: handle.sessionId,

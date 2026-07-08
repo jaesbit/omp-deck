@@ -100,6 +100,8 @@ export interface CreateSessionOpts {
 	 *  any auto-start prompt is queued. */
 	planMode?: boolean;
 	suppressAutoStart?: boolean;
+	/** Thinking level forwarded to the SDK's `createAgentSession` (T-73). */
+	thinking?: string;
 }
 
 export interface ResumeSessionOpts {

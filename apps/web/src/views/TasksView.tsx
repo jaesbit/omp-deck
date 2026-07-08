@@ -308,6 +308,7 @@ export function TasksView() {
 			model: opts.model,
 			planMode: opts.planMode,
 			suppressAutoStart: true,
+			...(opts.thinking ? { thinking: opts.thinking } : {}),
 		});
 		const message =
 			draft === "full"
