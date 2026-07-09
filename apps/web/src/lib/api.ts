@@ -156,6 +156,12 @@ export const api = {
 		const qs = params.toString();
 		return request<ListAutoWorkRunsResponse>(`/auto-work/runs${qs ? `?${qs}` : ""}`);
 	},
+	retryAutoWorkRunPr(runId: string): Promise<{ number: number; url: string }> {
+		return request<{ number: number; url: string }>(
+			`/auto-work/runs/${encodeURIComponent(runId)}/create-pr`,
+			{ method: "POST" },
+		);
+	},
 	triggerAutoWork(): Promise<AutoWorkCycleResult> {
 		return request<AutoWorkCycleResult>(`/auto-work/trigger`, { method: "POST" });
 	},

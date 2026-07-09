@@ -95,6 +95,18 @@ export function completeAutoWorkRun(
 		);
 }
 
+/** Look up a single run by its id. Returns undefined when not found. */
+export function getAutoWorkRun(runId: string): AutoWorkRun | undefined {
+	const row = getDb()
+		.query<RunRow, [string]>(
+			`SELECT id, task_id, task_priority, session_id, worktree_path, started_at, completed_at,
+			        status, input_tokens, output_tokens, pct_consumed, failure_reason
+			 FROM auto_work_runs WHERE id = ?`,
+		)
+		.get(runId) as RunRow | null;
+	return row ? rowToRun(row) : undefined;
+}
+
 /** List runs, most recent first, with optional filters. */
 export function listAutoWorkRuns(filter: {
 	limit?: number;

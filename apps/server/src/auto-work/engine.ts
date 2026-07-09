@@ -608,7 +608,8 @@ async function settleAutoWorkRun(params: {
 		prNumber = pr.number;
 		log.info(`run ${runId}: opened PR #${pr.number} (${pr.url}) for T-${task.displayId}`);
 	} catch (err) {
-		prNote = "PR creation failed — open manually";
+		const errMsg = (err instanceof Error ? err.message : String(err)).split("\n")[0].trim().slice(0, 120);
+		prNote = `PR creation failed — open manually (${errMsg})`;
 		log.error(`run ${runId}: gh pr create failed for T-${task.displayId}`, err);
 	}
 
@@ -1067,7 +1068,7 @@ async function resolveDefaultBranch(repoCwd: string): Promise<string> {
  * The base branch is resolved dynamically from the remote rather than
  * hardcoded, so repos whose default branch is not `main` work correctly.
  */
-async function createPullRequestViaGh(params: CreatePullRequestParams): Promise<CreatePullRequestResult> {
+export async function createPullRequestViaGh(params: CreatePullRequestParams): Promise<CreatePullRequestResult> {
 	const baseBranch = await resolveDefaultBranch(params.cwd);
 	const proc = Bun.spawn(
 		["gh", "pr", "create", "--base", baseBranch, "--title", params.title, "--body", params.body],
