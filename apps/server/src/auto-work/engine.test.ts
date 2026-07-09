@@ -25,10 +25,12 @@ import { createTask, getTask, moveTask } from "../db/tasks.ts";
 import { BRANCH_NAMING_RULES_BODY } from "../kb-templates.ts";
 import type { AutoWorkNotificationEvent } from "./notify.ts";
 import {
+	appendAgentHistoryEntry,
 	checkAutoWorkPreflight,
 	classifyRunningAutoWorkRun,
 	costFitsAutoWorkBudget,
 	decideSqueezeTiming,
+	extractAgentHistory,
 	generateBranchSlugWithModel,
 	reconcileInactiveAutoWorkRuns,
 	resolveAutoWorkModel,
@@ -1084,6 +1086,70 @@ describe("generateBranchSlugWithModel", () => {
 	});
 });
 
+describe("extractAgentHistory", () => {
+	test("returns null when body has no Agent History section", () => {
+		expect(extractAgentHistory("## Why\nsome body")).toBeNull();
+		expect(extractAgentHistory("")).toBeNull();
+	});
+
+	test("returns null when section is present but empty", () => {
+		expect(extractAgentHistory("## Agent History\n\n")).toBeNull();
+		expect(extractAgentHistory("## Agent History")).toBeNull();
+	});
+
+	test("extracts content below the Agent History heading", () => {
+		const body = "## Why\nbody\n\n## Agent History\n\n### 2026-01-01T00:00:00.000Z — run r1\nDid X.";
+		expect(extractAgentHistory(body)).toBe("### 2026-01-01T00:00:00.000Z — run r1\nDid X.");
+	});
+
+	test("stops extraction at the next same-level heading", () => {
+		const body = "## Agent History\n\n### entry\nwork\n\n## After Section\ncontent";
+		const result = extractAgentHistory(body);
+		expect(result).toContain("### entry");
+		expect(result).not.toContain("## After Section");
+	});
+
+	test("returns multiple entries when they are all present", () => {
+		const body = "## Agent History\n\n### ts1 — run r1\nFirst.\n\n### ts2 — run r2\nSecond.";
+		const result = extractAgentHistory(body);
+		expect(result).toContain("### ts1 — run r1");
+		expect(result).toContain("### ts2 — run r2");
+	});
+});
+
+describe("appendAgentHistoryEntry", () => {
+	test("creates the Agent History section at the end when absent", () => {
+		const result = appendAgentHistoryEntry("## Why\nbody", "run_1", "2026-01-01T00:00:00.000Z", "Done.");
+		expect(result).toContain("## Agent History");
+		expect(result).toContain("### 2026-01-01T00:00:00.000Z — run run_1\nDone.");
+		// Original body intact
+		expect(result).toContain("## Why\nbody");
+	});
+
+	test("appends a new entry when Agent History section already exists", () => {
+		const base = "## Why\nbody\n\n## Agent History\n\n### ts1 — run r1\nFirst.";
+		const result = appendAgentHistoryEntry(base, "r2", "ts2", "Second.");
+		expect(result).toContain("### ts1 — run r1\nFirst.");
+		expect(result).toContain("### ts2 — run r2\nSecond.");
+		// Original human-written sections are untouched
+		expect(result).toContain("## Why\nbody");
+	});
+
+	test("preserves all other sections unchanged", () => {
+		const body = "## Why\nreason\n\n## Acceptance\ncriteria";
+		const result = appendAgentHistoryEntry(body, "r1", "ts", "Summary.");
+		expect(result).toContain("## Why\nreason");
+		expect(result).toContain("## Acceptance\ncriteria");
+	});
+
+	test("does not duplicate the heading when appending to an existing section", () => {
+		const base = "## Why\nbody\n\n## Agent History\n\n### ts1 — run r1\nFirst.";
+		const result = appendAgentHistoryEntry(base, "r2", "ts2", "Second.");
+		const headingCount = result.split("## Agent History").length - 1;
+		expect(headingCount).toBe(1);
+	});
+});
+
 // Stubs `gh pr create` for every `runAutoWorkCycle` test that reaches the
 // success path (T-66) — a test must NEVER let the real default run, since
 // that would shell out to `gh` and attempt to open an actual GitHub PR.
@@ -1493,6 +1559,91 @@ describe("runAutoWorkCycle", () => {
 		expect(createSessionCalls).toEqual([{ cwd: repoCwd, suppressAutoStart: true }]);
 	});
 
+
+	test("appends an Agent History entry to the task body after a completed run", async () => {
+		setAutoWorkConfig(repoCwd, { ...DEFAULT_AUTO_WORK_VALUES, enabled: true });
+		const task = createTask({ title: "History on completion", cwd: repoCwd, priority: "P5", autoWork: true });
+
+		const handle = new FakeSessionHandle("sess_hist_complete", 10);
+		const result = await runAutoWorkCycle(repoCwd, fakeBridge(handle), {
+			getSubscriptionUsage: async () => ({ available: true, weeklyPct: 5 }),
+			getDeckBaseUrl: () => "https://deck.example.com",
+			createPullRequest: stubCreatePullRequest,
+		});
+
+		expect(result.outcome).toBe("completed");
+		if (result.outcome !== "completed") throw new Error("expected completed");
+		const updated = getTask(task.id);
+		expect(updated?.body).toContain("## Agent History");
+		expect(updated?.body).toContain(result.runId);
+		expect(updated?.body).toContain("Session completed.");
+		// Human-visible run note must still be present
+		expect(updated?.body).toContain("**Auto Work**");
+	});
+
+	test("appends an Agent History entry to the task body after a failed run", async () => {
+		setAutoWorkConfig(repoCwd, { ...DEFAULT_AUTO_WORK_VALUES, enabled: true });
+		const task = createTask({ title: "History on failure", cwd: repoCwd, priority: "P5", autoWork: true });
+		const handle = new FakeSessionHandle("sess_hist_fail", null);
+		const cycle = runAutoWorkCycle(repoCwd, fakeBridge(handle), {
+			getSubscriptionUsage: async () => ({ available: true, weeklyPct: 5 }),
+			createPullRequest: async () => { throw new Error("should not be called"); },
+		});
+		await handle.subscriptionStarted;
+		handle.emit({ type: "turn_end", message: { stopReason: "aborted" } });
+		const result = await cycle;
+
+		expect(result.outcome).toBe("failed");
+		if (result.outcome !== "failed") throw new Error("expected failed");
+		const updated = getTask(task.id);
+		expect(updated?.body).toContain("## Agent History");
+		expect(updated?.body).toContain(result.runId);
+		expect(updated?.body).toContain("Failed:");
+	});
+
+	test("injects prior Agent History into the opening session prompt", async () => {
+		setAutoWorkConfig(repoCwd, { ...DEFAULT_AUTO_WORK_VALUES, enabled: true });
+		createTask({
+			title: "Task with prior history",
+			cwd: repoCwd,
+			priority: "P5",
+			autoWork: true,
+			body: "## Why\nThis needs doing.\n\n## Agent History\n\n### 2026-01-01T00:00:00.000Z — run awrun_prior\nPrevious run did X.",
+		});
+
+		const handle = new FakeSessionHandle("sess_inject_hist", 10);
+		const result = await runAutoWorkCycle(repoCwd, fakeBridge(handle), {
+			getSubscriptionUsage: async () => ({ available: true, weeklyPct: 5 }),
+			createPullRequest: stubCreatePullRequest,
+		});
+
+		expect(result.outcome).toBe("completed");
+		expect(handle.prompts).toHaveLength(1);
+		expect(handle.prompts[0]).toContain("Agent history");
+		expect(handle.prompts[0]).toContain("Previous run did X.");
+	});
+
+	test("does not inject a history block when the task has no prior Agent History", async () => {
+		setAutoWorkConfig(repoCwd, { ...DEFAULT_AUTO_WORK_VALUES, enabled: true });
+		createTask({
+			title: "Fresh task no history",
+			cwd: repoCwd,
+			priority: "P5",
+			autoWork: true,
+			body: "## Why\nNeeds fresh work.",
+		});
+
+		const handle = new FakeSessionHandle("sess_no_hist", 10);
+		const result = await runAutoWorkCycle(repoCwd, fakeBridge(handle), {
+			getSubscriptionUsage: async () => ({ available: true, weeklyPct: 5 }),
+			createPullRequest: stubCreatePullRequest,
+		});
+
+		expect(result.outcome).toBe("completed");
+		expect(handle.prompts).toHaveLength(1);
+		expect(handle.prompts[0]).not.toContain("Agent history");
+		expect(handle.prompts[0]).not.toContain("Agent History");
+	});
 });
 
 describe("runGlobalAutoWorkCycle", () => {
