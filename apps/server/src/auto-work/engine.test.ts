@@ -689,7 +689,7 @@ function fakeBridge(
 }
 
 describe("waitForAutoWorkSessionTerminal", () => {
-	for (const stopReason of ["aborted", "error"]) {
+	for (const stopReason of ["aborted", "error", "max_tokens", "length", "refusal"]) {
 		test(`classifies a turn ending with stopReason ${stopReason} as failed`, async () => {
 			const handle = new FakeSessionHandle("sess_terminal", null);
 			const terminal = waitForAutoWorkSessionTerminal(handle as unknown as SessionHandle, 60_000);

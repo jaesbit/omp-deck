@@ -612,6 +612,29 @@ async function settleAutoWorkRun(params: {
 		const errMsg = (err instanceof Error ? err.message : String(err)).split("\n")[0].trim().slice(0, 120);
 		prNote = `PR creation failed — open manually (${errMsg})`;
 		log.error(`run ${runId}: gh pr create failed for T-${task.displayId}`, err);
+
+		// When gh pr create fails with a "no commits" pattern, the agent
+		// likely produced no work — verify and treat as failure, not completed.
+		// Other errors (auth, rate limit, network) pass through to the existing
+		// fallback path that still moves the task to validate.
+		if (/no commit|must be on a branch|empty (range|commit)/i.test(errMsg)) {
+			const hasCommits = await branchHasAgentCommits(worktreePath);
+			if (!hasCommits) {
+				const failureReason = `agent produced no commits (PR: ${errMsg})`;
+				completeAutoWorkRun(runId, { status: "failed", failureReason, inputTokens, outputTokens, pctConsumed });
+				const backlogState = findStateByName("backlog");
+				if (backlogState) moveTask(task.id, backlogState.id, 0);
+				broadcastBus.broadcast({ type: "tasks_changed" });
+				broadcastBus.broadcast({ type: "auto_work_runs_changed" });
+				updateTask(task.id, {
+					body: `${task.body}\n\n---\n**Auto Work aborted** — run \`${runId}\` ${failureReason}. Session: \`${session.sessionId}\`, worktree: \`${worktreePath}\`.`,
+				});
+				broadcastBus.broadcast({ type: "tasks_changed" });
+				log.warn(`run ${runId} failed (no agent commits); T-${task.displayId} moved to backlog (${failureReason})`);
+				await notify({ kind: "task_failed", displayId: task.displayId, reason: failureReason });
+				return { outcome: "failed", taskId: task.id, runId, sessionId: session.sessionId, worktreePath, failureReason };
+			}
+		}
 	}
 
 	updateTask(task.id, {
@@ -716,6 +739,29 @@ async function removeAutoWorkWorktree(repoCwd: string, worktreePath: string): Pr
 		log.warn(`git worktree remove --force ${worktreePath} failed (exit ${exitCode}): ${stderr.trim()}`);
 	}
 }
+
+/**
+ * Returns `true` when the worktree branch has at least one commit beyond the
+ * remote base branch — i.e. the agent produced work. Used as a safety gate
+ * when PR creation fails: if there are no unique commits on the branch, the
+ * run is a failure, not a successful completion with a PR glitch.
+ */
+async function branchHasAgentCommits(worktreePath: string): Promise<boolean> {
+	try {
+		const baseBranch = await resolveDefaultBranch(worktreePath);
+		const proc = Bun.spawn(
+			["git", "rev-list", "--count", `origin/${baseBranch}..HEAD`],
+			{ cwd: worktreePath, stdin: "ignore", stdout: "pipe", stderr: "pipe", windowsHide: true },
+		);
+		const [stdout, exitCode] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
+		return exitCode === 0 && Number(stdout.trim()) > 0;
+	} catch {
+		// If we can't check (e.g. no origin remote), err on the side of
+		// assuming commits exist — a git error shouldn't tank a real run.
+		return true;
+	}
+}
+
 
 /**
  * The pre-flight step that distinguishes "another run is genuinely active"
