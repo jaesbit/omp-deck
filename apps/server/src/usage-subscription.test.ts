@@ -168,13 +168,23 @@ describe("fetchSubscriptionUsage", () => {
 		if (!result.available) expect(result.reason).toMatch(/ECONNREFUSED/);
 	});
 
-	test("uses fallback resetAt values when windows have no resetsAt", async () => {
+	test("uses fallback resetAt values when windows have no resetsAt — falls back to now+windowDurationMs, not now", async () => {
+		// makeReport creates a 5-hour window without a resetsAt timestamp.
+		// The fallback must be at least now + windowDurationMs in the future,
+		// not just the current time (which would misleadingly imply an immediate reset).
+		const before = Date.now();
 		const result = await fetchSubscriptionUsage(fetcher([makeReport(0.5)]));
 		expect(result.available).toBe(true);
 		if (!result.available) return;
+		// All reset timestamps must be valid ISO strings.
 		expect(() => new Date(result.sessionResetAt)).not.toThrow();
 		expect(() => new Date(result.weeklyResetAt)).not.toThrow();
 		expect(() => new Date(result.limits[0]!.resetAt)).not.toThrow();
+		// The fallback must be at or after before + windowDurationMs (5h) — strictly
+		// in the future relative to when the call started, not just the current time.
+		expect(Date.parse(result.sessionResetAt)).toBeGreaterThanOrEqual(before + FIVE_HOURS_MS);
+		expect(Date.parse(result.weeklyResetAt)).toBeGreaterThanOrEqual(before + FIVE_HOURS_MS);
+		expect(Date.parse(result.limits[0]!.resetAt)).toBeGreaterThanOrEqual(before + FIVE_HOURS_MS);
 	});
 });
 

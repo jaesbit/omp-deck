@@ -74,6 +74,8 @@ export interface AutoWorkPreflightInput {
 	now: Date;
 	/** Subscription usage % consumed so far this week, or `null` when unavailable. */
 	subscriptionPctUsed: number | null;
+	/** Subscription usage % consumed in the shortest (session) window, or `null` when unavailable. */
+	sessionPctUsed: number | null;
 	/** Auto-work runs already scoped to this workspace (any status — the check filters for `running`). */
 	activeRuns: AutoWorkRun[];
 }
@@ -86,7 +88,7 @@ export type AutoWorkPreflightResult = { ok: true } | { ok: false; reason: string
  * currently active for this workspace (mutex via `auto_work_runs`).
  */
 export function checkAutoWorkPreflight(input: AutoWorkPreflightInput): AutoWorkPreflightResult {
-	const { config, now, subscriptionPctUsed, activeRuns } = input;
+	const { config, now, subscriptionPctUsed, sessionPctUsed, activeRuns } = input;
 
 	if (!config.enabled) {
 		return { ok: false, reason: "auto-work is disabled for this workspace" };
@@ -109,6 +111,13 @@ export function checkAutoWorkPreflight(input: AutoWorkPreflightInput): AutoWorkP
 		return {
 			ok: false,
 			reason: `subscription usage (${subscriptionPctUsed.toFixed(1)}%) is at or above the weekly limit (${config.weeklyPctLimit}%)`,
+		};
+	}
+
+	if (sessionPctUsed !== null && sessionPctUsed >= 100) {
+		return {
+			ok: false,
+			reason: `session budget is fully exhausted (${sessionPctUsed.toFixed(1)}%) — waiting for session window to reset`,
 		};
 	}
 
@@ -317,7 +326,7 @@ export interface RunAutoWorkCycleOptions {
 	 */
 	notify?: (event: AutoWorkNotificationEvent) => Promise<void>;
 	/** Injectable for tests — defaults to the real cached subscription-usage lookup. */
-	getSubscriptionUsage?: () => Promise<{ available: boolean; weeklyPct?: number }>;
+	getSubscriptionUsage?: () => Promise<{ available: boolean; weeklyPct?: number; sessionPct?: number }>;
 	/** Injectable clock for tests — defaults to `new Date()`. */
 	now?: () => Date;
 	/**
@@ -381,6 +390,7 @@ export async function runAutoWorkCycle(
 	const usageLookup = options.getSubscriptionUsage ?? (() => getSubscriptionUsage());
 	const usage = await usageLookup();
 	const subscriptionPctUsed = usage.available && typeof usage.weeklyPct === "number" ? usage.weeklyPct : null;
+	const sessionPctUsed = usage.available && typeof usage.sessionPct === "number" ? usage.sessionPct : null;
 	const resolveDeckBaseUrl = options.getDeckBaseUrl ?? (() => getServerDeckBaseUrl(loadConfig()).deckBaseUrl);
 	const createPullRequest = options.createPullRequest ?? createPullRequestViaGh;
 	const notify = options.notify ?? sendAutoWorkNotification;
@@ -415,7 +425,7 @@ export async function runAutoWorkCycle(
 		activeRuns = activeRuns.filter((r) => r.id !== runningRun.id);
 	}
 
-	const preflight = checkAutoWorkPreflight({ config, now, subscriptionPctUsed, activeRuns });
+	const preflight = checkAutoWorkPreflight({ config, now, subscriptionPctUsed, sessionPctUsed, activeRuns });
 	if (!preflight.ok) {
 		log.info(`cycle skipped for ${cwd}: ${preflight.reason}`);
 		return { outcome: "skipped", reason: preflight.reason };
@@ -1269,6 +1279,7 @@ export async function runGlobalAutoWorkCycle(
 	const usageLookup = options.getSubscriptionUsage ?? (() => getSubscriptionUsage());
 	const usage = await usageLookup();
 	const subscriptionPctUsed = usage.available && typeof usage.weeklyPct === "number" ? usage.weeklyPct : null;
+	const sessionPctUsed = usage.available && typeof usage.sessionPct === "number" ? usage.sessionPct : null;
 
 	const allTasks = listTasks();
 	const backlogState = findStateByName("backlog");
@@ -1306,7 +1317,7 @@ export async function runGlobalAutoWorkCycle(
 			const task = tasksById.get(r.taskId);
 			return task?.cwd === cwd;
 		});
-		const preflight = checkAutoWorkPreflight({ config, now, subscriptionPctUsed, activeRuns });
+		const preflight = checkAutoWorkPreflight({ config, now, subscriptionPctUsed, sessionPctUsed, activeRuns });
 		if (!preflight.ok) {
 			log.debug(`global cycle: ${cwd} skipped (${preflight.reason})`);
 			continue;

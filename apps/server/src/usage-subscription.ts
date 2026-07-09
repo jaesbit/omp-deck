@@ -181,7 +181,10 @@ export async function fetchSubscriptionUsage(
 		const limits = allSorted.map((entry) => ({
 			label: entry.label,
 			pctUsed: Math.min(100, Math.max(0, entry.fraction * 100)),
-			resetAt: entry.resetsAt != null ? new Date(entry.resetsAt).toISOString() : new Date().toISOString(),
+			resetAt:
+				entry.resetsAt != null
+					? new Date(entry.resetsAt).toISOString()
+					: new Date(Date.now() + (entry.windowDurationMs ?? 0)).toISOString(),
 			...(entry.windowDurationMs != null ? { windowDurationMs: entry.windowDurationMs } : {}),
 		}));
 
@@ -191,7 +194,6 @@ export async function fetchSubscriptionUsage(
 			const db = b.windowDurationMs ?? Number.POSITIVE_INFINITY;
 			return da - db;
 		});
-		const now = new Date().toISOString();
 		const session = primarySorted[0];
 		const weekly = primarySorted[primarySorted.length - 1] ?? session;
 
@@ -199,9 +201,15 @@ export async function fetchSubscriptionUsage(
 			available: true,
 			limits,
 			sessionPct: session != null ? Math.min(100, Math.max(0, session.fraction * 100)) : 0,
-			sessionResetAt: session?.resetsAt != null ? new Date(session.resetsAt).toISOString() : now,
+			sessionResetAt:
+				session?.resetsAt != null
+					? new Date(session.resetsAt).toISOString()
+					: new Date(Date.now() + (session?.windowDurationMs ?? 0)).toISOString(),
 			weeklyPct: weekly != null ? Math.min(100, Math.max(0, weekly.fraction * 100)) : 0,
-			weeklyResetAt: weekly?.resetsAt != null ? new Date(weekly.resetsAt).toISOString() : now,
+			weeklyResetAt:
+				weekly?.resetsAt != null
+					? new Date(weekly.resetsAt).toISOString()
+					: new Date(Date.now() + (weekly?.windowDurationMs ?? 0)).toISOString(),
 		};
 	} catch (err) {
 		log.warn("failed to fetch subscription usage", err);

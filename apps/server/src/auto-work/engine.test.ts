@@ -86,6 +86,7 @@ describe("checkAutoWorkPreflight", () => {
 			config: baseConfig({ enabled: false }),
 			now: new Date("2026-01-01T12:00:00"),
 			subscriptionPctUsed: 10,
+			sessionPctUsed: null,
 			activeRuns: [],
 		});
 		expect(result).toEqual({ ok: false, reason: expect.stringContaining("disabled") });
@@ -96,6 +97,7 @@ describe("checkAutoWorkPreflight", () => {
 			config: baseConfig({ timeWindows: [{ start: 9, end: 17 }] }),
 			now: new Date("2026-01-01T20:00:00"),
 			subscriptionPctUsed: 10,
+			sessionPctUsed: null,
 			activeRuns: [],
 		});
 		expect(result.ok).toBe(false);
@@ -108,12 +110,14 @@ describe("checkAutoWorkPreflight", () => {
 			config,
 			now: new Date("2026-01-01T09:00:00"),
 			subscriptionPctUsed: 10,
+			sessionPctUsed: null,
 			activeRuns: [],
 		});
 		const atClose = checkAutoWorkPreflight({
 			config,
 			now: new Date("2026-01-01T17:00:00"),
 			subscriptionPctUsed: 10,
+			sessionPctUsed: null,
 			activeRuns: [],
 		});
 		expect(atOpen.ok).toBe(true);
@@ -125,6 +129,7 @@ describe("checkAutoWorkPreflight", () => {
 			config: baseConfig(),
 			now: new Date("2026-01-01T12:00:00"),
 			subscriptionPctUsed: null,
+			sessionPctUsed: null,
 			activeRuns: [],
 		});
 		expect(result.ok).toBe(false);
@@ -136,6 +141,7 @@ describe("checkAutoWorkPreflight", () => {
 			config: baseConfig({ weeklyPctLimit: 80 }),
 			now: new Date("2026-01-01T12:00:00"),
 			subscriptionPctUsed: 80,
+			sessionPctUsed: null,
 			activeRuns: [],
 		});
 		expect(result.ok).toBe(false);
@@ -147,6 +153,7 @@ describe("checkAutoWorkPreflight", () => {
 			config: baseConfig(),
 			now: new Date("2026-01-01T12:00:00"),
 			subscriptionPctUsed: 10,
+			sessionPctUsed: null,
 			activeRuns: [
 				{
 					id: "awrun_1",
@@ -173,6 +180,7 @@ describe("checkAutoWorkPreflight", () => {
 			config: baseConfig(),
 			now: new Date("2026-01-01T12:00:00"),
 			subscriptionPctUsed: 10,
+			sessionPctUsed: null,
 			activeRuns: [
 				{
 					id: "awrun_1",
@@ -198,6 +206,41 @@ describe("checkAutoWorkPreflight", () => {
 			config: baseConfig(),
 			now: new Date("2026-01-01T12:00:00"),
 			subscriptionPctUsed: 10,
+			sessionPctUsed: 50,
+			activeRuns: [],
+		});
+		expect(result).toEqual({ ok: true });
+	});
+
+	test("rejects when session budget is fully exhausted (100%)", () => {
+		const result = checkAutoWorkPreflight({
+			config: baseConfig({ weeklyPctLimit: 80 }),
+			now: new Date("2026-01-01T12:00:00"),
+			subscriptionPctUsed: 20,
+			sessionPctUsed: 100,
+			activeRuns: [],
+		});
+		expect(result.ok).toBe(false);
+		if (!result.ok) expect(result.reason).toContain("session budget is fully exhausted");
+	});
+
+	test("allows a non-exhausted session even when close to full", () => {
+		const result = checkAutoWorkPreflight({
+			config: baseConfig({ weeklyPctLimit: 80 }),
+			now: new Date("2026-01-01T12:00:00"),
+			subscriptionPctUsed: 20,
+			sessionPctUsed: 99,
+			activeRuns: [],
+		});
+		expect(result).toEqual({ ok: true });
+	});
+
+	test("ignores session exhaustion when sessionPctUsed is null (unavailable)", () => {
+		const result = checkAutoWorkPreflight({
+			config: baseConfig(),
+			now: new Date("2026-01-01T12:00:00"),
+			subscriptionPctUsed: 20,
+			sessionPctUsed: null,
 			activeRuns: [],
 		});
 		expect(result).toEqual({ ok: true });
@@ -1639,6 +1682,29 @@ describe("runAutoWorkCycle", () => {
 		expect(result.outcome).toBe("skipped");
 		if (result.outcome !== "skipped") throw new Error("expected skipped");
 		expect(result.reason).toContain("none fit");
+	});
+
+	test("skips when session budget is fully exhausted (100%) and does not start a session or run record", async () => {
+		setAutoWorkConfig(repoCwd, { ...DEFAULT_AUTO_WORK_VALUES, enabled: true });
+		const task = createTask({ title: "Session exhausted task", cwd: repoCwd, priority: "P5", autoWork: true });
+
+		const handle = new FakeSessionHandle("sess_session_exhausted", null);
+		let prCreateCalls = 0;
+		const result = await runAutoWorkCycle(repoCwd, fakeBridge(handle), {
+			getSubscriptionUsage: async () => ({ available: true, weeklyPct: 20, sessionPct: 100 }),
+			createPullRequest: async () => {
+				prCreateCalls++;
+				return stubCreatePullRequest();
+			},
+		});
+
+		expect(result.outcome).toBe("skipped");
+		if (result.outcome !== "skipped") throw new Error("expected skipped");
+		expect(result.reason).toContain("session budget is fully exhausted");
+		// Task must remain in backlog — no session started, no run record created.
+		expect(getTask(task.id)?.stateId).toBe("s_backlog");
+		expect(listAutoWorkRuns({ taskId: task.id })).toHaveLength(0);
+		expect(prCreateCalls).toBe(0);
 	});
 	test("reuses an existing registered worktree instead of re-running git worktree add", async () => {
 		setAutoWorkConfig(repoCwd, { ...DEFAULT_AUTO_WORK_VALUES, enabled: true });
