@@ -362,6 +362,7 @@ export async function runAutoWorkCycle(
 			resolveDeckBaseUrl,
 			createPullRequest,
 			notify,
+			usageLookup,
 		});
 		if (resumed) return resumed;
 		activeRuns = activeRuns.filter((r) => r.id !== runningRun.id);
@@ -470,6 +471,8 @@ export async function runAutoWorkCycle(
 		resolveDeckBaseUrl,
 		createPullRequest,
 		notify,
+		usageLookup,
+		startPct: subscriptionPctUsed,
 	});
 }
 
@@ -511,6 +514,10 @@ function finalizeAutoWorkRun(params: {
 	resolveDeckBaseUrl: () => string;
 	createPullRequest: (params: CreatePullRequestParams) => Promise<CreatePullRequestResult>;
 	notify: (event: AutoWorkNotificationEvent) => Promise<void>;
+	/** T-80: used to compute pctConsumed delta after the run closes. */
+	usageLookup: () => Promise<{ available: boolean; weeklyPct?: number }>;
+	/** T-80: subscription weeklyPct at the moment the run started; null when unavailable. */
+	startPct: number | null;
 }): Promise<AutoWorkCycleResult> {
 	activeRunIds.add(params.runId);
 	return settleAutoWorkRun(params).finally(() => activeRunIds.delete(params.runId));
@@ -526,10 +533,33 @@ async function settleAutoWorkRun(params: {
 	resolveDeckBaseUrl: () => string;
 	createPullRequest: (params: CreatePullRequestParams) => Promise<CreatePullRequestResult>;
 	notify: (event: AutoWorkNotificationEvent) => Promise<void>;
+	usageLookup: () => Promise<{ available: boolean; weeklyPct?: number }>;
+	startPct: number | null;
 }): Promise<AutoWorkCycleResult> {
-	const { runId, task, session, worktreePath, timeoutMinutes, startTurn, resolveDeckBaseUrl, createPullRequest, notify } =
+	const { runId, task, session, worktreePath, timeoutMinutes, startTurn, resolveDeckBaseUrl, createPullRequest, notify, usageLookup, startPct } =
 		params;
 	const terminal = await waitForAutoWorkSessionTerminal(session, timeoutMinutes * 60_000, startTurn);
+
+	// Capture real token usage for this run (T-80). Both calls run concurrently;
+	// failures are logged and default to null — missing usage is never fatal.
+	const [snapshotResult, endUsageResult] = await Promise.allSettled([
+		Promise.resolve(session.snapshot()),
+		usageLookup(),
+	]);
+	if (snapshotResult.status === "rejected")
+		log.warn(`run ${runId}: snapshot() failed, tokens will be null`, snapshotResult.reason);
+	if (endUsageResult.status === "rejected")
+		log.warn(`run ${runId}: usageLookup() failed, pctConsumed will be null`, endUsageResult.reason);
+	const usageRollup = snapshotResult.status === "fulfilled" ? snapshotResult.value.usageRollup : undefined;
+	const inputTokens: number | null = usageRollup?.input ?? null;
+	const outputTokens: number | null = usageRollup?.output ?? null;
+	const endPct =
+		endUsageResult.status === "fulfilled" &&
+		endUsageResult.value.available &&
+		typeof endUsageResult.value.weeklyPct === "number"
+			? endUsageResult.value.weeklyPct
+			: null;
+	const pctConsumed: number | null = startPct !== null && endPct !== null ? endPct - startPct : null;
 
 	if (terminal !== "completed") {
 		const timedOut = terminal === "timed_out";
@@ -541,9 +571,16 @@ async function settleAutoWorkRun(params: {
 			// otherwise the agent keeps working (and spending) after the run
 			// was already written off, and may even finish the task.
 			await session.abort().catch((err) => log.warn(`run ${runId}: abort after timeout failed`, err));
-			completeAutoWorkRun(runId, { status: "timed_out", failureReason });
+			completeAutoWorkRun(runId, { status: "timed_out", failureReason, inputTokens, outputTokens, pctConsumed });
 			broadcastBus.broadcast({ type: "auto_work_runs_changed" });
-		} else failAutoWorkRun(runId, task.id, failureReason);
+		} else {
+			// Inline failAutoWorkRun so we can pass captured token usage (T-80).
+			completeAutoWorkRun(runId, { status: "failed", failureReason, inputTokens, outputTokens, pctConsumed });
+			const backlogState = findStateByName("backlog");
+			if (backlogState) moveTask(task.id, backlogState.id, 0);
+			broadcastBus.broadcast({ type: "tasks_changed" });
+			broadcastBus.broadcast({ type: "auto_work_runs_changed" });
+		}
 		const terminalState = findStateByName(timedOut ? "blocked" : "backlog");
 		if (terminalState) moveTask(task.id, terminalState.id, 0);
 		updateTask(task.id, {
@@ -583,7 +620,7 @@ async function settleAutoWorkRun(params: {
 	if (validateState) moveTask(task.id, validateState.id, 0);
 	else log.error(`run ${runId}: "validate" task state not found — T-${task.displayId} left in its current state`);
 
-	completeAutoWorkRun(runId, { status: "completed" });
+	completeAutoWorkRun(runId, { status: "completed", inputTokens, outputTokens, pctConsumed });
 	broadcastBus.broadcast({ type: "tasks_changed" });
 	broadcastBus.broadcast({ type: "auto_work_runs_changed" });
 	log.info(`run ${runId} completed for T-${task.displayId} — moved to validate`);
@@ -701,6 +738,7 @@ async function resumeOrRetireAutoWorkRun(
 		resolveDeckBaseUrl: () => string;
 		createPullRequest: (params: CreatePullRequestParams) => Promise<CreatePullRequestResult>;
 		notify: (event: AutoWorkNotificationEvent) => Promise<void>;
+		usageLookup: () => Promise<{ available: boolean; weeklyPct?: number }>;
 	},
 ): Promise<AutoWorkCycleResult | undefined> {
 	const handle = await resolveRunningSessionHandle(bridge, run);
@@ -753,6 +791,8 @@ async function resumeOrRetireAutoWorkRun(
 		resolveDeckBaseUrl: completion.resolveDeckBaseUrl,
 		createPullRequest: completion.createPullRequest,
 		notify: completion.notify,
+		usageLookup: completion.usageLookup,
+		startPct: null, // resumed run: no meaningful pre-session baseline available
 	});
 }
 
