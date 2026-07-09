@@ -5,7 +5,7 @@
  *
  * Add typed wrappers around `getServerSetting` / `setServerSetting` as new
  * global settings show up rather than growing ad-hoc tables per setting.
- * Current consumers: `deckBaseUrl` (T-61), `taskRewriteModel` (T-76).
+ * Current consumers: `deckBaseUrl` (T-61), `taskRewriteModel` (T-76), `internalTaskModel` (T-78).
  */
 
 import type { Config } from "../config.ts";
@@ -92,4 +92,33 @@ export function setTaskRewriteModel(model: ModelRefRaw | null): ModelRefRaw | nu
 		setServerSetting(TASK_REWRITE_MODEL_KEY, JSON.stringify(model));
 	}
 	return getTaskRewriteModel();
+}
+
+const INTERNAL_TASK_MODEL_KEY = "internalTaskModel";
+
+/**
+ * Model used for internal one-shot agent jobs the user never sees directly —
+ * first consumer is server-side session-title generation (T-78). Scoped
+ * generically (not `sessionTitleModel`) so future internal jobs can reuse
+ * the same setting without a migration. `null` means the feature is off:
+ * no internal job runs until an operator opts in via Settings.
+ */
+export function getInternalTaskModel(): ModelRefRaw | null {
+	const stored = getServerSetting(INTERNAL_TASK_MODEL_KEY);
+	if (!stored) return null;
+	try {
+		return JSON.parse(stored) as ModelRefRaw;
+	} catch {
+		return null;
+	}
+}
+
+/** Pass `null` to clear the override (disables internal-task-model jobs). */
+export function setInternalTaskModel(model: ModelRefRaw | null): ModelRefRaw | null {
+	if (model === null) {
+		deleteServerSetting(INTERNAL_TASK_MODEL_KEY);
+	} else {
+		setServerSetting(INTERNAL_TASK_MODEL_KEY, JSON.stringify(model));
+	}
+	return getInternalTaskModel();
 }

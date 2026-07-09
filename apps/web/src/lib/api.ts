@@ -7,6 +7,7 @@ import type {
 	CreateSessionRequest,
 	CreateSessionResponse,
 	DeckBaseUrlResponse,
+	InternalTaskModelResponse,
 	ListAutoWorkRunsResponse,
 	ListDirResponse,
 	ListFilePathsResponse,
@@ -23,6 +24,7 @@ import type {
 	SetAutoWorkConfigRequest,
 	SetAutoWorkGlobalConfigRequest,
 	SetDeckBaseUrlRequest,
+	SetInternalTaskModelRequest,
 	SetTaskRewriteModelRequest,
 	SubscriptionUsageResponse,
 	TaskPriority,
@@ -197,6 +199,15 @@ export const api = {
 		return request<TaskRewriteModelResponse>("/settings/task-rewrite-model", {
 			method: "PUT",
 			body: JSON.stringify({ model } satisfies SetTaskRewriteModelRequest),
+		});
+	},
+	getInternalTaskModel(): Promise<InternalTaskModelResponse> {
+		return request<InternalTaskModelResponse>("/settings/internal-task-model");
+	},
+	setInternalTaskModel(model: ModelRef | null): Promise<InternalTaskModelResponse> {
+		return request<InternalTaskModelResponse>("/settings/internal-task-model", {
+			method: "PUT",
+			body: JSON.stringify({ model } satisfies SetInternalTaskModelRequest),
 		});
 	},
 };

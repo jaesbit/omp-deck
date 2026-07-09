@@ -498,7 +498,7 @@ function deriveLabel(cwd: string): string {
  * Extract the text content of the most recent assistant message. Mirrors the
  * same logic in `auto-work/engine.ts` for the model-as-selector pattern.
  */
-function extractLatestAssistantText(messages: AgentMessageJson[]): string {
+export function extractLatestAssistantText(messages: AgentMessageJson[]): string {
 	for (let i = messages.length - 1; i >= 0; i--) {
 		const msg = messages[i]!;
 		if (msg.role !== "assistant") continue;
