@@ -22,6 +22,7 @@ import {
 	CircleDashed,
 	Clock,
 	ExternalLink,
+	GitPullRequest,
 	Play,
 	RefreshCw,
 	XCircle,
@@ -156,13 +157,16 @@ function RunRow({ run, task, selected, onSelect }: RunRowProps) {
 interface DetailPaneProps {
 	run: AutoWorkRun;
 	task: Task | undefined;
+	onRefresh: () => void;
 }
 
-function DetailPane({ run, task }: DetailPaneProps) {
+function DetailPane({ run, task, onRefresh }: DetailPaneProps) {
 	const navigate = useNavigate();
 	const watchSession = useStore((s) => s.watchSession);
 	const sessionData = useStore((s) => s.sessionsById[run.sessionId]);
 	const [elapsedStr, setElapsedStr] = useState(() => elapsed(run.startedAt, run.completedAt));
+	const [retrying, setRetrying] = useState(false);
+	const [retryError, setRetryError] = useState<string | undefined>();
 	const msgsEndRef = useRef<HTMLDivElement>(null);
 
 	// Retain this live session only while its detail pane is mounted.
@@ -293,6 +297,36 @@ function DetailPane({ run, task }: DetailPaneProps) {
 					</button>
 				</div>
 			</div>
+
+			{/* PR retry — shown for completed runs whose task body signals a failed PR */}
+			{run.status === "completed" && task?.body?.includes("PR creation failed") && (
+				<div className="border-b border-line px-4 py-2.5">
+					<div className="flex items-center justify-between gap-2">
+						<p className="text-xs text-ink-3">PR</p>
+						<button
+							type="button"
+							disabled={retrying}
+							onClick={() => {
+								setRetrying(true);
+								setRetryError(undefined);
+								api.retryAutoWorkRunPr(run.id)
+									.then(() => onRefresh())
+									.catch((e: unknown) => setRetryError(e instanceof Error ? e.message : String(e)))
+									.finally(() => setRetrying(false));
+							}}
+							className="inline-flex items-center gap-1.5 rounded bg-accent-soft/20 px-2.5 py-1 text-xs font-medium text-accent transition-colors hover:bg-accent-soft/40 disabled:pointer-events-none disabled:opacity-40"
+						>
+							{retrying
+								? <RefreshCw className="h-3 w-3 animate-spin" />
+								: <GitPullRequest className="h-3 w-3" />}
+							{retrying ? "Creating PR…" : "Retry PR creation"}
+						</button>
+					</div>
+					{retryError && (
+						<p className="mt-1 text-xs text-red-400">{retryError}</p>
+					)}
+				</div>
+			)}
 
 			{/* Live session transcript */}
 			<div className="flex min-h-0 flex-1 flex-col">
@@ -566,7 +600,7 @@ export function AutoWorkView() {
 			{/* Right: selected run detail. */}
 			<div className="min-w-0 flex-1 overflow-hidden">
 				{selectedRun ? (
-					<DetailPane run={selectedRun} task={taskMap[selectedRun.taskId]} />
+				<DetailPane run={selectedRun} task={taskMap[selectedRun.taskId]} onRefresh={refresh} />
 				) : (
 					<EmptyDetailPane />
 				)}

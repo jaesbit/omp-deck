@@ -6,6 +6,7 @@
  *   PUT  /auto-work/config?cwd=          replace full workspace config
  *   GET  /auto-work/runs?…               run history, filterable
  *   GET  /auto-work/cost-estimate?priority=
+ *   POST /auto-work/runs/:id/create-pr   retry PR creation for a completed run without one
  *
  * Global:
  *   GET  /auto-work/global-config        schedule interval, task-selection model
@@ -35,10 +36,13 @@ import type { Config } from "./config.ts";
 import { isCwdAllowed } from "./routes-fs.ts";
 import { getAutoWorkConfig, setAutoWorkConfig } from "./db/auto-work.ts";
 import { getAutoWorkGlobalConfig, setAutoWorkGlobalConfig } from "./db/auto-work-global.ts";
-import { getAutoWorkCostEstimate, listAutoWorkRuns } from "./db/auto-work-runs.ts";
+import { getAutoWorkCostEstimate, getAutoWorkRun, listAutoWorkRuns } from "./db/auto-work-runs.ts";
 import { getDeckBaseUrl as getServerDeckBaseUrl } from "./db/server-settings.ts";
-import { reconcileInactiveAutoWorkRuns, runGlobalAutoWorkCycle } from "./auto-work/engine.ts";
+import { getTask, updateTask } from "./db/tasks.ts";
+import { reconcileInactiveAutoWorkRuns, runGlobalAutoWorkCycle, createPullRequestViaGh } from "./auto-work/engine.ts";
 import type { RunAutoWorkCycleOptions } from "./auto-work/engine.ts";
+import { buildSessionUrl } from "./deck-links.ts";
+import { broadcastBus } from "./broadcast-bus.ts";
 import { getScheduleStatus, updateGlobalSchedule, recordManualTrigger } from "./auto-work/scheduler.ts";
 import { logger } from "./log.ts";
 import { getModelCatalogOverlay } from "./model-catalog-overlay.ts";
@@ -138,6 +142,52 @@ export function buildAutoWorkRouter(bridge: AgentBridge, config: Config, cycleOp
 		await reconcileInactiveAutoWorkRuns(bridge);
 		const response: ListAutoWorkRunsResponse = { runs: listAutoWorkRuns({ limit, taskId, priority, status }) };
 		return c.json(response);
+	});
+
+	// ─── PR retry ─────────────────────────────────────────────────────────────
+
+	// Retries `gh pr create` for a completed run that ended without a PR.
+	// Replaces the "PR creation failed" marker in the task body if present;
+	// otherwise appends a new PR note. Safe to call when a PR already exists:
+	// gh will fail and the error propagates as a 500 so the UI can display it.
+	app.post("/auto-work/runs/:id/create-pr", async (c) => {
+		const runId = c.req.param("id");
+		const run = getAutoWorkRun(runId);
+		if (!run) return c.json({ error: "run not found" }, 404);
+		if (run.status !== "completed")
+			return c.json({ error: `run is not completed (status: ${run.status})` }, 400);
+
+		const task = getTask(run.taskId);
+		if (!task) return c.json({ error: "task not found for run" }, 404);
+
+		const deckBaseUrl = getServerDeckBaseUrl(config).deckBaseUrl;
+		const sessionUrl = buildSessionUrl(deckBaseUrl, run.sessionId);
+
+		try {
+			const createPr = cycleOptions.createPullRequest ?? createPullRequestViaGh;
+			const pr = await createPr({
+				cwd: run.worktreePath,
+				title: `feat: T-${task.displayId} ${task.title}`,
+				body: `Auto Work completed T-${task.displayId}: ${task.title}\n\nSession: ${sessionUrl}`,
+			});
+
+			// Replace the "PR creation failed" marker in the task body, if present.
+			const failedPattern = /·\s*PR creation failed — open manually[^\n]*/;
+			const newNote = `· PR #${pr.number}`;
+			const updatedBody = failedPattern.test(task.body)
+				? task.body.replace(failedPattern, newNote)
+				: `${task.body}\n\n_(PR retry: #${pr.number})_`;
+			updateTask(task.id, { body: updatedBody });
+
+			broadcastBus.broadcast({ type: "tasks_changed" });
+			broadcastBus.broadcast({ type: "auto_work_runs_changed" });
+
+			log.info(`run ${runId}: PR retry opened PR #${pr.number} (${pr.url}) for T-${task.displayId}`);
+			return c.json({ number: pr.number, url: pr.url });
+		} catch (err) {
+			log.error(`run ${runId}: PR retry failed for T-${task.displayId}`, err);
+			return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+		}
 	});
 
 	// ─── Cost estimate ────────────────────────────────────────────────────────
