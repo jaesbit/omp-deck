@@ -260,6 +260,53 @@ export function shouldConsiderSqueeze(input: SqueezeGateInput): boolean {
 	return minutesToReset < intervalMinutes * SQUEEZE_TICK_HORIZON;
 }
 
+// ─── Agent History helpers (T-83) ───────────────────────────────────────────
+
+const AGENT_HISTORY_HEADING = "## Agent History";
+
+/**
+ * Extracts the raw text of the `## Agent History` section (heading excluded)
+ * from a task body. Returns `null` when the section is absent or empty.
+ *
+ * The section boundary ends at the next same-level `## ` heading or at the
+ * end of the string, whichever comes first.
+ */
+export function extractAgentHistory(body: string): string | null {
+	const idx = body.indexOf(AGENT_HISTORY_HEADING);
+	if (idx === -1) return null;
+	const afterHeading = body.slice(idx + AGENT_HISTORY_HEADING.length);
+	// Stop at the next same-level heading.
+	const nextSection = afterHeading.search(/\n## /);
+	const raw = nextSection === -1 ? afterHeading : afterHeading.slice(0, nextSection);
+	const content = raw.trim();
+	return content || null;
+}
+
+/**
+ * Appends a new timestamped entry to the `## Agent History` section of
+ * `body`. When the section is absent it is created at the end. All other
+ * sections are left intact.
+ *
+ * Entry format:
+ * ```
+ * ### <timestamp> — run <runId>
+ * <summary>
+ * ```
+ */
+export function appendAgentHistoryEntry(
+	body: string,
+	runId: string,
+	timestamp: string,
+	summary: string,
+): string {
+	const entry = `\n\n### ${timestamp} — run ${runId}\n${summary}`;
+	const trimmed = body.trimEnd();
+	if (!trimmed.includes(AGENT_HISTORY_HEADING)) {
+		return `${trimmed}\n\n${AGENT_HISTORY_HEADING}${entry}`;
+	}
+	return `${trimmed}${entry}`;
+}
+
 // ─── Orchestrator (IO) ──────────────────────────────────────────────────────
 
 export interface RunAutoWorkCycleOptions {
@@ -459,7 +506,9 @@ export async function runAutoWorkCycle(
 		model: model ? `${model.provider}/${model.id}` : "default",
 	});
 
-	const prompt = `Trabaja en T-${task.displayId}: ${task.title}\n\n(contexto completo disponible via GET /api/tasks/${task.id})\n\nEl worktree para esta tarea ya está configurado en \`${worktreePath}\` (rama \`auto-work/t${task.displayId}-${branchSlug}\`). Usa ese directorio para todos los commits y cambios de fichero.`;
+	const agentHistory = extractAgentHistory(task.body);
+	const historyBlock = agentHistory ? `\n\n## Agent history for this task\n${agentHistory}` : "";
+	const prompt = `Trabaja en T-${task.displayId}: ${task.title}\n\n(contexto completo disponible via GET /api/tasks/${task.id})\n\nEl worktree para esta tarea ya está configurado en \`${worktreePath}\` (rama \`auto-work/t${task.displayId}-${branchSlug}\`). Usa ese directorio para todos los commits y cambios de fichero.${historyBlock}`;
 	const timeoutMinutes = resolveAutoWorkTimeoutMinutes(task.priority, config);
 	return await finalizeAutoWorkRun({
 		runId,
@@ -583,8 +632,10 @@ async function settleAutoWorkRun(params: {
 		}
 		const terminalState = findStateByName(timedOut ? "blocked" : "backlog");
 		if (terminalState) moveTask(task.id, terminalState.id, 0);
+		const failRunNote = `\n\n---\n**Auto Work ${timedOut ? "timeout" : "aborted"}** — run \`${runId}\` ${failureReason}. Session: \`${session.sessionId}\`, worktree: \`${worktreePath}\`.`;
+		const failHistorySummary = `${timedOut ? "Timed out" : "Failed"}: ${failureReason}.`;
 		updateTask(task.id, {
-			body: `${task.body}\n\n---\n**Auto Work ${timedOut ? "timeout" : "aborted"}** — run \`${runId}\` ${failureReason}. Session: \`${session.sessionId}\`, worktree: \`${worktreePath}\`.`,
+			body: appendAgentHistoryEntry(task.body + failRunNote, runId, new Date().toISOString(), failHistorySummary),
 		});
 		broadcastBus.broadcast({ type: "tasks_changed" });
 		log.warn(`run ${runId} ${timedOut ? "timed out" : "failed"}; T-${task.displayId} moved to ${timedOut ? "blocked" : "backlog"} (${failureReason})`);
@@ -613,8 +664,10 @@ async function settleAutoWorkRun(params: {
 		log.error(`run ${runId}: gh pr create failed for T-${task.displayId}`, err);
 	}
 
+	const completeRunNote = `\n\n---\n**Auto Work** — [session ${shortSessionId}](${sessionUrl}) · ${prNote}`;
+	const completeHistorySummary = `Session completed. ${prNote}.`;
 	updateTask(task.id, {
-		body: `${task.body}\n\n---\n**Auto Work** — [session ${shortSessionId}](${sessionUrl}) · ${prNote}`,
+		body: appendAgentHistoryEntry(task.body + completeRunNote, runId, new Date().toISOString(), completeHistorySummary),
 	});
 
 	const validateState = findStateByName("validate");
