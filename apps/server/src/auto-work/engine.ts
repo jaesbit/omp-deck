@@ -610,8 +610,29 @@ async function settleAutoWorkRun(params: {
 		log.info(`run ${runId}: opened PR #${pr.number} (${pr.url}) for T-${task.displayId}`);
 	} catch (err) {
 		const errMsg = (err instanceof Error ? err.message : String(err)).split("\n")[0].trim().slice(0, 120);
-		prNote = `PR creation failed — open manually (${errMsg})`;
 		log.error(`run ${runId}: gh pr create failed for T-${task.displayId}`, err);
+
+		// A "no commits" gh failure on an otherwise-completed turn means the
+		// agent produced no actual work — verify against the branch itself and
+		// demote to failed instead of parking an empty task in validate. Other
+		// errors (auth, rate limit, network) fall through to the existing
+		// "open manually" fallback below, unchanged.
+		if (/no commit|must be on a branch|empty (range|commit)/i.test(errMsg) && !(await branchHasAgentCommits(worktreePath))) {
+			const failureReason = `agent turn completed but produced no commits (PR creation failed: ${errMsg})`;
+			completeAutoWorkRun(runId, { status: "failed", failureReason, inputTokens, outputTokens, pctConsumed });
+			const backlogState = findStateByName("backlog");
+			if (backlogState) moveTask(task.id, backlogState.id, 0);
+			updateTask(task.id, {
+				body: `${task.body}\n\n---\n**Auto Work aborted** — run \`${runId}\` ${failureReason}. Session: \`${session.sessionId}\`, worktree: \`${worktreePath}\`.`,
+			});
+			broadcastBus.broadcast({ type: "tasks_changed" });
+			broadcastBus.broadcast({ type: "auto_work_runs_changed" });
+			log.warn(`run ${runId} failed (no agent commits); T-${task.displayId} moved to backlog (${failureReason})`);
+			await notify({ kind: "task_failed", displayId: task.displayId, reason: failureReason });
+			return { outcome: "failed", taskId: task.id, runId, sessionId: session.sessionId, worktreePath, failureReason };
+		}
+
+		prNote = `PR creation failed — open manually (${errMsg})`;
 	}
 
 	updateTask(task.id, {
@@ -714,6 +735,32 @@ async function removeAutoWorkWorktree(repoCwd: string, worktreePath: string): Pr
 	const [stderr, exitCode] = await Promise.all([new Response(proc.stderr).text(), proc.exited]);
 	if (exitCode !== 0) {
 		log.warn(`git worktree remove --force ${worktreePath} failed (exit ${exitCode}): ${stderr.trim()}`);
+	}
+}
+
+/**
+ * Returns `true` when the worktree branch has at least one commit beyond its
+ * remote base branch — i.e. the agent produced work. Used as a safety net
+ * when a completed turn's `gh pr create` fails with a "no commits" pattern:
+ * a real gh error shouldn't tank a run that genuinely produced commits, but
+ * an empty branch means the run should be recorded as failed, not completed.
+ */
+async function branchHasAgentCommits(worktreePath: string): Promise<boolean> {
+	try {
+		const baseBranch = await resolveDefaultBranch(worktreePath);
+		const proc = Bun.spawn(["git", "rev-list", "--count", `origin/${baseBranch}..HEAD`], {
+			cwd: worktreePath,
+			stdin: "ignore",
+			stdout: "pipe",
+			stderr: "pipe",
+			windowsHide: true,
+		});
+		const [stdout, exitCode] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
+		return exitCode === 0 && Number(stdout.trim()) > 0;
+	} catch {
+		// Can't check (e.g. no origin remote) — err on the side of assuming
+		// commits exist so a git error never tanks a real, successful run.
+		return true;
 	}
 }
 
