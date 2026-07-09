@@ -979,6 +979,7 @@ function GeneralSection() {
 			</div>
 
 			<TaskRewriteModelCard />
+			<InternalTaskModelCard />
 		</div>
 	);
 }
@@ -1054,7 +1055,8 @@ function TaskRewriteModelCard() {
 					</div>
 				)}
 			</div>
-			<TaskRewriteModelPickerModal
+			<SettingsModelPickerModal
+				title="Task rewrite model"
 				open={pickerOpen}
 				onClose={() => setPickerOpen(false)}
 				onPicked={(m) => void onPicked(m)}
@@ -1063,11 +1065,98 @@ function TaskRewriteModelCard() {
 	);
 }
 
-function TaskRewriteModelPickerModal({
+/**
+ * Card within GeneralSection (T-78) — shows the configured model for
+ * server-side session-title generation and lets the user pick or clear it.
+ * `null` (the default) means the feature is off — the agent-side self-
+ * titling instruction in `~/.omp/agent/commands/start.md` remains the sole
+ * mechanism, unchanged. Mirrors `TaskRewriteModelCard` above exactly.
+ */
+function InternalTaskModelCard() {
+	const [model, setModel] = useState<ModelRef | null>(null);
+	const [loading, setLoading] = useState(true);
+	const [pickerOpen, setPickerOpen] = useState(false);
+	const [error, setError] = useState<string | undefined>();
+
+	useEffect(() => {
+		let cancelled = false;
+		void api.getInternalTaskModel()
+			.then((r) => { if (!cancelled) { setModel(r.model); setLoading(false); } })
+			.catch((e) => { if (!cancelled) { setError(e instanceof Error ? e.message : String(e)); setLoading(false); } });
+		return () => { cancelled = true; };
+	}, []);
+
+	async function clearModel(): Promise<void> {
+		setError(undefined);
+		try {
+			const r = await api.setInternalTaskModel(null);
+			setModel(r.model);
+		} catch (e) {
+			setError(e instanceof Error ? e.message : String(e));
+		}
+	}
+
+	async function onPicked(picked: ModelRef): Promise<void> {
+		setPickerOpen(false);
+		setError(undefined);
+		try {
+			const r = await api.setInternalTaskModel(picked);
+			setModel(r.model);
+		} catch (e) {
+			setError(e instanceof Error ? e.message : String(e));
+		}
+	}
+
+	return (
+		<>
+			<div className="rounded-md border border-line bg-paper-2 p-4">
+				<div className="meta mb-1">Internal task model</div>
+				<p className="mb-3 text-xs text-ink-3">
+					Model used for internal one-shot agent jobs you never see directly — first
+					consumer is generating a session's title from its first message. Off by
+					default: leave unset and the agent's own self-titling instruction keeps
+					running as before.
+				</p>
+				{error ? (
+					<div className="mb-3 rounded-md border border-danger/30 bg-danger/10 px-3 py-2 font-mono text-xs text-danger">
+						{error}
+					</div>
+				) : null}
+				{loading ? (
+					<div className="py-2 text-sm text-ink-3">Loading…</div>
+				) : (
+					<div className="flex items-center gap-2">
+						<span className="flex-1 font-mono text-xs text-ink-2">
+							{model ? `${model.provider} / ${model.id}` : "(off)"}
+						</span>
+						<Button size="sm" variant="ghost" onClick={() => setPickerOpen(true)}>
+							Change
+						</Button>
+						{model ? (
+							<Button size="sm" variant="ghost" onClick={() => void clearModel()}>
+								Clear
+							</Button>
+						) : null}
+					</div>
+				)}
+			</div>
+			<SettingsModelPickerModal
+				title="Internal task model"
+				open={pickerOpen}
+				onClose={() => setPickerOpen(false)}
+				onPicked={(m) => void onPicked(m)}
+			/>
+		</>
+	);
+}
+
+function SettingsModelPickerModal({
+	title,
 	open,
 	onClose,
 	onPicked,
 }: {
+	title: string;
 	open: boolean;
 	onClose: () => void;
 	onPicked: (model: ModelRef) => void;
@@ -1083,7 +1172,7 @@ function TaskRewriteModelPickerModal({
 	return (
 		<Modal open={open} onClose={onClose} widthClass="max-w-xl">
 			<div className="flex h-11 items-center gap-2 border-b border-line px-3">
-				<div className="meta">Task rewrite model</div>
+				<div className="meta">{title}</div>
 			</div>
 			<div className="border-b border-line px-3 py-2">
 				<input

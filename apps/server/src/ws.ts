@@ -2,10 +2,12 @@ import * as path from "node:path";
 import type { ServerWebSocket } from "bun";
 import type { ClientFrame, ServerFrame } from "@omp-deck/protocol";
 
-import type { AgentBridge } from "./bridge/types.ts";
+import type { AgentBridge, SessionHandle } from "./bridge/types.ts";
 import { broadcastBus } from "./broadcast-bus.ts";
 import { logger } from "./log.ts";
 import { getBuildInfo, getUptimeSecs } from "./build-info.ts";
+import { getInternalTaskModel } from "./db/server-settings.ts";
+import { generateSessionTitle } from "./session-title.ts";
 import { buildSkillInvocationPrompt, parseSkillSlashCommand } from "./skill-invocation.ts";
 import { StreamCoalescer } from "./stream-coalescer.ts";
 import type { SkillsService } from "./skills-service.ts";
@@ -27,6 +29,7 @@ export const HEARTBEAT_INTERVAL_MS = 5000;
 
 export class WsHub {
 	private readonly connections = new Set<ServerWebSocket<ConnectionData>>();
+	private readonly titledSessions = new Set<string>();
 	private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
 
 	constructor(
@@ -285,6 +288,7 @@ export class WsHub {
 			send(ws, { type: "error", sessionId: frame.sessionId, error: "session not active" });
 			return;
 		}
+		this.maybeAutoTitleSession(handle, frame.sessionId, frame.text);
 		const opts: { streamingBehavior?: "steer" | "followUp"; images?: typeof frame.images } = {};
 		// Default to "followUp" so a prompt sent while the agent is mid-turn is
 		// queued instead of throwing AgentBusyError (which the user never sees —
@@ -330,6 +334,34 @@ export class WsHub {
 			return;
 		}
 		handle.prompt(frame.text, opts).catch(sendError);
+	}
+
+	/**
+	 * Fire-and-forget: T-78 server-side title generation. Runs at most once per
+	 * session (`titledSessions` guard, marked before the async work starts so
+	 * two rapid prompts can't both fire) and only when `internalTaskModel` is
+	 * configured — an unconfigured install pays only the Set lookup + one
+	 * `getInternalTaskModel()` read per prompt. Auto-work and other internal
+	 * one-shot sessions never reach here: they never go through this WS
+	 * client-prompt path, only through direct `session.prompt()` calls in
+	 * `auto-work/engine.ts` / `routes.ts`.
+	 */
+	private maybeAutoTitleSession(handle: SessionHandle, sessionId: string, firstMessage: string): void {
+		if (this.titledSessions.has(sessionId)) return;
+		if (!getInternalTaskModel()) return;
+		this.titledSessions.add(sessionId);
+		void (async () => {
+			try {
+				const snapshot = await handle.snapshot();
+				if (snapshot.sessionName) return;
+				const title = await generateSessionTitle(this.bridge, { cwd: handle.cwd, firstMessage });
+				if (!title) return;
+				await handle.setName(title);
+				broadcastBus.broadcast({ type: "sessions_changed" });
+			} catch (err) {
+				log.warn(`auto-title failed for session ${sessionId}`, err);
+			}
+		})();
 	}
 
 	/** The pre-T-21 slash dispatch chain: deck-native commands, then SDK ACP builtins, then plain prompt. */
