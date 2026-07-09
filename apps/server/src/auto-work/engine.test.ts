@@ -591,6 +591,8 @@ class FakeSessionHandle {
 	abortCalls = 0;
 	/** What `isStreamingNow()` reports — set true to model a resumed handle whose turn is still in flight. */
 	streaming = false;
+	/** Optional usage rollup to return from `snapshot()` — set before the cycle to simulate real token usage (T-80). */
+	usageRollup?: { input: number; output: number; cacheRead: number; cacheWrite: number; totalTokens: number; cost: number };
 
 	constructor(
 		sessionId: string,
@@ -632,9 +634,9 @@ class FakeSessionHandle {
 		this.turnEnded.resolve();
 	}
 
-	/** Minimal snapshot stand-in — enough for `latestAssistantText` to read the configured response. */
-	async snapshot(): Promise<{ messages: Array<{ role: string; content: unknown }> }> {
-		return { messages: [{ role: "assistant", content: this.assistantResponse }] };
+	/** Minimal snapshot stand-in — enough for `latestAssistantText` to read the configured response and for usage capture. */
+	async snapshot(): Promise<{ messages: Array<{ role: string; content: unknown }>; usageRollup?: typeof this.usageRollup }> {
+		return { messages: [{ role: "assistant", content: this.assistantResponse }], usageRollup: this.usageRollup };
 	}
 }
 
@@ -1887,5 +1889,106 @@ describe("runAutoWorkCycle notifications (T-67)", () => {
 		expect(result.outcome).toBe("skipped");
 		// Exactly one notification for the cycle — the weekly warning — never both.
 		expect(calls).toEqual([{ kind: "weekly_threshold", cwd: repoCwd, pctUsed: 80, thresholdPct: 70 }]);
+	});
+});
+
+// ─── Token and pct recording (T-80) ─────────────────────────────────────────
+
+describe("runAutoWorkCycle token and pct recording (T-80)", () => {
+	test("persists inputTokens, outputTokens, and pctConsumed on a completed run", async () => {
+		setAutoWorkConfig(repoCwd, { ...DEFAULT_AUTO_WORK_VALUES, enabled: true });
+		createTask({ title: "Token tracking task", cwd: repoCwd, priority: "P5", autoWork: true });
+
+		const handle = new FakeSessionHandle("sess_tokens_completed", 10);
+		handle.usageRollup = { input: 1500, output: 800, cacheRead: 0, cacheWrite: 0, totalTokens: 2300, cost: 0.005 };
+
+		let usageCallCount = 0;
+		const result = await runAutoWorkCycle(repoCwd, fakeBridge(handle), {
+			getSubscriptionUsage: async () => {
+				usageCallCount++;
+				return { available: true, weeklyPct: usageCallCount === 1 ? 10 : 15 };
+			},
+			createPullRequest: stubCreatePullRequest,
+		});
+
+		expect(result.outcome).toBe("completed");
+		const run = listAutoWorkRuns({})[0];
+		expect(run?.inputTokens).toBe(1500);
+		expect(run?.outputTokens).toBe(800);
+		expect(run?.pctConsumed).toBe(5); // 15 - 10
+	});
+
+	test("persists inputTokens, outputTokens, and pctConsumed even on a failed run", async () => {
+		setAutoWorkConfig(repoCwd, { ...DEFAULT_AUTO_WORK_VALUES, enabled: true });
+		const task = createTask({ title: "Failing token task", cwd: repoCwd, priority: "P5", autoWork: true });
+
+		const handle = new FakeSessionHandle("sess_tokens_failed", null);
+		handle.usageRollup = { input: 400, output: 200, cacheRead: 0, cacheWrite: 0, totalTokens: 600, cost: 0.001 };
+
+		let usageCallCount = 0;
+		const cycle = runAutoWorkCycle(repoCwd, fakeBridge(handle), {
+			getSubscriptionUsage: async () => {
+				usageCallCount++;
+				return { available: true, weeklyPct: usageCallCount === 1 ? 20 : 23 };
+			},
+			createPullRequest: async () => {
+				throw new Error("must not create PR on failed run");
+			},
+		});
+		await handle.subscriptionStarted;
+		handle.emit({ type: "turn_end", message: { stopReason: "aborted" } });
+		const result = await cycle;
+
+		expect(result.outcome).toBe("failed");
+		const run = listAutoWorkRuns({ taskId: task.id })[0];
+		expect(run?.inputTokens).toBe(400);
+		expect(run?.outputTokens).toBe(200);
+		expect(run?.pctConsumed).toBe(3); // 23 - 20
+	});
+
+	test("stores null pctConsumed when end-of-run subscription lookup is unavailable", async () => {
+		setAutoWorkConfig(repoCwd, { ...DEFAULT_AUTO_WORK_VALUES, enabled: true });
+		createTask({ title: "No end sub task", cwd: repoCwd, priority: "P5", autoWork: true });
+
+		const handle = new FakeSessionHandle("sess_tokens_no_end_sub", 10);
+		handle.usageRollup = { input: 300, output: 100, cacheRead: 0, cacheWrite: 0, totalTokens: 400, cost: 0 };
+
+		// First call (preflight) returns available so the run starts; second call (post-settle)
+		// returns unavailable so the delta cannot be computed → pctConsumed must be null.
+		let callCount = 0;
+		const result = await runAutoWorkCycle(repoCwd, fakeBridge(handle), {
+			getSubscriptionUsage: async () => {
+				callCount++;
+				if (callCount === 1) return { available: true, weeklyPct: 12 };
+				return { available: false };
+			},
+			createPullRequest: stubCreatePullRequest,
+		});
+
+		expect(result.outcome).toBe("completed");
+		const run = listAutoWorkRuns({})[0];
+		expect(run?.inputTokens).toBe(300);
+		expect(run?.outputTokens).toBe(100);
+		expect(run?.pctConsumed).toBeNull(); // end lookup unavailable → delta unknown
+	});
+
+	test("stores null tokens when snapshot provides no usageRollup", async () => {
+		setAutoWorkConfig(repoCwd, { ...DEFAULT_AUTO_WORK_VALUES, enabled: true });
+		createTask({ title: "No rollup task", cwd: repoCwd, priority: "P5", autoWork: true });
+
+		const handle = new FakeSessionHandle("sess_no_rollup", 10);
+		// usageRollup left undefined (default)
+
+		const result = await runAutoWorkCycle(repoCwd, fakeBridge(handle), {
+			getSubscriptionUsage: async () => ({ available: true, weeklyPct: 5 }),
+			createPullRequest: stubCreatePullRequest,
+		});
+
+		expect(result.outcome).toBe("completed");
+		const run = listAutoWorkRuns({})[0];
+		expect(run?.inputTokens).toBeNull();
+		expect(run?.outputTokens).toBeNull();
+		// pctConsumed is 0 because both start and end weeklyPct = 5 (same stub each call)
+		expect(run?.pctConsumed).toBe(0);
 	});
 });
