@@ -1,7 +1,12 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import type { ServerWebSocket } from "bun";
-import type { AgentBridge, EventListener } from "./bridge/types.ts";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+import type { AgentBridge, CreateSessionOpts, EventListener, SessionHandle } from "./bridge/types.ts";
 import { broadcastBus } from "./broadcast-bus.ts";
+import { closeDb, openDb } from "./db/index.ts";
+import { setInternalTaskModel } from "./db/server-settings.ts";
 import type { ConnectionData } from "./ws.ts";
 import { WsHub } from "./ws.ts";
 
@@ -214,6 +219,221 @@ describe("WsHub stream coalescing", () => {
 				{ type: "session_event", sessionId: "session-1", event: u2 },
 				{ type: "session_event", sessionId: "session-1", event: start },
 			]);
+		} finally {
+			hub.onClose(socket as unknown as ServerWebSocket<ConnectionData>);
+			hub.dispose();
+		}
+	});
+});
+
+/**
+ * T-78: `WsHub#maybeAutoTitleSession`, the fire-and-forget hook fired from
+ * the top of `handlePrompt`. Needs a real on-disk DB (unlike the rest of
+ * this file) because `getInternalTaskModel()` / `generateSessionTitle()`
+ * read the `internalTaskModel` server setting directly. The fake one-shot
+ * title session's terminal event fires synchronously inside `subscribe()`
+ * (no real timer), so the whole chain resolves on the microtask queue —
+ * every assertion below synchronizes on either the `sessions_changed`
+ * broadcast it ends with, or (for the negative cases, which never reach
+ * that broadcast) on a `snapshot()` call plus a microtask flush.
+ */
+describe("WsHub auto-title-on-first-prompt", () => {
+	let dbDir: string;
+
+	beforeEach(() => {
+		dbDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-deck-ws-auto-title-db-"));
+		openDb({ path: path.join(dbDir, "deck.db") });
+	});
+
+	afterEach(() => {
+		closeDb();
+		fs.rmSync(dbDir, { recursive: true, force: true });
+	});
+
+	function fakePromptBridge(opts: { sessionName?: string; titleResponse?: string } = {}): {
+		bridge: AgentBridge;
+		promptCalls: string[];
+		setNameCalls: string[];
+		createSessionCalls: CreateSessionOpts[];
+		snapshotCalled: Promise<void>;
+	} {
+		const promptCalls: string[] = [];
+		const setNameCalls: string[] = [];
+		const createSessionCalls: CreateSessionOpts[] = [];
+		const snapshotCalled = Promise.withResolvers<void>();
+
+		const handle = {
+			sessionId: "session-1",
+			sessionFile: undefined,
+			cwd: "/workspace",
+			subscribe(_listener: EventListener) {
+				return () => {};
+			},
+			snapshot() {
+				snapshotCalled.resolve();
+				return opts.sessionName ? { sessionName: opts.sessionName } : {};
+			},
+			getHistory() {
+				return { messages: [], startIndex: 0 };
+			},
+			async prompt(text: string) {
+				promptCalls.push(text);
+			},
+			async setName(name: string) {
+				setNameCalls.push(name);
+			},
+		};
+
+		// The one-shot session `generateSessionTitle` spins up internally for
+		// the title-generation turn. Its terminal event fires synchronously
+		// from `subscribe()` (see `session-title.test.ts`'s `FakeSessionHandle`
+		// for why a real timer would deadlock the sequential-await shape of
+		// `generateSessionTitle`), so this whole path never touches real time.
+		const titleTurnEnded = Promise.withResolvers<void>();
+		const titleHandle = {
+			sessionId: "title-session-1",
+			subscribe(listener: EventListener) {
+				listener({ type: "turn_end" } as never);
+				titleTurnEnded.resolve();
+				return () => {};
+			},
+			async prompt() {
+				await titleTurnEnded.promise;
+			},
+			async snapshot() {
+				return { messages: [{ role: "assistant", content: opts.titleResponse ?? "Generated Title" }] };
+			},
+		};
+
+		return {
+			bridge: {
+				getSession: (sessionId: string) => (sessionId === "session-1" ? handle : undefined),
+				trackSubscriberAdded() {},
+				trackSubscriberRemoved() {},
+				subscribeUiFrames() {
+					return () => {};
+				},
+				subscribePlanModeFrames() {
+					return () => {};
+				},
+				bumpActivity() {},
+				async createSession(createOpts: CreateSessionOpts) {
+					createSessionCalls.push(createOpts);
+					return titleHandle as unknown as SessionHandle;
+				},
+				async deleteSession() {
+					return { deleted: true };
+				},
+			} as unknown as AgentBridge,
+			promptCalls,
+			setNameCalls,
+			createSessionCalls,
+			snapshotCalled: snapshotCalled.promise,
+		};
+	}
+
+	test("triggers title generation on the first prompt, renaming the session and broadcasting sessions_changed", async () => {
+		setInternalTaskModel({ provider: "anthropic", id: "claude-good" });
+		const { bridge, setNameCalls, createSessionCalls } = fakePromptBridge({ titleResponse: "Fix The Login Bug" });
+		const hub = new WsHub(bridge, noopSkills);
+		const socket = makeSocket(hub);
+		try {
+			const sessionsChanged = new Promise<void>((resolve) => {
+				const stop = broadcastBus.subscribe((frame) => {
+					if (frame.type === "sessions_changed") {
+						stop();
+						resolve();
+					}
+				});
+			});
+
+			await hub.onMessage(
+				socket as unknown as ServerWebSocket<ConnectionData>,
+				JSON.stringify({ type: "prompt", sessionId: "session-1", text: "Fix the login bug please" }),
+			);
+			await sessionsChanged;
+
+			expect(createSessionCalls).toHaveLength(1);
+			expect(setNameCalls).toEqual(["Fix The Login Bug"]);
+		} finally {
+			hub.onClose(socket as unknown as ServerWebSocket<ConnectionData>);
+			hub.dispose();
+		}
+	});
+
+	test("never renames a session that already has a sessionName", async () => {
+		setInternalTaskModel({ provider: "anthropic", id: "claude-good" });
+		const { bridge, setNameCalls, createSessionCalls, snapshotCalled } = fakePromptBridge({
+			sessionName: "Already Named",
+		});
+		const hub = new WsHub(bridge, noopSkills);
+		const socket = makeSocket(hub);
+		try {
+			await hub.onMessage(
+				socket as unknown as ServerWebSocket<ConnectionData>,
+				JSON.stringify({ type: "prompt", sessionId: "session-1", text: "Hello" }),
+			);
+			await snapshotCalled;
+			// Flush the microtask hops between `snapshot()` resolving and the
+			// early `if (snapshot.sessionName) return` landing right after it.
+			await Promise.resolve();
+			await Promise.resolve();
+			await Promise.resolve();
+
+			expect(setNameCalls).toEqual([]);
+			expect(createSessionCalls).toEqual([]);
+		} finally {
+			hub.onClose(socket as unknown as ServerWebSocket<ConnectionData>);
+			hub.dispose();
+		}
+	});
+
+	test("a second prompt on the same session never re-triggers generation", async () => {
+		setInternalTaskModel({ provider: "anthropic", id: "claude-good" });
+		const { bridge, createSessionCalls } = fakePromptBridge({ titleResponse: "First Title" });
+		const hub = new WsHub(bridge, noopSkills);
+		const socket = makeSocket(hub);
+		try {
+			const sessionsChanged = new Promise<void>((resolve) => {
+				const stop = broadcastBus.subscribe((frame) => {
+					if (frame.type === "sessions_changed") {
+						stop();
+						resolve();
+					}
+				});
+			});
+			await hub.onMessage(
+				socket as unknown as ServerWebSocket<ConnectionData>,
+				JSON.stringify({ type: "prompt", sessionId: "session-1", text: "First message" }),
+			);
+			await sessionsChanged;
+			expect(createSessionCalls).toHaveLength(1);
+
+			await hub.onMessage(
+				socket as unknown as ServerWebSocket<ConnectionData>,
+				JSON.stringify({ type: "prompt", sessionId: "session-1", text: "Second message" }),
+			);
+
+			expect(createSessionCalls).toHaveLength(1);
+		} finally {
+			hub.onClose(socket as unknown as ServerWebSocket<ConnectionData>);
+			hub.dispose();
+		}
+	});
+
+	test("attempts no title generation at all when internalTaskModel is unset, leaving the normal prompt flow unchanged", async () => {
+		const { bridge, setNameCalls, createSessionCalls, promptCalls } = fakePromptBridge();
+		const hub = new WsHub(bridge, noopSkills);
+		const socket = makeSocket(hub);
+		try {
+			await hub.onMessage(
+				socket as unknown as ServerWebSocket<ConnectionData>,
+				JSON.stringify({ type: "prompt", sessionId: "session-1", text: "Hello" }),
+			);
+
+			expect(promptCalls).toEqual(["Hello"]);
+			expect(createSessionCalls).toEqual([]);
+			expect(setNameCalls).toEqual([]);
 		} finally {
 			hub.onClose(socket as unknown as ServerWebSocket<ConnectionData>);
 			hub.dispose();

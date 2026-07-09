@@ -2111,6 +2111,22 @@ export interface SetTaskRewriteModelRequest {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Internal task model (T-78) — generic model setting for internal one-shot
+// agent jobs the user never sees directly (first consumer: session-title
+// generation). Mirrors the task-rewrite-model settings shape above.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** `GET /api/settings/internal-task-model` response. `model: null` means the feature is off. */
+export interface InternalTaskModelResponse {
+	model: ModelRef | null;
+}
+
+/** `PUT /api/settings/internal-task-model` body. Pass `model: null` to disable. */
+export interface SetInternalTaskModelRequest {
+	model: ModelRef | null;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Auto Work run history and cost tracking (T-62)
 // ─────────────────────────────────────────────────────────────────────────────
 
