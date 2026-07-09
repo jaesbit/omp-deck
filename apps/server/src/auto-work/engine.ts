@@ -538,7 +538,7 @@ async function settleAutoWorkRun(params: {
 }): Promise<AutoWorkCycleResult> {
 	const { runId, task, session, worktreePath, timeoutMinutes, startTurn, resolveDeckBaseUrl, createPullRequest, notify, usageLookup, startPct } =
 		params;
-	const terminal = await waitForAutoWorkSessionTerminal(session, timeoutMinutes * 60_000, startTurn);
+	const terminal = await waitForAutoWorkSessionTerminalResult(session, timeoutMinutes * 60_000, startTurn);
 
 	// Capture real token usage for this run (T-80). Both calls run concurrently;
 	// failures are logged and default to null — missing usage is never fatal.
@@ -561,11 +561,12 @@ async function settleAutoWorkRun(params: {
 			: null;
 	const pctConsumed: number | null = startPct !== null && endPct !== null ? endPct - startPct : null;
 
-	if (terminal !== "completed") {
-		const timedOut = terminal === "timed_out";
-		const failureReason = timedOut
-			? `exceeded ${timeoutMinutes}min timeout for priority ${task.priority}`
-			: "agent turn ended with an error or abort";
+	if (terminal.outcome !== "completed") {
+		const timedOut = terminal.outcome === "timed_out";
+		const failureReason =
+			terminal.outcome === "timed_out"
+				? `exceeded ${timeoutMinutes}min timeout for priority ${task.priority}`
+				: terminal.failureReason;
 		if (timedOut) {
 			// Abort the still-running session so reality matches the record —
 			// otherwise the agent keeps working (and spending) after the run
@@ -584,7 +585,7 @@ async function settleAutoWorkRun(params: {
 		const terminalState = findStateByName(timedOut ? "blocked" : "backlog");
 		if (terminalState) moveTask(task.id, terminalState.id, 0);
 		updateTask(task.id, {
-			body: `${task.body}\n\n---\n**Auto Work ${timedOut ? "timeout" : "aborted"}** — run \`${runId}\` ${failureReason}. Session: \`${session.sessionId}\`, worktree: \`${worktreePath}\`.`,
+			body: `${task.body}\n\n---\n**Auto Work ${timedOut ? "timeout" : "failed"}** — run \`${runId}\` ${failureReason}. Session: \`${session.sessionId}\`, worktree: \`${worktreePath}\`.`,
 		});
 		broadcastBus.broadcast({ type: "tasks_changed" });
 		log.warn(`run ${runId} ${timedOut ? "timed out" : "failed"}; T-${task.displayId} moved to ${timedOut ? "blocked" : "backlog"} (${failureReason})`);
@@ -797,66 +798,82 @@ async function resumeOrRetireAutoWorkRun(
 	});
 }
 
-function terminalOutcomeFromEvent(event: unknown): "completed" | "failed" | undefined {
+type AutoWorkTerminalResult =
+	| { outcome: "completed" }
+	| { outcome: "failed"; failureReason: string }
+	| { outcome: "timed_out" };
+
+function terminalOutcomeFromEvent(event: unknown): AutoWorkTerminalResult | undefined {
 	if (!event || typeof event !== "object" || !("type" in event)) return undefined;
 	if (event.type !== "turn_end" && event.type !== "agent_end") return undefined;
-	if (!("message" in event) || !event.message || typeof event.message !== "object" || !("stopReason" in event.message)) {
-		return "completed";
-	}
-	const stopReason = event.message.stopReason;
-	return stopReason === "aborted" || stopReason === "error" ? "failed" : "completed";
+
+	const nestedMessage = "message" in event && event.message && typeof event.message === "object" ? event.message : undefined;
+	const directStopReason = "stopReason" in event && typeof event.stopReason === "string" ? event.stopReason : undefined;
+	const nestedStopReason =
+		nestedMessage && "stopReason" in nestedMessage && typeof nestedMessage.stopReason === "string"
+			? nestedMessage.stopReason
+			: undefined;
+	const stopReason = directStopReason ?? nestedStopReason;
+	if (!stopReason) return { outcome: "failed", failureReason: "agent turn ended without a stop reason" };
+	if (stopReason === "end_turn" || stopReason === "stop") return { outcome: "completed" };
+	return { outcome: "failed", failureReason: `agent turn ended with stop reason: ${stopReason}` };
 }
 
 /**
- * Terminal-state detection reuses the same signal the idle-session reaper
- * tracks internally (`bridge/in-process.ts`'s `turnInFlight`): a `turn_end`
- * or `agent_end` event on the session's own stream marks the end of a turn.
- * For a one-shot auto-work session, that first turn completing *is* the
- * terminal state we're waiting for.
- *
- * `startTurn` (when given) is invoked AFTER the event subscription is in
- * place — `SessionHandle.prompt()` resolves only when the whole turn has
- * finished, so subscribing after it settles misses every event and used to
- * turn every successful run into a 45-minute `timed_out`. The prompt promise
- * itself doubles as a completion signal: events win the race (they carry
- * `stopReason`), but if none was delivered, its settlement still resolves the
- * wait instead of leaking into the timeout.
+ * Wait for a terminal event while retaining the exact failure condition for
+ * the run record. A resolved prompt alone is not evidence of completion: the
+ * T-83 session stopped mid-tool-call after exhausting its execution budget,
+ * resolved its prompt, and was incorrectly marked completed.
  */
-export function waitForAutoWorkSessionTerminal(
+function waitForAutoWorkSessionTerminalResult(
 	handle: SessionHandle,
 	timeoutMs: number,
 	startTurn?: () => Promise<unknown>,
-): Promise<"completed" | "failed" | "timed_out"> {
-	const { promise, resolve } = Promise.withResolvers<"completed" | "failed" | "timed_out">();
+): Promise<AutoWorkTerminalResult> {
+	const { promise, resolve } = Promise.withResolvers<AutoWorkTerminalResult>();
 	let settled = false;
 	let unsubscribe: (() => void) | undefined;
-	const finish = (outcome: "completed" | "failed" | "timed_out") => {
+	const finish = (result: AutoWorkTerminalResult) => {
 		if (settled) return;
 		settled = true;
 		clearTimeout(timer);
 		unsubscribe?.();
-		resolve(outcome);
+		resolve(result);
 	};
-	const timer = setTimeout(() => finish("timed_out"), timeoutMs);
+	const timer = setTimeout(() => finish({ outcome: "timed_out" }), timeoutMs);
 	// Bun timers expose `unref`, unlike browser numeric timer ids.
 	const unrefTimer = timer as typeof timer & { unref?: () => void };
 	unrefTimer.unref?.();
 	unsubscribe = handle.subscribe((event) => {
-		const outcome = terminalOutcomeFromEvent(event);
-		if (outcome) finish(outcome);
+		const result = terminalOutcomeFromEvent(event);
+		if (result) finish(result);
 	});
 	if (startTurn) {
 		startTurn().then(
 			// Defer one tick so a terminal event emitted just before the prompt
 			// promise settles (it carries the precise stopReason) wins the race.
-			() => setTimeout(() => finish("completed"), 0),
+			() => setTimeout(() => finish({ outcome: "failed", failureReason: "agent turn ended without a terminal event" }), 0),
 			(err) => {
 				log.warn("auto-work turn prompt failed", err);
-				setTimeout(() => finish("failed"), 0);
+				const message = err instanceof Error ? err.message : String(err);
+				setTimeout(() => finish({ outcome: "failed", failureReason: `agent prompt failed: ${message}` }), 0);
 			},
 		);
 	}
 	return promise;
+}
+
+/**
+ * Waits for the terminal result used by the pre-existing decision helpers.
+ * The detailed variant above is reserved for run persistence, which needs the
+ * original reason rather than the coarse status.
+ */
+export async function waitForAutoWorkSessionTerminal(
+	handle: SessionHandle,
+	timeoutMs: number,
+	startTurn?: () => Promise<unknown>,
+): Promise<AutoWorkTerminalResult["outcome"]> {
+	return (await waitForAutoWorkSessionTerminalResult(handle, timeoutMs, startTurn)).outcome;
 }
 
 /**

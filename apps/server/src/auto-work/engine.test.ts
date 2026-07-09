@@ -582,9 +582,8 @@ class FakeSessionHandle {
 	private listeners = new Set<EventListener>();
 	private readonly subscription = Promise.withResolvers<void>();
 	readonly subscriptionStarted = this.subscription.promise;
-	/** Settles when the turn actually ends (terminal event or abort) — the real
-	 *  `SessionHandle.prompt()` resolves exactly then, never before. */
-	private readonly turnEnded = Promise.withResolvers<void>();
+	/** Resolves only the current turn, then resets for a subsequent internal or execution session. */
+	private turnEnded = Promise.withResolvers<void>();
 	/** Every prompt text sent through `prompt()`, in call order. */
 	readonly prompts: string[] = [];
 	/** Number of `abort()` calls received. */
@@ -606,17 +605,19 @@ class FakeSessionHandle {
 		this.listeners.add(listener);
 		this.subscription.resolve();
 		if (this.terminalDelayMs !== null) {
-			setTimeout(() => this.emit({ type: "turn_end" }), this.terminalDelayMs);
+			setTimeout(() => this.emit({ type: "turn_end", message: { stopReason: "end_turn" } }), this.terminalDelayMs);
 		}
 		return () => this.listeners.delete(listener);
 	}
 
 	emit(event: Parameters<EventListener>[0]): void {
 		for (const listener of this.listeners) listener(event);
-		// A terminal event ends the turn, which is what settles an in-flight
-		// `prompt()` — mirroring the real contract, where the event always
-		// reaches subscribers before (or as) the prompt promise resolves.
-		if (event.type === "turn_end" || event.type === "agent_end") this.turnEnded.resolve();
+		// A terminal event ends the current turn. Reset after resolving so the
+		// same fake can model the selector/slug session followed by execution.
+		if (event.type === "turn_end" || event.type === "agent_end") {
+			this.turnEnded.resolve();
+			this.turnEnded = Promise.withResolvers<void>();
+		}
 	}
 
 	/** Resolves only once the turn ends — a never-terminal fake's prompt never resolves, exactly like the real bridge. */
@@ -632,6 +633,7 @@ class FakeSessionHandle {
 	async abort(): Promise<void> {
 		this.abortCalls += 1;
 		this.turnEnded.resolve();
+		this.turnEnded = Promise.withResolvers<void>();
 	}
 
 	/** Minimal snapshot stand-in — enough for `latestAssistantText` to read the configured response and for usage capture. */
@@ -706,10 +708,10 @@ describe("waitForAutoWorkSessionTerminal", () => {
 		expect(terminal).toBe("failed");
 	});
 
-	test("startTurn resolution with no terminal event settles the wait as completed", async () => {
+	test("startTurn resolution with no terminal event settles the wait as failed", async () => {
 		const handle = new FakeSessionHandle("sess_prompt_resolves", null);
 		const terminal = await waitForAutoWorkSessionTerminal(handle as unknown as SessionHandle, 60_000, async () => {});
-		expect(terminal).toBe("completed");
+		expect(terminal).toBe("failed");
 	});
 
 	test("a stopReason error event emitted just before the prompt resolves wins the race — failed, not completed", async () => {
@@ -726,7 +728,7 @@ describe("waitForAutoWorkSessionTerminal", () => {
 		// Short timeout on purpose: the pre-fix code (await prompt, then
 		// subscribe) missed this event and could only ever time out here.
 		const terminal = waitForAutoWorkSessionTerminal(handle as unknown as SessionHandle, 250, () => handle.prompt("go"));
-		handle.emit({ type: "turn_end" });
+		handle.emit({ type: "turn_end", message: { stopReason: "end_turn" } });
 		expect(await terminal).toBe("completed");
 	});
 });
@@ -1264,6 +1266,61 @@ describe("runAutoWorkCycle", () => {
 
 		expect(result.outcome).not.toBe("completed");
 		expect(listAutoWorkRuns({ taskId: task.id })[0]?.status).toBe("failed");
+	});
+
+	test("fails a max_tokens terminal turn, preserving its stop reason without creating a PR", async () => {
+		setAutoWorkConfig(repoCwd, { ...DEFAULT_AUTO_WORK_VALUES, enabled: true });
+		const task = createTask({ title: "Token-limited agent turn", cwd: repoCwd, priority: "P5", autoWork: true });
+		const handle = new FakeSessionHandle("sess_max_tokens", null);
+		const { notify, calls } = recordingNotify();
+		let prCreateCalls = 0;
+		const cycle = runAutoWorkCycle(repoCwd, fakeBridge(handle), {
+			getSubscriptionUsage: async () => ({ available: true, weeklyPct: 5 }),
+			notify,
+			createPullRequest: async () => {
+				prCreateCalls++;
+				return stubCreatePullRequest();
+			},
+		});
+		await handle.subscriptionStarted;
+		handle.emit({ type: "turn_end", message: { stopReason: "max_tokens" } });
+		const result = await cycle;
+
+		expect(result.outcome).toBe("failed");
+		expect(prCreateCalls).toBe(0);
+		expect(getTask(task.id)?.stateId).toBe("s_backlog");
+		const run = listAutoWorkRuns({ taskId: task.id })[0];
+		expect(run?.status).toBe("failed");
+		expect(run?.failureReason).toContain("agent turn ended with stop reason: max_tokens");
+		expect(getTask(task.id)?.body).toContain("agent turn ended with stop reason: max_tokens");
+		expect(calls).toContainEqual(
+			expect.objectContaining({ kind: "task_failed", reason: "agent turn ended with stop reason: max_tokens" }),
+		);
+	});
+
+	test("fails a terminal event without a stop reason instead of creating a PR", async () => {
+		setAutoWorkConfig(repoCwd, { ...DEFAULT_AUTO_WORK_VALUES, enabled: true });
+		const task = createTask({ title: "Abrupt agent turn", cwd: repoCwd, priority: "P5", autoWork: true });
+		const handle = new FakeSessionHandle("sess_missing_stop_reason", null);
+		let prCreateCalls = 0;
+		const cycle = runAutoWorkCycle(repoCwd, fakeBridge(handle), {
+			getSubscriptionUsage: async () => ({ available: true, weeklyPct: 5 }),
+			createPullRequest: async () => {
+				prCreateCalls++;
+				return stubCreatePullRequest();
+			},
+		});
+		await handle.subscriptionStarted;
+		handle.emit({ type: "turn_end" });
+		const result = await cycle;
+
+		expect(result.outcome).toBe("failed");
+		expect(prCreateCalls).toBe(0);
+		expect(getTask(task.id)?.stateId).toBe("s_backlog");
+		const run = listAutoWorkRuns({ taskId: task.id })[0];
+		expect(run?.status).toBe("failed");
+		expect(run?.failureReason).toContain("agent turn ended without a stop reason");
+		expect(getTask(task.id)?.body).toContain("agent turn ended without a stop reason");
 	});
 
 	test("settles the run as completed when turn_end is emitted before prompt() resolves (the real-world ordering)", async () => {
