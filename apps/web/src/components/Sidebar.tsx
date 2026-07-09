@@ -3,6 +3,7 @@ import { Plus, RefreshCw, Trash2 } from "lucide-react";
 import { SessionLaunchModal, type SessionLaunchOpts } from "@/components/chat/SessionLaunchModal";
 import { launchSession } from "@/lib/first-prompt";
 import { useStore } from "@/lib/store";
+import { usePersistedViewState } from "@/lib/use-persisted-view-state";
 import { cn, shortPath } from "@/lib/utils";
 
 export function Sidebar() {
@@ -19,7 +20,7 @@ export function Sidebar() {
 	const sessionsChangeCounter = useStore((s) => s.sessionsChangeCounter);
 	const deleteSession = useStore((s) => s.deleteSession);
 
-	const [selectedCwd, setSelectedCwd] = useState<string>("");
+	const [selectedCwd, setSelectedCwd] = usePersistedViewState("chat.workspace", "");
 	const [launchOpen, setLaunchOpen] = useState(false);
 
 	const filtered = useMemo(() => {
