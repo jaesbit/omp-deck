@@ -1477,6 +1477,80 @@ describe("runAutoWorkCycle", () => {
 		expect(runs[0]?.status).toBe("completed");
 	});
 
+	test("a completed turn whose gh pr create fails with a no-commits error on a branch with zero agent commits is reclassified as failed, not completed (T-85)", async () => {
+		setAutoWorkConfig(repoCwd, { ...DEFAULT_AUTO_WORK_VALUES, enabled: true });
+		const task = createTask({ title: "Agent produced no commits", cwd: repoCwd, priority: "P5", autoWork: true });
+		const { notify, calls } = recordingNotify();
+
+		const handle = new FakeSessionHandle("sess_no_commits", 10);
+		const result = await runAutoWorkCycle(repoCwd, fakeBridge(handle), {
+			getSubscriptionUsage: async () => ({ available: true, weeklyPct: 5 }),
+			getDeckBaseUrl: () => "https://deck.example.com",
+			notify,
+			createPullRequest: async () => {
+				throw new Error("gh pr create failed (exit 1): No commits between main and main");
+			},
+		});
+
+		// The worktree genuinely has zero commits beyond origin/main — the "no
+		// commits" gh error reflects reality, not a fluke — so the run must be
+		// reclassified as failed instead of parking an empty task in validate.
+		expect(result.outcome).toBe("failed");
+
+		const updated = getTask(task.id);
+		expect(updated?.stateId).toBe("s_backlog");
+		expect(updated?.body).toContain("Auto Work aborted");
+		expect(updated?.body).toContain("produced no commits");
+
+		const runs = listAutoWorkRuns({ taskId: task.id });
+		expect(runs[0]?.status).toBe("failed");
+		expect(runs[0]?.failureReason).toContain("produced no commits");
+
+		expect(calls).toContainEqual(
+			expect.objectContaining({ kind: "task_failed", displayId: task.displayId, reason: expect.stringContaining("produced no commits") }),
+		);
+	});
+
+	test("a no-commits gh pr create error on a branch that DOES have agent commits still falls through to the completed+fallback-note path (T-85)", async () => {
+		setAutoWorkConfig(repoCwd, { ...DEFAULT_AUTO_WORK_VALUES, enabled: true });
+		const task = createTask({ title: "Branch has real commits", cwd: repoCwd, priority: "P5", autoWork: true });
+
+		// Pre-create the worktree exactly like a previous run would have left
+		// it (same pattern as "reuses an existing registered worktree" above),
+		// then give it a genuine commit beyond origin/main.
+		const slug = task.title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40);
+		const dirName = `aw-T${task.displayId}-${slug}`;
+		const worktreePath = path.join(repoCwd, ".worktrees", dirName);
+		runGit(["worktree", "add", "-b", `auto-work/t${task.displayId}-${slug}`, worktreePath], repoCwd);
+		fs.writeFileSync(path.join(worktreePath, "agent-work.txt"), "agent output\n");
+		runGit(["add", "."], worktreePath);
+		runGit(["commit", "-q", "-m", "agent commit"], worktreePath);
+
+		const handle = new FakeSessionHandle("sess_has_commits", 10);
+		const result = await runAutoWorkCycle(repoCwd, fakeBridge(handle), {
+			getSubscriptionUsage: async () => ({ available: true, weeklyPct: 5 }),
+			getDeckBaseUrl: () => "https://deck.example.com",
+			createPullRequest: async () => {
+				throw new Error("gh pr create failed (exit 1): No commits between main and main");
+			},
+		});
+
+		expect(result.outcome).toBe("completed");
+		if (result.outcome !== "completed") throw new Error("expected completed");
+		expect(result.worktreePath).toBe(worktreePath);
+
+		// branchHasAgentCommits correctly saw the real commit — the safety net
+		// must NOT fire, so this still falls through to the pre-existing "PR
+		// creation failed — open manually" fallback (T-66), not the new failed path.
+		const updated = getTask(task.id);
+		expect(updated?.stateId).toBe("s_validate");
+		expect(updated?.body).toContain("PR creation failed");
+		expect(updated?.body).not.toContain("Auto Work aborted");
+
+		const runs = listAutoWorkRuns({ taskId: task.id });
+		expect(runs[0]?.status).toBe("completed");
+	});
+
 	test("resumes the active run instead of starting new work when another run is already active for the workspace (mutex)", async () => {
 		setAutoWorkConfig(repoCwd, { ...DEFAULT_AUTO_WORK_VALUES, enabled: true });
 		const activeTask = createTask({ title: "Already running", cwd: repoCwd, priority: "P5", autoWork: true });
