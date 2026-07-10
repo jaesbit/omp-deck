@@ -118,6 +118,19 @@ export function computeUsageRollup(messages: AgentMessageJson[]): UsageRollupWir
 	}
 	return rollup;
 }
+/**
+ * Builds the `systemPrompt` array handed to the SDK's `createAgentSession`:
+ * the prelude (or `systemPromptOverride`), then an optional
+ * `systemPromptAppend` block (T-82 — e.g. the auto-work engine's
+ * `kb/rules/auto-work.md`), then the SDK's own default blocks. Order is the
+ * documented `CreateSessionOpts`/`ResumeSessionOpts` contract:
+ * `[prelude, append, ...defaults]`. Extracted to a pure function — as
+ * opposed to inlining at both call sites below — so it's directly unit
+ * testable without mocking `createAgentSession` itself.
+ */
+export function buildSessionSystemPrompt(preludeOrOverride: string, append: string | undefined, defaults: string[]): string[] {
+	return [preludeOrOverride, ...(append ? [append] : []), ...defaults];
+}
 
 
 /**
@@ -189,7 +202,7 @@ export class InProcessAgentBridge implements AgentBridge {
 			// Skip eval-tool Python warmup on session create. On Windows this otherwise
 			// flashes a python.exe console window each turn-zero; on demand spawn is fine.
 			skipPythonPreflight: true,
-			systemPrompt: (defaults) => [opts.systemPromptOverride ?? getEffectivePrelude(), ...defaults],
+			systemPrompt: (defaults) => buildSessionSystemPrompt(opts.systemPromptOverride ?? getEffectivePrelude(), opts.systemPromptAppend, defaults),
 			// Tell the SDK this session has a UI — gates the `ask` tool registration
 			// and any extension that calls `ctx.ui.*`. The actual ExtensionUIContext
 			// is installed via `setToolUIContext(...)` below.
@@ -245,7 +258,7 @@ export class InProcessAgentBridge implements AgentBridge {
 			modelRegistry,
 			authStorage: modelRegistry.authStorage,
 			skipPythonPreflight: true,
-			systemPrompt: (defaults) => [getEffectivePrelude(), ...defaults],
+			systemPrompt: (defaults) => buildSessionSystemPrompt(getEffectivePrelude(), opts.systemPromptAppend, defaults),
 			hasUI: true,
 		});
 		const session = result.session;

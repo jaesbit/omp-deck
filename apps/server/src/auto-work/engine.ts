@@ -50,7 +50,7 @@ import { loadConfig } from "../config.ts";
 import { buildSessionUrl } from "../deck-links.ts";
 import { getAutoWorkConfig } from "../db/auto-work.ts";
 import { resolveKbRoot } from "../kb-service.ts";
-import { BRANCH_NAMING_RULES_BODY } from "../kb-templates.ts";
+import { AUTO_WORK_RULES_BODY, BRANCH_NAMING_RULES_BODY } from "../kb-templates.ts";
 import { completeAutoWorkRun, listAutoWorkRuns, startAutoWorkRun } from "../db/auto-work-runs.ts";
 import { getDeckBaseUrl as getServerDeckBaseUrl } from "../db/server-settings.ts";
 import { findStateByName, getTask, listTasks, moveTask, updateTask } from "../db/tasks.ts";
@@ -379,6 +379,25 @@ export interface RunGlobalAutoWorkCycleOptions extends RunAutoWorkCycleOptions {
 }
 
 /**
+ * Reads `kb/rules/auto-work.md` off disk (same disk-first, in-process-copy-
+ * as-fallback pattern `generateBranchSlugWithModel` below uses for
+ * `kb/rules/branch-naming.md`). Passed as `systemPromptAppend` to every
+ * auto-work task-execution session — both a fresh `bridge.createSession()`
+ * (`runAutoWorkCycle`) and a post-restart `bridge.resumeSession()`
+ * (`resolveRunningSessionHandle`) — so the agent actually sees the
+ * commit/PR/Validate-column workflow instead of just the normal `kb/system`
+ * prelude (T-82).
+ */
+function resolveAutoWorkRulesBody(): string {
+	const rulesPath = path.join(resolveKbRoot(), "rules", "auto-work.md");
+	try {
+		return fs.readFileSync(rulesPath, "utf8");
+	} catch {
+		return AUTO_WORK_RULES_BODY;
+	}
+}
+
+/**
  * Runs exactly one auto-work cycle for `cwd`: pre-flight checks, task
  * selection, worktree + session creation, and waiting for the session to
  * reach a terminal state (or the per-priority timeout to fire). Safe to call
@@ -502,6 +521,7 @@ export async function runAutoWorkCycle(
 	const session = await bridge.createSession({
 		cwd,
 		suppressAutoStart: true,
+		systemPromptAppend: resolveAutoWorkRulesBody(),
 		...(model ? { model } : {}),
 	});
 
@@ -538,6 +558,41 @@ export async function runAutoWorkCycle(
 		usageLookup,
 		startPct: subscriptionPctUsed,
 	});
+	activeRunIds.add(runId);
+	try {
+		const autoWorkRulesPath = path.join(resolveKbRoot(), "rules", "auto-work.md");
+		let autoWorkRules: string;
+		try {
+			autoWorkRules = fs.readFileSync(autoWorkRulesPath, "utf8");
+		} catch {
+			autoWorkRules = AUTO_WORK_RULES_BODY;
+		}
+		// `kb/rules/*.md` is not auto-inlined into the session's system prompt
+		// (only `kb/system/*.md` is, per T-70) — prepend it to the prompt text
+		// itself so the workflow rules (commit format, PR convention,
+		// Validate-not-Done) reach the agent alongside the normal prelude.
+		const prompt = `${autoWorkRules}\n\n---\n\nTrabaja en T-${task.displayId}: ${task.title}\n\n(contexto completo disponible via GET /api/tasks/${task.id})\n\nEl worktree para esta tarea ya está configurado en \`${worktreePath}\` (rama \`auto-work/t${task.displayId}-${branchSlug}\`). Usa ese directorio para todos los commits y cambios de fichero.`;
+		await session.prompt(prompt);
+
+		const timeoutMinutes = resolveAutoWorkTimeoutMinutes(task.priority, config);
+		return await finalizeAutoWorkRun({
+			runId,
+			task,
+			session,
+			worktreePath,
+			timeoutMinutes,
+			resolveDeckBaseUrl,
+			createPullRequest,
+			notify,
+		});
+	} catch (err) {
+		const failureReason = `session prompt failed: ${String(err)}`;
+		failAutoWorkRun(runId, task.id, failureReason);
+		await notify({ kind: "task_failed", displayId: task.displayId, reason: failureReason });
+		return { outcome: "failed", taskId: task.id, runId, sessionId: session.sessionId, worktreePath, failureReason };
+	} finally {
+		activeRunIds.delete(runId);
+	}
 }
 
 // ─── Small IO helpers ───────────────────────────────────────────────────────
@@ -785,7 +840,7 @@ async function resolveRunningSessionHandle(
 
 	const persisted = await findPersistedAutoWorkSession(bridge, run);
 	if (!persisted) return undefined;
-	return bridge.resumeSession({ sessionPath: persisted.path });
+	return bridge.resumeSession({ sessionPath: persisted.path, systemPromptAppend: resolveAutoWorkRulesBody() });
 }
 
 /**

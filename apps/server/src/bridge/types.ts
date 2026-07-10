@@ -110,10 +110,25 @@ export interface CreateSessionOpts {
 	 * every normal user-facing session.
 	 */
 	systemPromptOverride?: string;
+	/**
+	 * Extra text inserted right after the prelude (or `systemPromptOverride`,
+	 * if also set) and before the SDK's own default system-prompt blocks:
+	 * `[prelude, systemPromptAppend, ...defaults]`. For internal callers that
+	 * need the normal `kb/system` prelude PLUS a narrow addendum — e.g. the
+	 * auto-work engine appending `kb/rules/auto-work.md` (T-82) so its
+	 * task-execution sessions see the commit/PR/Validate-column workflow.
+	 * Leave unset for every normal user-facing session.
+	 */
+	systemPromptAppend?: string;
 }
 
 export interface ResumeSessionOpts {
 	sessionPath: string;
+	/** Same semantics as `CreateSessionOpts.systemPromptAppend` — applied on
+	 *  top of the normal prelude when a persisted session is resumed (e.g.
+	 *  the auto-work engine resuming a run after a server restart still
+	 *  needs the auto-work rules in the rebuilt system prompt). */
+	systemPromptAppend?: string;
 }
 
 export type EventListener = (event: AgentSessionEventJson) => void;

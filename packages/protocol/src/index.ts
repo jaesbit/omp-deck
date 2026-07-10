@@ -37,6 +37,26 @@ export interface SessionSummary {
 	durationMs?: number;
 }
 
+export type SessionMonitorStatus = "active" | "error" | "completed";
+
+/** A compact, safe-to-render message tail for the session-monitoring view. */
+export interface SessionMonitorMessage {
+	role: "user" | "assistant" | "notice" | "tool";
+	text: string;
+	isError?: boolean;
+}
+
+/** One session enriched with state and the last displayable transcript messages. */
+export interface SessionMonitorEntry extends SessionSummary {
+	status: SessionMonitorStatus;
+	error?: string;
+	recentMessages: SessionMonitorMessage[];
+}
+
+export interface ListSessionMonitorResponse {
+	sessions: SessionMonitorEntry[];
+}
+
 export interface WorkspaceEntry {
 	cwd: string;
 	label: string;
