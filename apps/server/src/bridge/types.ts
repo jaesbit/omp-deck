@@ -46,6 +46,8 @@ export interface AgentBridge {
 	applyEnvUpdate?(update: RuntimeEnvUpdate): void;
 	/** Catalog of models the SDK knows about, plus a marker on the current one when sessionId is given. */
 	listModels(opts?: { sessionId?: string }): Promise<ModelInfo[]>;
+	/** Generates a session title with the configured model without creating an agent session. */
+	generateTitle(opts: GenerateTitleOpts): Promise<string | null>;
 	/**
 	 * Subscribe to extension-UI dialog frames for `sessionId` (open + cancel).
 	 * Returns an unsubscribe function. Implementations MAY immediately replay
@@ -91,6 +93,13 @@ export interface AgentBridge {
 export interface RuntimeEnvUpdate {
 	idleTimeoutMs?: number;
 	autoStartCommand?: string | null;
+}
+
+export interface GenerateTitleOpts {
+	sessionId: string;
+	model: ModelRef;
+	systemPrompt: string;
+	userMessage: string;
 }
 
 export interface CreateSessionOpts {

@@ -18,16 +18,14 @@
  * so an unconfigured install behaves exactly as before.
  */
 
-import type { AgentBridge, SessionHandle } from "./bridge/types.ts";
-import { getInternalTaskModel } from "./db/server-settings.ts";
+import type { AgentBridge } from "./bridge/types.ts";
+import { getInternalTaskModel, getSessionTitlePrompt } from "./db/server-settings.ts";
 import { getTask } from "./db/tasks.ts";
-import { waitForAutoWorkSessionTerminal } from "./auto-work/engine.ts";
-import { extractLatestAssistantText } from "./routes.ts";
 import { logger } from "./log.ts";
 
 const log = logger("session-title");
 
-const TITLE_SYSTEM_PROMPT = [
+export const DEFAULT_SESSION_TITLE_PROMPT = [
 	"You generate short, specific titles for coding-agent chat sessions.",
 	"You will be given the session's first user message, and optionally the",
 	"kanban task it was started from. Reply with ONLY the title text — no",
@@ -54,47 +52,29 @@ const TASK_ID_PATTERN = /\bt_[a-z0-9]{18}\b/;
  */
 export async function generateSessionTitle(
 	bridge: AgentBridge,
-	opts: { cwd: string; firstMessage: string },
+	opts: { sessionId: string; firstMessage: string },
 ): Promise<string | undefined> {
 	const model = getInternalTaskModel();
 	if (!model) return undefined;
 
 	const taskIdMatch = TASK_ID_PATTERN.exec(opts.firstMessage);
 	const task = taskIdMatch ? getTask(taskIdMatch[0]) : undefined;
-	const taskContext = task ? `\nLinked kanban task: T-${task.displayId}: ${task.title}\n${task.body ?? ""}` : "";
-
-	const prompt = [
+	const userMessage = [
 		`First user message:\n${opts.firstMessage}`,
-		taskContext,
-	].filter(Boolean).join("\n");
+		task ? `Linked kanban task: T-${task.displayId}: ${task.title}\n${task.body ?? ""}` : "",
+	].filter(Boolean).join("\n\n");
 
-	let session: SessionHandle | undefined;
 	try {
-		session = await bridge.createSession({
-			cwd: opts.cwd,
-			suppressAutoStart: true,
-			systemPromptOverride: TITLE_SYSTEM_PROMPT,
+		const text = await bridge.generateTitle({
+			sessionId: opts.sessionId,
 			model,
+			systemPrompt: getSessionTitlePrompt() ?? DEFAULT_SESSION_TITLE_PROMPT,
+			userMessage,
 		});
-		const terminal = waitForAutoWorkSessionTerminal(session, 30_000);
-		await session.prompt(prompt);
-		const outcome = await terminal;
-		if (outcome !== "completed") {
-			log.warn(`session-title generation ${outcome}`);
-			return undefined;
-		}
-		const snapshot = await session.snapshot();
-		const text = extractLatestAssistantText(snapshot.messages);
-		return sanitizeTitle(text) || undefined;
+		return text ? sanitizeTitle(text) || undefined : undefined;
 	} catch (err) {
 		log.warn("session-title generation failed", err);
 		return undefined;
-	} finally {
-		if (session) {
-			bridge.deleteSession(session.sessionId).catch((err) => {
-				log.warn("session-title cleanup failed", err);
-			});
-		}
 	}
 }
 
