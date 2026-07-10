@@ -55,8 +55,10 @@ import {
 import { type ResolveToolDetails, runResolveInvocation } from "@oh-my-pi/pi-coding-agent/tools/resolve";
 import { ToolError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
 import type {
+	ModelRef,
 	PendingPlanApprovalWire,
 	PlanModeContextWire,
+	PlanModeModelOverrideWire,
 	ServerFrame,
 } from "@omp-deck/protocol";
 
@@ -153,6 +155,39 @@ export interface PlanModeSessionSurface {
 	): Promise<void>;
 }
 
+/** Model+thinking configuration for the plan-role override. */
+export interface PlanModelConfig {
+	provider: string;
+	id: string;
+	/** Thinking level to apply with the plan model, or undefined for the default. */
+	thinking?: string;
+}
+
+/**
+ * Injected controller the bridge uses to read + drive the session's model.
+ * Kept separate from `PlanModeSessionSurface` so the model-switch path can be
+ * tested with a fake independent of the plan-mode tool/state surface, and so
+ * the whole feature is inert (no-op) when the host omits the controller.
+ *
+ * `setModelTemporary` MUST switch the active model WITHOUT persisting it as the
+ * session's default (mirrors the SDK's `AgentSession.setModelTemporary`), so
+ * exit can restore the user's original model.
+ */
+export interface PlanModelController {
+	/** Configured plan-role model, or null when no override is set (feature off). */
+	getConfig(): PlanModelConfig | null;
+	/** The session's currently active model, or undefined when none is selected. */
+	currentModel(): ModelRef | undefined;
+	/** The session's currently configured thinking level, or undefined. */
+	currentThinking(): string | undefined;
+	/** Whether the session is mid-stream — switches MUST be deferred if so. */
+	isStreaming(): boolean;
+	/** Temporarily switch the active model (+ optional thinking). Throws on failure. */
+	setModelTemporary(model: ModelRef, thinking?: string): Promise<void>;
+	/** Set only the thinking level (used when the plan model equals the current). */
+	setThinkingLevel(thinking: string | undefined): void;
+}
+
 export interface PlanModeBridgeArgs {
 	sessionId: string;
 	session: PlanModeSessionSurface;
@@ -160,6 +195,8 @@ export interface PlanModeBridgeArgs {
 	getArtifactsDir: () => string | null;
 	/** SDK `sessionManager.getSessionId()` — feeds `local://` resolution. */
 	getSessionId: () => string | null;
+	/** Controls the plan-role model override. Omit to disable model switching. */
+	planModel?: PlanModelController;
 }
 
 /** Bridge over the SDK's plan-mode primitives, scoped to one session. */
@@ -168,6 +205,7 @@ export class PlanModeBridge {
 	private readonly session: PlanModeSessionSurface;
 	private readonly getArtifactsDir: () => string | null;
 	private readonly getSessionId: () => string | null;
+	private readonly planModel: PlanModelController | undefined;
 	private readonly listeners = new Set<FrameListener>();
 	private nextProposalCounter = 1;
 	private enabled = false;
@@ -175,12 +213,25 @@ export class PlanModeBridge {
 	private previousTools: string[] = [];
 	private pendingApproval: PendingApproval | undefined;
 	private disposed = false;
+	/**
+	 * Persistent (pre-plan) model + thinking captured on enter, restored on
+	 * exit. Set while a plan-model override is active OR its switch/restore is
+	 * deferred, so `getPersistentModelState()` can keep the snapshot's session
+	 * model showing the user's model rather than the temporary plan model.
+	 */
+	private previousModelState: { model: ModelRef; thinking?: string } | undefined;
+	/** Deferred model switch (enter apply or exit restore) applied on the next
+	 *  `agent_end` when the session was streaming at the transition. */
+	private pendingModelSwitch: { model: ModelRef; thinking?: string } | undefined;
+	/** The plan model currently applied (not deferred) — feeds the wire override. */
+	private activeModelOverride: { model: ModelRef; thinking?: string } | undefined;
 
 	constructor(args: PlanModeBridgeArgs) {
 		this.sessionId = args.sessionId;
 		this.session = args.session;
 		this.getArtifactsDir = args.getArtifactsDir;
 		this.getSessionId = args.getSessionId;
+		this.planModel = args.planModel;
 	}
 
 	// ─── Snapshot + replay surface (consumed by InProcessAgentBridge) ─────
@@ -195,7 +246,37 @@ export class PlanModeBridge {
 
 	getPlanModeContext(): PlanModeContextWire | undefined {
 		if (!this.enabled) return undefined;
-		return { enabled: true, planFilePath: this.planFilePath };
+		const modelOverride = this.#modelOverrideWire();
+		return {
+			enabled: true,
+			planFilePath: this.planFilePath,
+			...(modelOverride ? { modelOverride } : {}),
+		};
+	}
+
+	/**
+	 * Persistent (pre-plan) model + thinking, exposed so the snapshot can keep
+	 * reporting the user's model as the session model while a temporary plan
+	 * model is active (or its switch/restore is deferred). `undefined` when no
+	 * override is in effect.
+	 */
+	getPersistentModelState(): { model: ModelRef; thinking?: string } | undefined {
+		return this.previousModelState;
+	}
+
+	/** Wire shape of the effective plan-model override, or undefined when none
+	 *  is applied/pending for the current plan-mode session. */
+	#modelOverrideWire(): PlanModeModelOverrideWire | undefined {
+		if (!this.enabled) return undefined;
+		const applied = this.activeModelOverride;
+		if (applied) {
+			return { model: applied.model, ...(applied.thinking ? { thinking: applied.thinking } : {}), pending: false };
+		}
+		const pending = this.pendingModelSwitch;
+		if (pending) {
+			return { model: pending.model, ...(pending.thinking ? { thinking: pending.thinking } : {}), pending: true };
+		}
+		return undefined;
 	}
 
 	getPendingPlanApproval(): PendingPlanApprovalWire | undefined {
@@ -215,12 +296,7 @@ export class PlanModeBridge {
 	getReplayFrames(): PlanModeFrame[] {
 		const out: PlanModeFrame[] = [];
 		if (this.enabled) {
-			out.push({
-				type: "plan_mode_changed",
-				sessionId: this.sessionId,
-				enabled: true,
-				planFilePath: this.planFilePath,
-			});
+			out.push(this.#planModeChangedFrame());
 		}
 		const p = this.pendingApproval;
 		if (p) {
@@ -267,12 +343,11 @@ export class PlanModeBridge {
 		});
 		this.session.setStandingResolveHandler((input) => this.#handlePlanResolve(input));
 
-		this.#broadcast({
-			type: "plan_mode_changed",
-			sessionId: this.sessionId,
-			enabled: true,
-			planFilePath: this.planFilePath,
-		});
+		// Switch to the configured plan-role model (deferred if streaming). A
+		// failure here MUST NOT break plan mode — #applyPlanModel swallows it.
+		await this.#applyPlanModel();
+
+		this.#broadcast(this.#planModeChangedFrame());
 		log.info(`plan mode entered for ${this.sessionId}`);
 	}
 
@@ -319,14 +394,15 @@ export class PlanModeBridge {
 			}
 			this.session.setStandingResolveHandler(null);
 			this.session.setPlanModeState(undefined);
+
+			// Restore the persistent model (deferred if streaming). Best-effort:
+			// a restore failure MUST NOT throw out of exit.
+			await this.#restorePlanModel();
+
 			this.enabled = false;
 			this.previousTools = [];
 
-			this.#broadcast({
-				type: "plan_mode_changed",
-				sessionId: this.sessionId,
-				enabled: false,
-			});
+			this.#broadcast(this.#planModeChangedFrame());
 		}
 
 		log.info(`plan mode exited for ${this.sessionId} (${reason})`);
@@ -358,6 +434,34 @@ export class PlanModeBridge {
 		this.listeners.clear();
 	}
 
+	/**
+	 * Apply a deferred model switch after the current stream ends. The host
+	 * calls this on `agent_end`. Handles both the enter-time switch (session
+	 * was streaming on enter) and the exit-time restore. Best-effort: a failure
+	 * is logged and the pending switch dropped.
+	 */
+	async flushPendingModelSwitch(): Promise<void> {
+		const controller = this.planModel;
+		const pending = this.pendingModelSwitch;
+		if (!controller || !pending) return;
+		this.pendingModelSwitch = undefined;
+		try {
+			await controller.setModelTemporary(pending.model, pending.thinking);
+		} catch (err) {
+			log.warn(`deferred plan model switch failed for ${this.sessionId}`, err);
+			if (!this.enabled) this.previousModelState = undefined;
+			return;
+		}
+		if (this.enabled) {
+			// Enter-time switch flushed: the plan model is now live.
+			this.activeModelOverride = { model: pending.model, ...(pending.thinking ? { thinking: pending.thinking } : {}) };
+			this.#broadcast(this.#planModeChangedFrame());
+		} else {
+			// Exit-time restore flushed: back on the persistent model.
+			this.previousModelState = undefined;
+		}
+	}
+
 	// ─── Internal ─────────────────────────────────────────────────────────
 
 	#broadcast(frame: PlanModeFrame): void {
@@ -368,6 +472,110 @@ export class PlanModeBridge {
 				log.warn(`plan-mode frame listener threw`, err);
 			}
 		}
+	}
+
+	/** Build the `plan_mode_changed` frame for the current state, including the
+	 *  effective model override when one is applied/pending. */
+	#planModeChangedFrame(): PlanModeChangedFrame {
+		const override = this.#modelOverrideWire();
+		return {
+			type: "plan_mode_changed",
+			sessionId: this.sessionId,
+			enabled: this.enabled,
+			...(this.enabled ? { planFilePath: this.planFilePath } : {}),
+			...(override ? { modelOverride: override } : {}),
+		};
+	}
+
+	/**
+	 * On enter: switch to the configured plan-role model. No-op without a
+	 * controller or config. Defers the switch when the session is streaming
+	 * (flushed on the next `agent_end`). A failure is swallowed — a model-switch
+	 * failure MUST NEVER break plan mode (T-30).
+	 */
+	async #applyPlanModel(): Promise<void> {
+		const controller = this.planModel;
+		if (!controller) return;
+		const config = controller.getConfig();
+		if (!config) return;
+		const planRef: ModelRef = { provider: config.provider, id: config.id };
+		const planThinking = config.thinking;
+		const current = controller.currentModel();
+		this.previousModelState = current ? { model: current, thinking: controller.currentThinking() } : undefined;
+
+		const sameModel = current !== undefined && current.provider === planRef.provider && current.id === planRef.id;
+		if (!sameModel) {
+			if (controller.isStreaming()) {
+				// Defer until the stream ends; keep previousModelState so the
+				// snapshot keeps reporting the user's model, not the plan model.
+				this.pendingModelSwitch = { model: planRef, ...(planThinking ? { thinking: planThinking } : {}) };
+				return;
+			}
+			try {
+				await controller.setModelTemporary(planRef, planThinking);
+				this.activeModelOverride = { model: planRef, ...(planThinking ? { thinking: planThinking } : {}) };
+			} catch (err) {
+				log.warn(`plan model switch failed for ${this.sessionId}`, err);
+				// Nothing applied — drop the snapshot so exit has nothing to restore.
+				this.previousModelState = undefined;
+			}
+		} else if (planThinking) {
+			// Same model, only thinking differs — avoid setModelTemporary (which
+			// would reset provider sessions) and adjust the thinking level only.
+			try {
+				controller.setThinkingLevel(planThinking);
+				this.activeModelOverride = { model: planRef, thinking: planThinking };
+			} catch (err) {
+				log.warn(`plan thinking switch failed for ${this.sessionId}`, err);
+				this.previousModelState = undefined;
+			}
+		} else {
+			// Same model, no thinking override — nothing to change or restore.
+			this.previousModelState = undefined;
+		}
+	}
+
+	/**
+	 * On exit: restore the persistent model captured on enter. Idempotent — a
+	 * repeat call after previousModelState is cleared is a no-op. Defers the
+	 * restore when streaming (flushed on the next `agent_end`). Best-effort:
+	 * failures are logged, never thrown.
+	 */
+	async #restorePlanModel(): Promise<void> {
+		const controller = this.planModel;
+		// Drop any un-flushed enter switch — we're leaving plan mode, so flushing
+		// it later would strand the session on the plan model (SDK issue #816).
+		this.pendingModelSwitch = undefined;
+		this.activeModelOverride = undefined;
+		const prev = this.previousModelState;
+		if (!controller || !prev) {
+			this.previousModelState = undefined;
+			return;
+		}
+		const current = controller.currentModel();
+		if (current === undefined || (current.provider === prev.model.provider && current.id === prev.model.id)) {
+			// Model is already persistent (never switched, or same-model
+			// thinking-only override) — restore only the thinking level.
+			try {
+				controller.setThinkingLevel(prev.thinking);
+			} catch (err) {
+				log.warn(`plan thinking restore failed for ${this.sessionId}`, err);
+			}
+			this.previousModelState = undefined;
+			return;
+		}
+		if (controller.isStreaming()) {
+			// Defer the restore; keep previousModelState so the snapshot keeps
+			// showing the user's model until flushPendingModelSwitch applies it.
+			this.pendingModelSwitch = { model: prev.model, ...(prev.thinking ? { thinking: prev.thinking } : {}) };
+			return;
+		}
+		try {
+			await controller.setModelTemporary(prev.model, prev.thinking);
+		} catch (err) {
+			log.warn(`plan model restore failed for ${this.sessionId}`, err);
+		}
+		this.previousModelState = undefined;
 	}
 
 	/**

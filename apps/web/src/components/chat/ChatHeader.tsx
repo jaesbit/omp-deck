@@ -180,6 +180,20 @@ function Inner({ session }: { session: SessionUi }) {
 					<ChevronDown className="h-3 w-3" />
 				</button>
 			) : null}
+			{session.planMode?.modelOverride ? (
+				<span
+					className="hidden h-6 shrink-0 items-center gap-1 rounded-md border border-accent-plan/40 bg-accent-plan/10 px-2 font-mono text-2xs uppercase tracking-meta text-accent-plan sm:flex"
+					title={`Plan mode is running on ${session.planMode.modelOverride.model.provider}/${session.planMode.modelOverride.model.id}${session.planMode.modelOverride.thinking ? ` · thinking ${session.planMode.modelOverride.thinking}` : ""}${session.planMode.modelOverride.pending ? " (applies after the current turn)" : ""}. The session model shown left is restored on exit.`}
+				>
+					<span className="max-w-[160px] truncate">plan: {session.planMode.modelOverride.model.id}</span>
+					{session.planMode.modelOverride.thinking ? (
+						<span className="text-accent-plan/70">{session.planMode.modelOverride.thinking}</span>
+					) : null}
+					{session.planMode.modelOverride.pending ? (
+						<span className="text-accent-plan/70">pending</span>
+					) : null}
+				</span>
+			) : null}
 			{session.planMode?.enabled ? (
 				<span
 					className="flex h-6 items-center rounded-md border border-thinking/60 bg-thinking/10 px-1.5 font-mono text-2xs uppercase tracking-meta text-thinking"
