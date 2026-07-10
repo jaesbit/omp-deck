@@ -46,7 +46,28 @@ ${body}\n`;
 export const AUTO_WORK_RULES_BODY = integration("auto-work", `# Auto Work
 
 Execute the selected task in its prepared worktree. Read its card, implement and
-verify the requested change, then follow the repository's commit, review and task-state rules.`);
+verify the requested change, then commit your work.
+
+## Your responsibilities
+
+1. **Implement** the task as described in its kanban body (fetch via the API if needed).
+2. **Commit** — at least one commit on the task branch in the worktree, using the worktree
+   path given in your initial prompt. Subject: \`T-N: <what changed>\` (imperative, ≤72 chars).
+   Commit early and often: if you reach a meaningful checkpoint but are not yet done, commit
+   what you have so no work is lost if the session is cut short.
+3. **Stop** — do NOT open a PR, do NOT move the task state. The engine handles both
+   automatically after your session ends.
+
+## Critical: you MUST commit
+
+Without a commit on the branch, the engine cannot open a PR and the run is marked failed.
+All your work disappears. A partial commit is always better than no commit.
+
+## Commit message format
+
+- Subject: \`T-N: <imperative description>\` — no period, ≤72 chars.
+- Body (optional): explain *why* if it isn't obvious from the diff.
+- No marketing language ("add support for", "implement feature") — just what the diff does.`);
 
 export const BRANCH_NAMING_RULES_BODY = integration("branch-naming", `# Branch naming
 
