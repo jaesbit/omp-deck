@@ -587,28 +587,23 @@ export const useStore = create<StoreState>()(
 		},
 
 		async deleteSession(id: string) {
-			const wasActive = get().activeId === id;
-			if (wasActive) set({ activeId: undefined });
+			// Backend delete FIRST: on failure, keep all local state intact and
+			// rethrow so callers can surface the error — silently pruning a
+			// session the server still has would make it "reappear" on reload.
+			await api.disposeSession(id);
 			set((s) => {
-				const next = new Map(s.watchingSessionCounts);
-				next.delete(id);
-				return { watchingSessionCounts: next };
-			});
-			releaseSessionSubscription(id, get);
-			try {
-				await api.disposeSession(id);
-			} catch (err) {
-				console.warn("delete session failed", err);
-			}
-			set((s) => {
-				const next = { ...s.sessionsById };
-				delete next[id];
+				const nextWatching = new Map(s.watchingSessionCounts);
+				nextWatching.delete(id);
+				const nextById = { ...s.sessionsById };
+				delete nextById[id];
 				return {
-					sessionsById: next,
+					watchingSessionCounts: nextWatching,
+					sessionsById: nextById,
 					sessions: s.sessions.filter((row) => row.id !== id),
 					activeId: s.activeId === id ? undefined : s.activeId,
 				};
 			});
+			releaseSessionSubscription(id, get);
 		},
 
 		closeActiveSession() {
