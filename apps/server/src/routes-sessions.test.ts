@@ -439,6 +439,10 @@ describe("GET /sessions/monitor", () => {
 			sessions: [
 				{
 					...monitored,
+					// Scanned from the transcript: 1 user message (toolResult rows are
+					// not user/assistant messages), no toolCall blocks.
+					messageCount: 1,
+					toolCallCount: 0,
 					status: "error",
 					error: "Agent turn ended with an error.",
 					recentMessages: [
