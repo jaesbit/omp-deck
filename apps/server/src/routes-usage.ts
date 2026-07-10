@@ -5,14 +5,18 @@
  *   usage via the SDK's AuthStorage; see `usage-subscription.ts`.
  * - `GET /usage/sessions` — per-session token/cost totals from persisted
  *   transcripts; see `usage-sessions.ts`.
+ * - `GET /usage/spend` — per-account (workspace) spend by day/week/month
+ *   bucket, from the same transcripts; see `usage-spend.ts` (T-98).
  */
 
 import { Hono } from "hono";
-import type { ListSessionUsageResponse } from "@omp-deck/protocol";
+import type { ListSessionUsageResponse, SpendSummaryResponse } from "@omp-deck/protocol";
 
 import type { AgentBridge } from "./bridge/types.ts";
+import type { Config } from "./config.ts";
 import { getSubscriptionUsage, type UsageReportsFetcher } from "./usage-subscription.ts";
 import { listSessionUsage } from "./usage-sessions.ts";
+import { getAccountSpendSummary } from "./usage-spend.ts";
 
 const DEFAULT_SESSIONS_LIMIT = 20;
 const MAX_SESSIONS_LIMIT = 200;
@@ -25,11 +29,16 @@ export interface BuildUsageRouterOptions {
 	fetcherOverride?: UsageReportsFetcher;
 }
 
-export function buildUsageRouter(bridge: AgentBridge, options: BuildUsageRouterOptions = {}): Hono {
+export function buildUsageRouter(bridge: AgentBridge, config: Config, options: BuildUsageRouterOptions = {}): Hono {
 	const app = new Hono();
 
 	app.get("/usage/subscription", async (c) => {
 		const result = await getSubscriptionUsage(options.fetcherOverride);
+		return c.json(result);
+	});
+
+	app.get("/usage/spend", async (c) => {
+		const result: SpendSummaryResponse = await getAccountSpendSummary(bridge, config);
 		return c.json(result);
 	});
 

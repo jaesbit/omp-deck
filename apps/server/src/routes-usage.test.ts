@@ -12,7 +12,8 @@ import * as path from "node:path";
 import type { UsageReport } from "@oh-my-pi/pi-ai";
 
 import type { AgentBridge } from "./bridge/types.ts";
-import type { SessionSummary, SubscriptionUsageResponse, ListSessionUsageResponse } from "@omp-deck/protocol";
+import type { Config } from "./config.ts";
+import type { SessionSummary, SubscriptionUsageResponse, ListSessionUsageResponse, SpendSummaryResponse } from "@omp-deck/protocol";
 import { buildUsageRouter } from "./routes-usage.ts";
 import { resetSubscriptionUsageCacheForTests } from "./usage-subscription.ts";
 
@@ -54,6 +55,10 @@ function fakeBridge(sessions: SessionSummary[]): AgentBridge {
 	} as unknown as AgentBridge;
 }
 
+function fakeConfig(): Config {
+	return { defaultCwd: "/home/user/project", extraWorkspaces: [] as string[] } as Config;
+}
+
 function reportWith(usedFraction: number, resetsAt?: number): UsageReport {
 	return {
 		provider: "anthropic",
@@ -74,7 +79,7 @@ describe("GET /usage/subscription", () => {
 	test("returns available usage from UsageReport", async () => {
 		const resetMs = Date.parse("2026-08-01T00:00:00Z");
 		let calls = 0;
-		const app = buildUsageRouter(fakeBridge([]), {
+		const app = buildUsageRouter(fakeBridge([]), fakeConfig(), {
 			fetcherOverride: async () => {
 				calls++;
 				return [reportWith(0.6, resetMs)];
@@ -98,7 +103,7 @@ describe("GET /usage/subscription", () => {
 	});
 
 	test("returns graceful unavailable when fetcher returns null", async () => {
-		const app = buildUsageRouter(fakeBridge([]), {
+		const app = buildUsageRouter(fakeBridge([]), fakeConfig(), {
 			fetcherOverride: async () => null,
 		});
 		const res = await app.request("/usage/subscription");
@@ -108,7 +113,7 @@ describe("GET /usage/subscription", () => {
 	});
 
 	test("returns graceful unavailable when fetcher throws", async () => {
-		const app = buildUsageRouter(fakeBridge([]), {
+		const app = buildUsageRouter(fakeBridge([]), fakeConfig(), {
 			fetcherOverride: async () => {
 				throw new Error("network error");
 			},
@@ -138,7 +143,7 @@ describe("GET /usage/sessions", () => {
 			updatedAt: "2026-01-01T00:00:00Z",
 			messageCount: 1,
 		};
-		const app = buildUsageRouter(fakeBridge([summary]));
+		const app = buildUsageRouter(fakeBridge([summary]), fakeConfig());
 		const res = await app.request("/usage/sessions");
 		expect(res.status).toBe(200);
 		const body = (await res.json()) as ListSessionUsageResponse;
@@ -148,8 +153,72 @@ describe("GET /usage/sessions", () => {
 	});
 
 	test("rejects a non-positive-integer limit with 400", async () => {
-		const app = buildUsageRouter(fakeBridge([]));
+		const app = buildUsageRouter(fakeBridge([]), fakeConfig());
 		const res = await app.request("/usage/sessions?limit=abc");
 		expect(res.status).toBe(400);
+	});
+});
+
+describe("GET /usage/spend", () => {
+	test("aggregates cost into the current day/week/month buckets, keyed by workspace cwd", async () => {
+		const nowIso = new Date().toISOString();
+		const filePath = path.join(dir, "spend1.jsonl");
+		writeFileSync(
+			filePath,
+			[
+				{ type: "message", timestamp: nowIso, message: { role: "assistant", usage: { cost: { total: 0.5 } } } },
+				{ type: "message", timestamp: nowIso, message: { role: "assistant", usage: { cost: { total: 0.25 } } } },
+			]
+				.map((l) => JSON.stringify(l))
+				.join("\n") + "\n",
+		);
+		const summary: SessionSummary = {
+			id: "spend1",
+			path: filePath,
+			cwd: "/spend/workspace",
+			createdAt: nowIso,
+			updatedAt: nowIso,
+			messageCount: 2,
+		};
+		const app = buildUsageRouter(fakeBridge([summary]), fakeConfig());
+		const res = await app.request("/usage/spend");
+		expect(res.status).toBe(200);
+		const body = (await res.json()) as SpendSummaryResponse;
+		expect(typeof body.dayStart).toBe("string");
+		expect(typeof body.weekStart).toBe("string");
+		expect(typeof body.monthStart).toBe("string");
+		expect(Array.isArray(body.accounts)).toBe(true);
+
+		const entry = body.accounts.find((a) => a.cwd === "/spend/workspace");
+		expect(entry).toBeDefined();
+		expect(entry?.month).toBeGreaterThan(0);
+		expect(entry?.month).toBeCloseTo(0.75, 6);
+	});
+
+	test("returns a zeroed entry for the default workspace when there are no sessions at all", async () => {
+		const app = buildUsageRouter(fakeBridge([]), fakeConfig());
+		const res = await app.request("/usage/spend");
+		expect(res.status).toBe(200);
+		const body = (await res.json()) as SpendSummaryResponse;
+
+		const entry = body.accounts.find((a) => a.cwd === fakeConfig().defaultCwd);
+		expect(entry).toBeDefined();
+		expect(entry).toMatchObject({ day: 0, week: 0, month: 0 });
+	});
+
+	test("every account entry has cwd/label/day/week/month with the expected JS types", async () => {
+		const app = buildUsageRouter(fakeBridge([]), fakeConfig());
+		const res = await app.request("/usage/spend");
+		expect(res.status).toBe(200);
+		const body = (await res.json()) as SpendSummaryResponse;
+
+		expect(body.accounts.length).toBeGreaterThan(0);
+		for (const entry of body.accounts) {
+			expect(typeof entry.cwd).toBe("string");
+			expect(typeof entry.label).toBe("string");
+			expect(typeof entry.day).toBe("number");
+			expect(typeof entry.week).toBe("number");
+			expect(typeof entry.month).toBe("number");
+		}
 	});
 });

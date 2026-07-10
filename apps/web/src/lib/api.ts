@@ -37,6 +37,7 @@ import type {
 	SetInternalTaskModelRequest,
 	PlanModelResponse,
 	SetPlanModelRequest,
+	SpendSummaryResponse,
 	SetTaskRewriteModelRequest,
 	SetAdvisorSettingsRequest,
 	SubscriptionUsageResponse,
@@ -208,6 +209,9 @@ export const api = {
 	},
 	getSubscriptionUsage(): Promise<SubscriptionUsageResponse> {
 		return request<SubscriptionUsageResponse>(`/usage/subscription`);
+	},
+	getAccountSpendSummary(): Promise<SpendSummaryResponse> {
+		return request<SpendSummaryResponse>(`/usage/spend`);
 	},
 	listTasks(): Promise<ListTasksResponse> {
 		return request<ListTasksResponse>("/tasks");
