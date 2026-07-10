@@ -123,6 +123,40 @@ export function setInternalTaskModel(model: ModelRefRaw | null): ModelRefRaw | n
 	return getInternalTaskModel();
 }
 
+const PLAN_MODEL_KEY = "planModel";
+
+export type PlanModelConfigRaw = { provider: string; id: string; thinking?: string };
+
+/**
+ * Plan-role model + thinking level (T-30). The deck temporarily switches a
+ * session to this model when it enters Plan Mode and restores the persistent
+ * model on exit. `null` means no override: Plan Mode keeps the session's
+ * current model, so an unconfigured install behaves exactly as before.
+ */
+export function getPlanModel(): PlanModelConfigRaw | null {
+	const stored = getServerSetting(PLAN_MODEL_KEY);
+	if (!stored) return null;
+	try {
+		const parsed = JSON.parse(stored) as PlanModelConfigRaw;
+		if (typeof parsed?.provider !== "string" || typeof parsed?.id !== "string") return null;
+		return parsed;
+	} catch {
+		return null;
+	}
+}
+
+/** Pass `null` to clear the override (Plan Mode stops switching models). */
+export function setPlanModel(model: PlanModelConfigRaw | null): PlanModelConfigRaw | null {
+	if (model === null) {
+		deleteServerSetting(PLAN_MODEL_KEY);
+	} else {
+		const record: PlanModelConfigRaw = { provider: model.provider, id: model.id };
+		if (model.thinking) record.thinking = model.thinking;
+		setServerSetting(PLAN_MODEL_KEY, JSON.stringify(record));
+	}
+	return getPlanModel();
+}
+
 const SESSION_TITLE_PROMPT_KEY = "sessionTitlePrompt";
 
 /** Returns the operator override, or null to use the bundled title prompt. */

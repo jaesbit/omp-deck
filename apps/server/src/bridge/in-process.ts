@@ -56,7 +56,8 @@ import { ExtensionUIBridge } from "./ext-ui-bridge.ts";
 import { GoalModeBridge } from "./goal-mode-bridge.ts";
 import type { GoalAction, GoalModeSessionSurface, GoalModeState } from "./goal-mode-bridge.ts";
 import { PlanModeBridge } from "./plan-mode-bridge.ts";
-import type { PlanModeSessionSurface } from "./plan-mode-bridge.ts";
+import type { PlanModelController, PlanModeSessionSurface } from "./plan-mode-bridge.ts";
+import { getPlanModel } from "../db/server-settings.ts";
 import type {
 	AgentBridge,
 	CreateSessionOpts,
@@ -570,11 +571,47 @@ export class InProcessAgentBridge implements AgentBridge {
 		// the deck UI via WebSocket frames.
 		setToolUIContext(uiBridge, true);
 
+		// Drives the plan-role model override (T-30). A single typed view of the
+		// session, read/written through the controller. `setModelTemporary` swaps
+		// the active model WITHOUT persisting it as the session default, so exit
+		// restores the user's model.
+		const planModelSession = session as unknown as {
+			configuredThinkingLevel?: () => unknown;
+			isStreaming?: boolean;
+			setModelTemporary?: (model: unknown, thinking?: unknown) => Promise<void>;
+			setThinkingLevel?: (level: unknown) => void;
+		};
+		const planModelController: PlanModelController = {
+			getConfig: () => getPlanModel(),
+			currentModel: () => readCurrentModelRef(session),
+			currentThinking: () => {
+				const level = planModelSession.configuredThinkingLevel?.();
+				return typeof level === "string" ? level : undefined;
+			},
+			isStreaming: () => planModelSession.isStreaming === true,
+			setModelTemporary: async (ref, thinking) => {
+				const registry = await this.ensureModelRegistry();
+				const model = registry.find(ref.provider, ref.id);
+				if (!model) throw new Error(`unknown model: ${ref.provider}/${ref.id}`);
+				if (!registry.hasConfiguredAuth(model)) {
+					throw new Error(`no auth configured for ${ref.provider}/${ref.id}`);
+				}
+				if (typeof planModelSession.setModelTemporary !== "function") {
+					throw new Error("session.setModelTemporary is not available on this SDK build");
+				}
+				await planModelSession.setModelTemporary(model, thinking);
+			},
+			setThinkingLevel: (thinking) => {
+				planModelSession.setThinkingLevel?.(thinking);
+			},
+		};
+
 		const planBridge = new PlanModeBridge({
 			sessionId,
 			session: session as unknown as PlanModeSessionSurface,
 			getArtifactsDir: () => (sessionManager as unknown as { getArtifactsDir: () => string | null }).getArtifactsDir(),
 			getSessionId: () => (sessionManager as unknown as { getSessionId: () => string | null }).getSessionId(),
+			planModel: planModelController,
 		});
 
 		const goalBridge = new GoalModeBridge(
@@ -622,6 +659,9 @@ export class InProcessAgentBridge implements AgentBridge {
 					handle.emit({ type: "context_usage", contextUsage: usage } as unknown as AgentSessionEventJson);
 				}
 			}
+			// Apply any deferred plan-mode model switch/restore now that the
+			// stream has ended (T-30). No-op when nothing is pending.
+			if (type === "agent_end") void planBridge.flushPendingModelSwitch();
 			// Same pattern for todos: the SDK only fires `todo_reminder` on
 			// reminder ticks (typically at turn boundaries), so the deck UI
 			// shows stale todos between an agent's `todo` call and the
@@ -1029,7 +1069,18 @@ export class InProcessSessionHandle implements SessionHandle {
 		};
 		if (usage) snap.contextUsage = usage;
 		const planMode = this.planBridge.getPlanModeContext();
-		if (planMode) snap.planMode = planMode;
+		if (planMode) {
+			snap.planMode = planMode;
+			// While a plan-role model override is active (or its switch/restore is
+			// deferred), `s.model` is the temporary plan model. Keep the snapshot's
+			// session model showing the user's persistent model so the header isn't
+			// confused with the effective plan model (surfaced via planMode.modelOverride).
+			const persistent = this.planBridge.getPersistentModelState();
+			if (persistent) {
+				snap.model = persistent.model;
+				snap.thinkingLevel = persistent.thinking;
+			}
+		}
 		const pendingPlan = this.planBridge.getPendingPlanApproval();
 		if (pendingPlan) snap.pendingPlanApproval = pendingPlan;
 		const goalMode = this.goalBridge.getContext();

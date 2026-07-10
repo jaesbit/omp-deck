@@ -34,6 +34,8 @@ import type {
 	SetAutoWorkGlobalConfigRequest,
 	SetDeckBaseUrlRequest,
 	SetInternalTaskModelRequest,
+	PlanModelResponse,
+	SetPlanModelRequest,
 	SessionTitlePromptResponse,
 	SetSessionTitlePromptRequest,
 	SetTaskRewriteModelRequest,
@@ -223,6 +225,15 @@ export const api = {
 		return request<InternalTaskModelResponse>("/settings/internal-task-model", {
 			method: "PUT",
 			body: JSON.stringify({ model } satisfies SetInternalTaskModelRequest),
+		});
+	},
+	getPlanModel(): Promise<PlanModelResponse> {
+		return request<PlanModelResponse>("/settings/plan-model");
+	},
+	setPlanModel(model: ModelRef | null, thinking: string | null = null): Promise<PlanModelResponse> {
+		return request<PlanModelResponse>("/settings/plan-model", {
+			method: "PUT",
+			body: JSON.stringify({ model, thinking } satisfies SetPlanModelRequest),
 		});
 	},
 	getSessionTitlePrompt(): Promise<SessionTitlePromptResponse> {

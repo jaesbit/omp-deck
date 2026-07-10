@@ -15,9 +15,15 @@ import * as path from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 
-import type { ServerFrame } from "@omp-deck/protocol";
+import type { ModelRef, ServerFrame } from "@omp-deck/protocol";
 
-import { PlanModeBridge, type PlanModeFrame, type PlanModeSessionSurface } from "./plan-mode-bridge.ts";
+import {
+	PlanModeBridge,
+	type PlanModeFrame,
+	type PlanModelConfig,
+	type PlanModelController,
+	type PlanModeSessionSurface,
+} from "./plan-mode-bridge.ts";
 
 type PromptCall = {
 	text: string;
@@ -74,6 +80,76 @@ class StubSession implements PlanModeSessionSurface {
 	}
 }
 
+type FakePlanModelOptions = {
+	config: PlanModelConfig | null;
+	current?: ModelRef;
+	currentThinking?: string;
+	streaming?: boolean;
+	/** Make setModelTemporary reject to exercise the failure-isolation path. */
+	rejectSwitch?: boolean;
+};
+
+/**
+ * Hand-rolled PlanModelController that behaves like the real controller: a
+ * successful setModelTemporary actually flips the "active" model (so the
+ * exit-restore path sees a changed current model and restores it), and
+ * setThinkingLevel adjusts the thinking level without touching the model.
+ * Records each switch/thinking call so tests assert the observable override
+ * behavior rather than restating the bridge's internals.
+ */
+class FakePlanModel implements PlanModelController {
+	readonly setModelTemporaryCalls: Array<{ model: ModelRef; thinking?: string }> = [];
+	readonly setThinkingLevelCalls: Array<string | undefined> = [];
+	private readonly config: PlanModelConfig | null;
+	private current: ModelRef | undefined;
+	private thinking: string | undefined;
+	private streaming: boolean;
+	private readonly rejectSwitch: boolean;
+
+	constructor(opts: FakePlanModelOptions) {
+		this.config = opts.config;
+		this.current = opts.current;
+		this.thinking = opts.currentThinking;
+		this.streaming = opts.streaming ?? false;
+		this.rejectSwitch = opts.rejectSwitch ?? false;
+	}
+
+	getConfig(): PlanModelConfig | null {
+		return this.config;
+	}
+
+	currentModel(): ModelRef | undefined {
+		return this.current;
+	}
+
+	currentThinking(): string | undefined {
+		return this.thinking;
+	}
+
+	isStreaming(): boolean {
+		return this.streaming;
+	}
+
+	async setModelTemporary(model: ModelRef, thinking?: string): Promise<void> {
+		this.setModelTemporaryCalls.push({ model, ...(thinking !== undefined ? { thinking } : {}) });
+		if (this.rejectSwitch) {
+			throw new Error("simulated model switch failure");
+		}
+		this.current = model;
+		this.thinking = thinking;
+	}
+
+	setThinkingLevel(thinking: string | undefined): void {
+		this.setThinkingLevelCalls.push(thinking);
+		this.thinking = thinking;
+	}
+
+	/** Flip the streaming flag to simulate a stream starting/ending. */
+	setStreaming(value: boolean): void {
+		this.streaming = value;
+	}
+}
+
 function collect(bridge: PlanModeBridge): { frames: PlanModeFrame[]; unsub: () => void } {
 	const frames: PlanModeFrame[] = [];
 	const unsub = bridge.subscribeFrames((frame) => {
@@ -107,7 +183,7 @@ interface Harness {
 	cleanup: () => Promise<void>;
 }
 
-async function makeHarness(): Promise<Harness> {
+async function makeHarness(planModel?: PlanModelController): Promise<Harness> {
 	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "plan-mode-bridge-test-"));
 	// The SDK's `local://` resolver scopes paths to `<artifactsDir>/local/`.
 	const localDir = path.join(dir, "local");
@@ -118,6 +194,7 @@ async function makeHarness(): Promise<Harness> {
 		session,
 		getArtifactsDir: () => dir,
 		getSessionId: () => "s_test",
+		...(planModel ? { planModel } : {}),
 	});
 	const { frames } = collect(bridge);
 	return {
@@ -487,5 +564,279 @@ describe("PlanModeBridge", () => {
 		// Tear down without resolving so the test exits cleanly.
 		harness.bridge.dispose();
 		await expect(resultPromise).rejects.toThrow();
+	});
+});
+
+describe("PlanModeBridge plan-role model", () => {
+	const CURRENT: ModelRef = { provider: "anthropic", id: "claude-sonnet" };
+	const PLAN: ModelRef = { provider: "openai", id: "gpt-plan" };
+
+	let harness: Harness | undefined;
+
+	afterEach(async () => {
+		if (harness) await harness.cleanup();
+		harness = undefined;
+	});
+
+	it("enter switches to the plan model and reports the override + persistent model", async () => {
+		const fake = new FakePlanModel({
+			config: { provider: PLAN.provider, id: PLAN.id, thinking: "high" },
+			current: CURRENT,
+			currentThinking: "medium",
+			streaming: false,
+		});
+		harness = await makeHarness(fake);
+
+		await harness.bridge.enter();
+
+		// Switched once to the plan model + its thinking; no thinking-only path.
+		expect(fake.setModelTemporaryCalls).toEqual([{ model: PLAN, thinking: "high" }]);
+		expect(fake.setThinkingLevelCalls).toEqual([]);
+		// Effective override is live (pending:false).
+		expect(harness.bridge.getPlanModeContext()).toEqual({
+			enabled: true,
+			planFilePath: "local://PLAN.md",
+			modelOverride: { model: PLAN, thinking: "high", pending: false },
+		});
+		// The broadcast frame advertises the same override.
+		expect(harness.frames.at(-1)).toEqual({
+			type: "plan_mode_changed",
+			sessionId: "s_test",
+			enabled: true,
+			planFilePath: "local://PLAN.md",
+			modelOverride: { model: PLAN, thinking: "high", pending: false },
+		});
+		// Snapshot keeps reporting the user's pre-plan model.
+		expect(harness.bridge.getPersistentModelState()).toEqual({
+			model: CURRENT,
+			thinking: "medium",
+		});
+	});
+
+	it("defers the switch while streaming, then flush applies it and broadcasts the override", async () => {
+		const fake = new FakePlanModel({
+			config: { provider: PLAN.provider, id: PLAN.id, thinking: "high" },
+			current: CURRENT,
+			currentThinking: "medium",
+			streaming: true,
+		});
+		harness = await makeHarness(fake);
+
+		await harness.bridge.enter();
+
+		// Streaming on enter: the switch is queued, not applied.
+		expect(fake.setModelTemporaryCalls).toEqual([]);
+		expect(harness.bridge.getPlanModeContext()?.modelOverride).toEqual({
+			model: PLAN,
+			thinking: "high",
+			pending: true,
+		});
+		expect(harness.frames.at(-1)).toEqual({
+			type: "plan_mode_changed",
+			sessionId: "s_test",
+			enabled: true,
+			planFilePath: "local://PLAN.md",
+			modelOverride: { model: PLAN, thinking: "high", pending: true },
+		});
+
+		const framesBeforeFlush = harness.frames.length;
+		fake.setStreaming(false); // stream ended -> host calls flush on agent_end
+		await harness.bridge.flushPendingModelSwitch();
+
+		// Deferred switch is now applied exactly once and flipped to live.
+		expect(fake.setModelTemporaryCalls).toEqual([{ model: PLAN, thinking: "high" }]);
+		expect(harness.bridge.getPlanModeContext()?.modelOverride).toEqual({
+			model: PLAN,
+			thinking: "high",
+			pending: false,
+		});
+		// Flush broadcasts a fresh frame flipping pending -> false.
+		expect(harness.frames.length).toBe(framesBeforeFlush + 1);
+		expect(harness.frames.at(-1)).toEqual({
+			type: "plan_mode_changed",
+			sessionId: "s_test",
+			enabled: true,
+			planFilePath: "local://PLAN.md",
+			modelOverride: { model: PLAN, thinking: "high", pending: false },
+		});
+	});
+
+	it("exit restores the persistent model when not streaming", async () => {
+		const fake = new FakePlanModel({
+			config: { provider: PLAN.provider, id: PLAN.id, thinking: "high" },
+			current: CURRENT,
+			currentThinking: "medium",
+			streaming: false,
+		});
+		harness = await makeHarness(fake);
+
+		await harness.bridge.enter();
+		expect(fake.setModelTemporaryCalls).toEqual([{ model: PLAN, thinking: "high" }]);
+
+		await harness.bridge.exit("user_cancelled");
+
+		// Second call restores the ORIGINAL model + thinking.
+		expect(fake.setModelTemporaryCalls).toEqual([
+			{ model: PLAN, thinking: "high" },
+			{ model: CURRENT, thinking: "medium" },
+		]);
+		expect(harness.bridge.getPlanModeContext()).toBeUndefined();
+		expect(harness.bridge.getPersistentModelState()).toBeUndefined();
+	});
+
+	it("defers the restore while streaming and keeps showing the user's model until flush", async () => {
+		const fake = new FakePlanModel({
+			config: { provider: PLAN.provider, id: PLAN.id, thinking: "high" },
+			current: CURRENT,
+			currentThinking: "medium",
+			streaming: false,
+		});
+		harness = await makeHarness(fake);
+
+		await harness.bridge.enter(); // applied immediately (not streaming)
+		expect(fake.setModelTemporaryCalls).toEqual([{ model: PLAN, thinking: "high" }]);
+
+		fake.setStreaming(true); // a new stream is running when the user exits
+		await harness.bridge.exit("user_cancelled");
+
+		// Restore deferred: no restore call yet, snapshot still shows user's model.
+		expect(fake.setModelTemporaryCalls).toEqual([{ model: PLAN, thinking: "high" }]);
+		expect(harness.bridge.getPersistentModelState()).toEqual({
+			model: CURRENT,
+			thinking: "medium",
+		});
+
+		fake.setStreaming(false);
+		await harness.bridge.flushPendingModelSwitch();
+
+		// Now the restore is applied and the persistent snapshot is cleared.
+		expect(fake.setModelTemporaryCalls).toEqual([
+			{ model: PLAN, thinking: "high" },
+			{ model: CURRENT, thinking: "medium" },
+		]);
+		expect(harness.bridge.getPersistentModelState()).toBeUndefined();
+	});
+
+	it("does not break plan mode when the model switch fails on enter", async () => {
+		const fake = new FakePlanModel({
+			config: { provider: PLAN.provider, id: PLAN.id, thinking: "high" },
+			current: CURRENT,
+			currentThinking: "medium",
+			streaming: false,
+			rejectSwitch: true,
+		});
+		harness = await makeHarness(fake);
+
+		// A switch failure MUST NOT throw out of enter.
+		await expect(harness.bridge.enter()).resolves.toBeUndefined();
+
+		// Plan mode is still active, but nothing was applied -> no override.
+		expect(harness.bridge.isEnabled()).toBe(true);
+		expect(harness.bridge.getPlanModeContext()?.modelOverride).toBeUndefined();
+		const callsAfterEnter = fake.setModelTemporaryCalls.length;
+		expect(callsAfterEnter).toBe(1); // the one attempt that rejected
+
+		// Exit has nothing to restore: no extra switch call, and it must not throw.
+		await expect(harness.bridge.exit("user_cancelled")).resolves.toBeUndefined();
+		expect(fake.setModelTemporaryCalls.length).toBe(callsAfterEnter);
+	});
+
+	it("restores the persistent model at most once across repeated exits", async () => {
+		const fake = new FakePlanModel({
+			config: { provider: PLAN.provider, id: PLAN.id, thinking: "high" },
+			current: CURRENT,
+			currentThinking: "medium",
+			streaming: false,
+		});
+		harness = await makeHarness(fake);
+
+		await harness.bridge.enter();
+		await harness.bridge.exit("user_cancelled");
+		await harness.bridge.exit("user_cancelled");
+
+		const restoreCalls = fake.setModelTemporaryCalls.filter(
+			(c) => c.model.provider === CURRENT.provider && c.model.id === CURRENT.id,
+		);
+		expect(restoreCalls).toHaveLength(1);
+		expect(fake.setModelTemporaryCalls).toHaveLength(2); // 1 switch + 1 restore
+	});
+
+	it("adjusts thinking only when the plan model equals the current model", async () => {
+		const fake = new FakePlanModel({
+			config: { provider: CURRENT.provider, id: CURRENT.id, thinking: "high" },
+			current: CURRENT,
+			currentThinking: "medium",
+			streaming: false,
+		});
+		harness = await makeHarness(fake);
+
+		await harness.bridge.enter();
+
+		// Same model, different thinking -> thinking-only change, never setModelTemporary.
+		expect(fake.setThinkingLevelCalls).toEqual(["high"]);
+		expect(fake.setModelTemporaryCalls).toEqual([]);
+		expect(harness.bridge.getPlanModeContext()?.modelOverride).toEqual({
+			model: CURRENT,
+			thinking: "high",
+			pending: false,
+		});
+
+		await harness.bridge.exit("user_cancelled");
+
+		// Exit restores the original thinking level, still never touching the model.
+		expect(fake.setThinkingLevelCalls).toEqual(["high", "medium"]);
+		expect(fake.setModelTemporaryCalls).toEqual([]);
+	});
+
+	it("is inert (no override, no model calls) when no controller is supplied", async () => {
+		harness = await makeHarness(); // no planModel
+
+		await harness.bridge.enter();
+
+		// Non-model plan behavior is unchanged.
+		expect(harness.session.getActiveToolNames().includes("resolve")).toBe(true);
+		expect(harness.session.standingHandler).toBeTypeOf("function");
+		// Context and frame carry no modelOverride.
+		expect(harness.bridge.getPlanModeContext()).toEqual({
+			enabled: true,
+			planFilePath: "local://PLAN.md",
+		});
+		expect(harness.frames.at(-1)).toEqual({
+			type: "plan_mode_changed",
+			sessionId: "s_test",
+			enabled: true,
+			planFilePath: "local://PLAN.md",
+		});
+		expect(harness.bridge.getPersistentModelState()).toBeUndefined();
+
+		await harness.bridge.exit("user_cancelled");
+		expect(harness.bridge.getPlanModeContext()).toBeUndefined();
+	});
+
+	it("is inert when the controller reports no configured plan model", async () => {
+		const fake = new FakePlanModel({
+			config: null,
+			current: CURRENT,
+			currentThinking: "medium",
+			streaming: false,
+		});
+		harness = await makeHarness(fake);
+
+		await harness.bridge.enter();
+
+		// getConfig() === null -> feature off: no model calls at all.
+		expect(fake.setModelTemporaryCalls).toEqual([]);
+		expect(fake.setThinkingLevelCalls).toEqual([]);
+		expect(harness.session.getActiveToolNames().includes("resolve")).toBe(true);
+		expect(harness.bridge.getPlanModeContext()).toEqual({
+			enabled: true,
+			planFilePath: "local://PLAN.md",
+		});
+		expect(harness.bridge.getPersistentModelState()).toBeUndefined();
+
+		await harness.bridge.exit("user_cancelled");
+		expect(fake.setModelTemporaryCalls).toEqual([]);
+		expect(fake.setThinkingLevelCalls).toEqual([]);
+		expect(harness.bridge.getPlanModeContext()).toBeUndefined();
 	});
 });

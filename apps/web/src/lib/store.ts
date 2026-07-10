@@ -896,7 +896,11 @@ function handleFrame(
 				const prev = s.sessionsById[frame.sessionId];
 				if (!prev) return {};
 				const planMode: PlanModeContextWire | undefined = frame.enabled
-					? { enabled: true, planFilePath: frame.planFilePath ?? "local://PLAN.md" }
+					? {
+							enabled: true,
+							planFilePath: frame.planFilePath ?? "local://PLAN.md",
+							...(frame.modelOverride ? { modelOverride: frame.modelOverride } : {}),
+						}
 					: undefined;
 				// On exit, also drop any unresolved approval card — the bridge
 				// has already rejected its standing handler, so leaving the

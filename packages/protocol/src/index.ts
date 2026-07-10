@@ -825,6 +825,22 @@ export interface ListSessionUsageResponse {
 }
 
 /**
+ * Effective model override applied while a session is in Plan Mode. Distinct
+ * from the session's persistent model (which stays what the user configured):
+ * the deck temporarily switches to the configured plan-role model on enter and
+ * restores the persistent model on exit. `pending` is `true` when the switch is
+ * deferred because the session was streaming at the transition — it applies on
+ * the next `agent_end`.
+ */
+export interface PlanModeModelOverrideWire {
+	model: ModelRef;
+	/** Thinking level applied with the plan model, when configured. */
+	thinking?: string;
+	/** Switch is queued (session was streaming) and not yet live. */
+	pending: boolean;
+}
+
+/**
  * Live plan-mode state for a session. Mirrors the SDK's `PlanModeState` shape
  * minus internal flags the deck UI never consumes (workflow / reentry).
  * Absent on a snapshot means plan mode is off.
@@ -833,6 +849,9 @@ export interface PlanModeContextWire {
 	enabled: boolean;
 	/** Always `local://PLAN.md` for the deck MVP — surfaced so future per-session overrides land here. */
 	planFilePath: string;
+	/** Effective plan-role model override, when a plan model is configured and
+	 *  applied (or pending) for this plan-mode session (T-30). */
+	modelOverride?: PlanModeModelOverrideWire;
 }
 
 /** Live Goal Mode state for a session. Present for active and paused goals. */
@@ -1210,6 +1229,9 @@ export type ServerFrame =
 			enabled: boolean;
 			/** Always present when `enabled` — absent on exit. */
 			planFilePath?: string;
+			/** Effective plan-role model override (T-30). Present when a plan model
+			 *  is configured and applied/pending for this plan-mode session. */
+			modelOverride?: PlanModeModelOverrideWire;
 	  }
 	/**
 	 * Agent has finalized a plan and called `resolve apply`. The web client
@@ -2146,6 +2168,26 @@ export interface InternalTaskModelResponse {
 /** `PUT /api/settings/internal-task-model` body. Pass `model: null` to disable. */
 export interface SetInternalTaskModelRequest {
 	model: ModelRef | null;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Plan model (T-30) — configured plan-role model + thinking level the deck
+// temporarily switches to while a session is in Plan Mode, then restores.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** `GET /api/settings/plan-model` response. `model: null` means no plan-role
+ *  override — Plan Mode keeps the session's current model. */
+export interface PlanModelResponse {
+	model: ModelRef | null;
+	/** Thinking level applied with the plan model, or null for the model default. */
+	thinking: string | null;
+}
+
+/** `PUT /api/settings/plan-model` body. Pass `model: null` to clear the override. */
+export interface SetPlanModelRequest {
+	model: ModelRef | null;
+	/** Thinking level to apply with the plan model. Omit or null for model default. */
+	thinking?: string | null;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
