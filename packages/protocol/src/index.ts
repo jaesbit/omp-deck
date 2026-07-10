@@ -71,12 +71,8 @@ export interface CreateSessionRequest {
 	cwd: string;
 	resumeFromPath?: string;
 	model?: ModelRef;
-	/** Initial Plan Mode state, applied before the auto-start prompt (if any)
-	 *  fires. Rejected together with `resumeFromPath` — a resumed session
-	 *  keeps its persisted mode instead of taking a creation-time default. */
+	/** Initial Plan Mode state, applied before the session's first prompt. */
 	planMode?: boolean;
-	/** Do not fire the configured auto-start prompt when this creates a fresh session. */
-	suppressAutoStart?: boolean;
 	/** Thinking level to apply at session creation (T-73). Only valid for
 	 *  models that expose `thinkingLevels`. Omitted or null = SDK default. */
 	thinking?: string | null;
@@ -198,20 +194,6 @@ export interface UpdatePreludeRequest {
 	value: string | null;
 }
 
-/** The `~/.omp/agent/commands/start.md` orchestrator fired on session boot. */
-export interface StartCommand {
-	path: string;
-	exists: boolean;
-	/** `description:` frontmatter value, empty string when absent. */
-	description: string;
-	/** Markdown body sans frontmatter. */
-	body: string;
-}
-
-export interface UpdateStartCommandRequest {
-	description: string;
-	body: string;
-}
 
 export type GateValueSource = "process-env" | "env-file" | "default" | "unset";
 
@@ -344,7 +326,6 @@ export interface OnboardingState {
 	providers: OnboardingStateProvider[];
 	kbRoot: string;
 	kbExists: boolean;
-	startCommandExists: boolean;
 }
 
 /** Body of `POST /api/onboarding/complete`. `skipped` distinguishes "walked through" vs "X-ed out." */
@@ -2148,21 +2129,6 @@ export interface SetInternalTaskModelRequest {
 	model: ModelRef | null;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Session-title prompt — configurable override for the bundled title prompt.
-// ─────────────────────────────────────────────────────────────────────────────
-
-/** `GET /api/settings/session-title-prompt` response. */
-export interface SessionTitlePromptResponse {
-	default: string;
-	override: string | null;
-	effective: string;
-}
-
-/** `PUT /api/settings/session-title-prompt` body. Pass null to restore the bundled default. */
-export interface SetSessionTitlePromptRequest {
-	value: string | null;
-}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Auto Work run history and cost tracking (T-62)

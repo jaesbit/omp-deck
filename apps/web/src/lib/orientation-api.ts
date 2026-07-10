@@ -1,10 +1,8 @@
 import type {
 	MaintenanceGateState,
 	PreludeResponse,
-	StartCommand,
 	UpdateMaintenanceGateRequest,
 	UpdatePreludeRequest,
-	UpdateStartCommandRequest,
 } from "@omp-deck/protocol";
 
 const BASE = "/api";
@@ -27,15 +25,6 @@ export const orientationApi = {
 	},
 	putPrelude(body: UpdatePreludeRequest): Promise<PreludeResponse> {
 		return req<PreludeResponse>("/orientation/prelude", {
-			method: "PUT",
-			body: JSON.stringify(body),
-		});
-	},
-	getStartCommand(): Promise<StartCommand> {
-		return req<StartCommand>("/orientation/start");
-	},
-	putStartCommand(body: UpdateStartCommandRequest): Promise<StartCommand> {
-		return req<StartCommand>("/orientation/start", {
 			method: "PUT",
 			body: JSON.stringify(body),
 		});

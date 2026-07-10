@@ -11,6 +11,7 @@ import * as path from "node:path";
 
 import { runAgentWorker } from "./bridge/agent-worker.ts";
 import { ProcessAgentBridge } from "./bridge/process.ts";
+import { initializeSdkSettings } from "./sdk-settings.ts";
 import type { AgentBridge } from "./bridge/types.ts";
 import { RoutinesRunner } from "./routines-runner.ts";
 import { closeDb, openDb } from "./db/index.ts";
@@ -44,6 +45,7 @@ const log = logger("server");
 
 async function main(): Promise<void> {
 	const config = loadConfig();
+	await initializeSdkSettings(config.defaultCwd);
 	log.info(`omp-deck server starting`, {
 		host: config.host,
 		port: config.port,
@@ -95,10 +97,10 @@ async function main(): Promise<void> {
 	await installStarterSkills();
 	await installStarterExtensions();
 
-	// Seed README + kb/system/*.md + kb/rules/*.md templates at the resolved
-	// KB root. Idempotent — never overwrites an existing file — so a fresh
-	// bootstrap and an upgrade of an existing install both end up with every
-	// template file present, not just users who visit the onboarding wizard.
+    // Seed README + kb/system/*.md + kb/integrations/*.md + kb/rules/*.md
+    // templates at the resolved KB root. Idempotent — never overwrites an
+    // existing file — so a fresh bootstrap and an upgrade of an existing install
+    // both end up with every template file present, not just onboarding visitors.
 	// Disable with OMP_DECK_SEED_KB_TEMPLATES=0.
 	if (process.env.OMP_DECK_SEED_KB_TEMPLATES !== "0") {
 		try {
@@ -120,7 +122,6 @@ async function main(): Promise<void> {
 	const bridge: AgentBridge = new ProcessAgentBridge({
 		workerEntryPath: import.meta.path,
 		idleTimeoutMs: config.idleTimeoutMs,
-		autoStartCommand: config.autoStartCommand,
 	});
 	const routinesRunner = new RoutinesRunner();
 	routinesRunner.start();

@@ -92,7 +92,6 @@ export interface AgentBridge {
 
 export interface RuntimeEnvUpdate {
 	idleTimeoutMs?: number;
-	autoStartCommand?: string | null;
 }
 
 export interface GenerateTitleOpts {
@@ -105,10 +104,14 @@ export interface GenerateTitleOpts {
 export interface CreateSessionOpts {
 	cwd: string;
 	model?: ModelRef;
-	/** Enter Plan Mode immediately after the SDK session is attached, before
-	 *  any auto-start prompt is queued. */
+	/**
+	 * Narrow backend one-shot profile. The bridge disables UI, extension discovery,
+	 * MCP discovery, and LSP for this session. It must be paired with a
+	 * purpose-specific system prompt override, never used for normal chat sessions.
+	 */
+	internal?: boolean;
+	/** Enter Plan Mode immediately after the SDK session is attached. */
 	planMode?: boolean;
-	suppressAutoStart?: boolean;
 	/** Thinking level forwarded to the SDK's `createAgentSession` (T-73). */
 	thinking?: string;
 	/**
@@ -123,10 +126,10 @@ export interface CreateSessionOpts {
 	 * Extra text inserted right after the prelude (or `systemPromptOverride`,
 	 * if also set) and before the SDK's own default system-prompt blocks:
 	 * `[prelude, systemPromptAppend, ...defaults]`. For internal callers that
-	 * need the normal `kb/system` prelude PLUS a narrow addendum — e.g. the
-	 * auto-work engine appending `kb/rules/auto-work.md` (T-82) so its
-	 * task-execution sessions see the commit/PR/Validate-column workflow.
-	 * Leave unset for every normal user-facing session.
+     * need the normal `kb/system` prelude PLUS a narrow addendum — e.g. the
+     * auto-work engine appending `kb/integrations/auto-work.md` so its
+     * task-execution sessions see the commit/PR/Validate-column workflow.
+     * Leave unset for every normal user-facing session.
 	 */
 	systemPromptAppend?: string;
 }

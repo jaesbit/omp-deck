@@ -72,13 +72,12 @@ describe("onboarding-state", () => {
 		expect(state.needsOnboarding).toBe(false);
 	});
 
-	test("composite state includes kbRoot + kbExists + startCommandExists fields", async () => {
+	test("composite state includes kbRoot + kbExists fields", async () => {
 		markOnboardingComplete(false);
 		const state = await getOnboardingState();
 		expect(typeof state.kbRoot).toBe("string");
 		expect(state.kbRoot.length).toBeGreaterThan(0);
 		expect(typeof state.kbExists).toBe("boolean");
-		expect(typeof state.startCommandExists).toBe("boolean");
 		expect(Array.isArray(state.providers)).toBe(true);
 	});
 });

@@ -15,7 +15,6 @@ export class DeckClient {
 	async createSession(opts: { cwd: string; resumeFromPath?: string }): Promise<CreateSessionResponse> {
 		const body: CreateSessionRequest = {
 			cwd: opts.cwd,
-			suppressAutoStart: true,
 			...(opts.resumeFromPath ? { resumeFromPath: opts.resumeFromPath } : {}),
 		};
 		return this.request<CreateSessionResponse>("/api/sessions", {

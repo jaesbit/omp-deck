@@ -1,20 +1,14 @@
 /**
- * Orientation routes
- *
- * Surface the three session-shaping artifacts (prelude, /start command,
- * maintenance-gate config) as a deck-managed REST API so the Settings UI
- * can read + edit them without anyone touching server source. See
- * `orientation-store.ts` for the persistence model.
+ * Surface the session-shaping prelude and maintenance-gate config as a
+ * deck-managed REST API. See `orientation-store.ts` for persistence details.
  */
 
 import { Hono } from "hono";
 import type {
 	MaintenanceGateState,
 	PreludeResponse,
-	StartCommand,
 	UpdateMaintenanceGateRequest,
 	UpdatePreludeRequest,
-	UpdateStartCommandRequest,
 } from "@omp-deck/protocol";
 
 import {
@@ -24,9 +18,7 @@ import {
 	getPreludeFilePath,
 	readMaintenanceGateState,
 	readPreludeOverride,
-	readStartCommand,
 	writePreludeOverride,
-	writeStartCommand,
 } from "./orientation-store.ts";
 import {
 	appendEnvAudit,
@@ -70,26 +62,6 @@ export function buildOrientationRouter(): Hono {
 		return c.json(resp);
 	});
 
-	// ── /start command ────────────────────────────────────────────────────
-
-	app.get("/orientation/start", (c) => {
-		const body: StartCommand = readStartCommand();
-		return c.json(body);
-	});
-
-	app.put("/orientation/start", async (c) => {
-		let body: UpdateStartCommandRequest;
-		try {
-			body = (await c.req.json()) as UpdateStartCommandRequest;
-		} catch {
-			return c.json({ error: "invalid json body" }, 400);
-		}
-		const description = typeof body.description === "string" ? body.description : "";
-		const text = typeof body.body === "string" ? body.body : "";
-		writeStartCommand(description, text);
-		const resp: StartCommand = readStartCommand();
-		return c.json(resp);
-	});
 
 	// ── maintenance gate ──────────────────────────────────────────────────
 

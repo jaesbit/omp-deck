@@ -6,36 +6,24 @@
  * SDK's native auto-title generator normally lives (see the comment on
  * `InProcessSessionHandle.setName` in `bridge/in-process.ts`). That generator never
  * fires for deck-driven sessions, so without this module the only titling
- * mechanism is the agent's own self-titling instruction in the user's
- * `~/.omp/agent/commands/start.md`, which only runs after the agent has already
- * done a turn of work — never "first".
+ * mechanism is the agent's own self-titling behavior, which only runs after
+ * the agent has already done a turn of work — never "first".
  *
- * This is a short-lived, disposable session (same minimal pattern as
- * `rewriteTask` in `routes.ts` and `generateBranchSlugWithModel` in
- * `auto-work/engine.ts`): create with `systemPromptOverride`, prompt, wait for
- * terminal, extract text, delete. Gated entirely behind the `internalTaskModel`
- * setting (`db/server-settings.ts`) — `null` (the default) means this is a no-op,
- * so an unconfigured install behaves exactly as before.
+ * This uses the bridge's sessionless title request with only the session-title
+ * integration as its system prompt. It is gated entirely behind the
+ * `internalTaskModel` setting (`db/server-settings.ts`) — `null` (the default)
+ * means this is a no-op, so an unconfigured install behaves exactly as before.
  */
 
 import type { AgentBridge } from "./bridge/types.ts";
-import { getInternalTaskModel, getSessionTitlePrompt } from "./db/server-settings.ts";
+import { getInternalTaskModel } from "./db/server-settings.ts";
 import { getTask } from "./db/tasks.ts";
+import { resolveIntegrationPrompt } from "./integration-prompts.ts";
+import { KbService, resolveKbRoot } from "./kb-service.ts";
 import { logger } from "./log.ts";
 
 const log = logger("session-title");
 
-export const DEFAULT_SESSION_TITLE_PROMPT = [
-	"You generate short, specific titles for coding-agent chat sessions.",
-	"You will be given the session's first user message, and optionally the",
-	"kanban task it was started from. Reply with ONLY the title text — no",
-	"quotes, no markdown, no explanation, no trailing period.",
-	"",
-	"Rules:",
-	'- Max 8 words. Specific to the actual topic, never generic ("Chat", "Session", "Help").',
-	'- If a linked kanban task is given, the title MUST start with "T-<id>: ".',
-	"- Otherwise just the topic, in the same language as the first message.",
-].join("\n");
 
 /** Internal task ids look like `t_01kx1s8fxrt7ss33k4` — the convention used by
  *  the "Open in chat" / "Assign to agent" flows embeds one in the prompt
@@ -47,8 +35,7 @@ const TASK_ID_PATTERN = /\bt_[a-z0-9]{18}\b/;
  * Generates a title for a brand-new session from its first user message.
  * Returns `undefined` when the feature is off, the model call fails, or the
  * model returns nothing usable — callers should leave the session untitled
- * rather than fall back to a placeholder (the agent-side heuristic in
- * `start.md` still covers untitled sessions when this is disabled).
+ * rather than fall back to a placeholder.
  */
 export async function generateSessionTitle(
 	bridge: AgentBridge,
@@ -68,7 +55,7 @@ export async function generateSessionTitle(
 		const text = await bridge.generateTitle({
 			sessionId: opts.sessionId,
 			model,
-			systemPrompt: getSessionTitlePrompt() ?? DEFAULT_SESSION_TITLE_PROMPT,
+			systemPrompt: await resolveSessionTitleIntegrationPrompt(),
 			userMessage,
 		});
 		return text ? sanitizeTitle(text) || undefined : undefined;
@@ -76,6 +63,10 @@ export async function generateSessionTitle(
 		log.warn("session-title generation failed", err);
 		return undefined;
 	}
+}
+
+function resolveSessionTitleIntegrationPrompt(): Promise<string> {
+	return resolveIntegrationPrompt(new KbService({ root: resolveKbRoot() }), "session-title");
 }
 
 /** First line, strip wrapping quotes/backticks the model sometimes adds, cap length. */
