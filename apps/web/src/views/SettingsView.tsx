@@ -46,7 +46,7 @@ const SECTIONS = [
 	{ id: "env", label: "Env", description: "Process and deck-managed variables" },
 	{ id: "providers", label: "Providers", description: "OAuth sign-in and API-key state" },
 	{ id: "messaging", label: "Messaging", description: "Telegram and future chat bridges" },
-	{ id: "orientation", label: "Orientation", description: "Prelude, /start, maintenance gate" },
+	{ id: "orientation", label: "Internal prompts", description: "System prompts and session lifecycle" },
 	{ id: "appearance", label: "Appearance", description: "Themes, colors, fonts" },
 	{ id: "workspaces", label: "Workspaces", description: "Pinned roots and display names" },
 	{ id: "autowork", label: "Auto Work", description: "Unattended runs — enable, model, window, limits" },
@@ -105,7 +105,7 @@ export function SettingsView() {
 							) : selected === "messaging" ? (
 								<MessagingSection />
 							) : selected === "orientation" ? (
-								<OrientationSection />
+								<InternalPromptsSection />
 							) : selected === "appearance" ? (
 								<AppearanceSection />
 							) : selected === "notifications" ? (
@@ -981,7 +981,6 @@ function GeneralSection() {
 
 			<TaskRewriteModelCard />
 			<InternalTaskModelCard />
-			<SessionTitlePromptCard />
 		</div>
 	);
 }
@@ -2554,26 +2553,19 @@ function ThemeSwatchStrip({ definition }: { definition: (typeof THEMES)[number] 
 }
 
 /**
- * Orientation section — surfaces the three artifacts that shape every deck
- * session so non-developer users can view and tweak them without touching
- * server source. See kb://system/imperatives-belong-in-orchestrator-not-prelude
- * for the prelude-vs-orchestrator architecture that motivated this surface.
+ * Internal prompts and lifecycle controls that shape deck-created sessions.
  */
-function OrientationSection() {
+function InternalPromptsSection() {
 	return (
 		<div className="mx-auto max-w-5xl space-y-6">
 			<div>
-				<h1 className="text-xl font-semibold tracking-tight">Orientation</h1>
+				<h1 className="text-xl font-semibold tracking-tight">Internal prompts</h1>
 				<p className="mt-1 max-w-3xl text-sm text-ink-3">
-					Three artifacts shape every deck session: the system-prompt prelude,
-					the <code className="font-mono text-xs">/start</code> orchestrator
-					fired on boot, and the maintenance-gate extension that nudges the
-					agent to capture work mid-session. Edit each in place; changes
-					take effect on the next session create (prelude) or the next slash
-					invocation (start) or the next gate evaluation (maintenance).
+					Configure the base prompt, automatic title prompt, startup workflow, and maintenance gate. Changes apply to new sessions or the next matching invocation.
 				</p>
 			</div>
 			<PreludeCard />
+			<SessionTitlePromptCard />
 			<StartCommandCard />
 			<MaintenanceGateCard />
 		</div>
