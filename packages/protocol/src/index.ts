@@ -2198,3 +2198,110 @@ export type AutoWorkCycleResult =
 	| { outcome: "completed"; taskId: string; runId: string; sessionId: string; worktreePath: string }
 	| { outcome: "failed"; taskId: string; runId: string; sessionId: string; worktreePath: string; failureReason: string }
 	| { outcome: "timed_out"; taskId: string; runId: string; sessionId: string; worktreePath: string };
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Delegation governance (T-28)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * The OMP agent settings the deck governs for subagent delegation. The single
+ * source of truth is OMP's own settings store (`~/.omp/agent/config.yml`,
+ * surfaced through the SDK `Settings` singleton) — the deck never persists a
+ * copy of these values. Reads are call-time inside the SDK task tool, so a
+ * change here applies to the next `task` call even in live sessions.
+ */
+export type DelegationSettingKey =
+	| "task.maxConcurrency"
+	| "task.maxRecursionDepth"
+	| "task.maxRuntimeMs"
+	| "task.isolation.mode"
+	| "task.isolation.merge"
+	| "task.isolation.commits";
+
+/** One selectable value for an enum-typed (or suggested for a number-typed) delegation setting. */
+export interface DelegationSettingOption {
+	/** Wire value. Numbers are serialized as strings in the schema's option list. */
+	value: string;
+	label: string;
+	description?: string;
+}
+
+/** Current value + OMP schema metadata for one governed setting. */
+export interface DelegationSettingEntry {
+	key: DelegationSettingKey;
+	type: "number" | "enum" | "boolean";
+	value: number | string | boolean;
+	/** Schema default, `null` when the schema declares none. */
+	defaultValue: number | string | boolean | null;
+	/** True when explicitly set in OMP config (vs falling back to the schema default). */
+	configured: boolean;
+	/** Label/description/options come verbatim from OMP's settings schema. */
+	label: string;
+	description: string;
+	options?: DelegationSettingOption[];
+}
+
+/** `GET /api/delegation/settings` response. */
+export interface GetDelegationSettingsResponse {
+	settings: DelegationSettingEntry[];
+	/** Absolute path of the OMP config file these values persist to. */
+	configPath: string;
+}
+
+/** `PATCH /api/delegation/settings` request. Unknown keys are rejected. */
+export interface PatchDelegationSettingsRequest {
+	updates: Partial<Record<DelegationSettingKey, number | string | boolean>>;
+}
+
+/** `PATCH /api/delegation/settings` response — fresh post-write state. */
+export type PatchDelegationSettingsResponse = GetDelegationSettingsResponse;
+
+/**
+ * `GET /api/delegation/artifact?path=` response — content of an isolation
+ * patch artifact preserved by a subagent run. Read-only inspection surface.
+ */
+export interface DelegationArtifactResponse {
+	path: string;
+	/** Patch text, truncated to the server's size cap. */
+	content: string;
+	truncated: boolean;
+	sizeBytes: number;
+}
+
+/**
+ * `POST /api/delegation/artifact/apply` request. Exactly one of `patchPath`
+ * (patch mode) or `branchName` (branch mode) must be set. Only ever invoked
+ * by an explicit user action — the deck never applies artifacts on its own.
+ */
+export interface ApplyDelegationArtifactRequest {
+	/** Repo the artifact belongs to (the session cwd the task ran in). */
+	cwd: string;
+	patchPath?: string;
+	branchName?: string;
+	/** Baseline SHA the task branch was created from (branch mode). */
+	branchBaseSha?: string;
+}
+
+/** `POST /api/delegation/artifact/apply` response. */
+export interface ApplyDelegationArtifactResponse {
+	ok: boolean;
+	/** Human-readable outcome ("patch applied", conflict detail, …). */
+	message: string;
+}
+
+/**
+ * `POST /api/delegation/artifact/discard` request. Deletes a preserved patch
+ * artifact file, or force-deletes an unmerged task branch. Explicit user
+ * action only.
+ */
+export interface DiscardDelegationArtifactRequest {
+	cwd: string;
+	patchPath?: string;
+	branchName?: string;
+}
+
+/** `POST /api/delegation/artifact/discard` response. */
+export interface DiscardDelegationArtifactResponse {
+	ok: boolean;
+	message: string;
+}

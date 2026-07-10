@@ -27,6 +27,7 @@ import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Modal } from "@/components/ui/Modal";
 import { OAuthFlowModal } from "@/components/settings/OAuthFlowModal";
+import { DelegationSection } from "@/components/settings/DelegationSection";
 import { api } from "@/lib/api";
 import { bridgesApi } from "@/lib/bridges-api";
 import { settingsApi } from "@/lib/settings-api";
@@ -47,6 +48,7 @@ const SECTIONS = [
 	{ id: "orientation", label: "Internal prompts", description: "System prompts and session lifecycle" },
 	{ id: "appearance", label: "Appearance", description: "Themes, colors, fonts" },
 	{ id: "workspaces", label: "Workspaces", description: "Pinned roots and display names" },
+	{ id: "delegation", label: "Delegation", description: "Subagent concurrency, isolation, integration" },
 	{ id: "autowork", label: "Auto Work", description: "Unattended runs — enable, model, window, limits" },
 	{ id: "notifications", label: "Notifications", description: "Idle alerts and quiet hours" },
 	{ id: "about", label: "About", description: "Version, paths, diagnostics" },
@@ -110,6 +112,8 @@ export function SettingsView() {
 								<NotificationsSection />
 			) : selected === "workspaces" ? (
 								<WorkspacesSection />
+							) : selected === "delegation" ? (
+								<DelegationSection />
 							) : selected === "autowork" ? (
 								<AutoWorkSection />
 							) : (
