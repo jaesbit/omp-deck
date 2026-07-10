@@ -76,7 +76,21 @@ export const KB_README_BODY = [
 	"",
 ].join("\n");
 
-const AUTO_WORK_RULES_BODY = [
+/**
+ * Default auto-work workflow rules (T-82). Not part of the universal
+ * `kb/system` prelude — only the auto-work engine's task-execution session
+ * gets this, appended by code (`engine.ts`'s `resolveAutoWorkRulesBody`)
+ * alongside the normal `kb/system` prelude via `systemPromptAppend`. Same
+ * disk-first-then-fallback pattern as `BRANCH_NAMING_RULES_BODY` below: read
+ * `kb/rules/auto-work.md` off disk first, fall back to this in-process copy
+ * if the file is missing.
+ * Seeded at `kb/rules/auto-work.md`. Unlike `kb/system/*.md`, this is NOT
+ * auto-inlined into every session's system prompt — `engine.ts`'s
+ * `runAutoWorkCycle` appends this content to the task-execution prompt by
+ * code (falling back to this exact in-process constant if the file is
+ * missing on disk), alongside the normal auto-inlined `kb/system` prelude.
+ */
+export const AUTO_WORK_RULES_BODY = [
 	"---",
 	"type: knowledge",
 	"tags: [rules, auto-work, workflow]",

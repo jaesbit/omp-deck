@@ -19,9 +19,18 @@
  * and the cost is one stat + small read per `createAgentSession`.
  */
 
-import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import {
+	existsSync,
+	mkdirSync,
+	readFileSync,
+	statSync,
+	unlinkSync,
+	writeFileSync,
+} from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+
+import { resolveKbRoot } from "./kb-service.ts";
 
 import { getDataDir, readManagedEnvFile } from "./env-store.ts";
 import { resolveKbRoot } from "./kb-service.ts";
@@ -32,9 +41,12 @@ import { resolveKbRoot } from "./kb-service.ts";
  * and how the kanban / cron / inbox surfaces are shaped — so it can read and
  * mutate them via `bash` + `curl` without needing the user to re-explain.
  *
- * This is the structural API-reference scaffold. Every top-level Markdown file
- * under `kb://system/` is prepended at session-create time by
- * `buildDefaultPrelude()`.
+ * The four canonical `kb://system/*.md` files (working-voice, deck-orientation,
+ * projects-hub, org-system-hub) are inlined directly into the system prompt
+ * by `getEffectivePrelude()`. They're the agent's permanent rules — the model
+ * applies them as if they were system-prompt content, not as files it may or
+ * may not choose to read. Imperatives belong in the orchestrator (`/start.md`),
+ * NOT here — see `kb://system/imperatives-belong-in-orchestrator-not-prelude.md`.
  */
 export const DEFAULT_PRELUDE = `# omp-deck context
 
@@ -45,7 +57,7 @@ over HTTP on the loopback interface.
 Local API base: http://127.0.0.1:8787/api  (use the \`bash\` tool with \`curl\`).
 
 ## Knowledge base
-A local llm-wiki at \`~/kb/\` is the deck's long-form memory; the cockpit's \`/kb\` view consumes it. Every top-level Markdown file under \`kb://system/\` is inlined into your system prompt as a hard rule, so you MUST NOT re-read those files on boot. Files under \`kb/integrations/\` are not inlined; read them on demand only when their owning system rule triggers them.
+A local llm-wiki at \`~/kb/\` is the deck's long-form memory; the cockpit's \`/kb\` view consumes it. The four canonical orientation files (\`working-voice\`, \`deck-orientation\`, \`projects-hub\`, \`org-system-hub\` — under \`kb://system/\`) are inlined directly into this system prompt below as hard rules. Re-read any of them on demand via the \`read\` tool or \`GET /api/kb/file?path=system/<name>.md\` if you need to re-anchor mid-session.
 
 KB read: \`GET /api/kb/file?path=system/<name>.md\` · search: \`GET /api/kb/search?q=…\` · backlinks: \`GET /api/kb/backlinks?path=…\`. The harness also resolves \`kb://\` URIs directly via the read tool.
 
@@ -167,10 +179,103 @@ export function writePreludeOverride(value: string | null): void {
 	writeFileSync(p, value, "utf8");
 }
 
-/** Effective text the bridge prepends to every session's system prompt. */
+/**
+ * Effective text the bridge prepends to every session's system prompt.
+ *
+ * Reads the `kb://system/*.md` canonical orientation files from the configured
+ * KB root and inlines them as hard system-prompt rules. The override file
+ * (`<dataDir>/prelude.md`) takes priority and is returned verbatim, with NO
+ * KB injection — when a user explicitly hand-writes a prelude, respect it
+ * and don't second-guess by also pasting the orientation files in.
+ */
 export function getEffectivePrelude(): string {
-	return readPreludeOverride() ?? buildDefaultPrelude();
+	const override = readPreludeOverride();
+	if (override !== null) return override;
+	return DEFAULT_PRELUDE + buildKbSystemInjection();
 }
+
+/**
+ * The four canonical orientation files under `kb://system/` that the agent's
+ * `/start` command used to read on boot. Inlining them here turns them from
+ * "read and apply if you feel like it" instructions into actual rules the
+ * model always sees. Order is deliberate: voice → orientation → projects →
+ * org-rules. Each section is fenced with a clear header so a future reader
+ * can see the seam.
+ */
+const KB_SYSTEM_INJECTION_FILES = [
+	{ file: "working-voice.md", label: "Working voice (language, tone, KB conventions)" },
+	{ file: "deck-orientation.md", label: "Deck orientation (where things live in omp-deck)" },
+	{ file: "projects-hub.md", label: "Projects hub (how to discover and use kb://projects/)" },
+	{ file: "org-system-hub.md", label: "Org system hub (rule index, read on-demand by trigger)" },
+] as const;
+
+/**
+ * Read the configured KB root, return the four canonical orientation files
+ * inlined as a markdown block ready to be appended to the system prompt.
+ *
+ * Failure-tolerant: any individual file missing, unreadable, or with broken
+ * frontmatter is silently dropped from the injection — never throws, never
+ * prevents session creation. The KB root itself being absent produces an
+ * empty string (no injection at all).
+ */
+function buildKbSystemInjection(): string {
+	const root = resolveKbRoot();
+	const rootStat = (() => {
+		try {
+			return statSync(root);
+		} catch {
+			return null;
+		}
+	})();
+	if (!rootStat?.isDirectory()) return "";
+
+	const parts: string[] = [
+		"",
+		"---",
+		"",
+		"## Inlined KB orientation",
+		"",
+		"The following four files are inlined from `kb://system/`. They are hard",
+		"rules, not reference material — apply them as if they were part of this",
+		"system prompt. Re-read any of them on demand (they are also resolvable via",
+		"the `read` tool with `kb://system/<name>.md`).",
+		"",
+	];
+
+	let injectedCount = 0;
+	for (const { file, label } of KB_SYSTEM_INJECTION_FILES) {
+		const fullPath = path.join(root, "system", file);
+		let body: string;
+		try {
+			body = readFileSync(fullPath, "utf8");
+		} catch {
+			// Missing or unreadable — skip. Common case is a fresh KB that hasn't
+			// run the wizard yet; the deck should still create sessions cleanly.
+			continue;
+		}
+		const stripped = stripFrontmatter(body).trim();
+		if (stripped.length === 0) continue;
+		parts.push(`### ${label}`, "", stripped, "", "");
+		injectedCount += 1;
+	}
+
+	if (injectedCount === 0) return "";
+	return parts.join("\n");
+}
+
+/** Strip a single YAML frontmatter block (`---\n...\n---`) if present. */
+function stripFrontmatter(text: string): string {
+	if (!text.startsWith("---\n") && !text.startsWith("---\r\n")) return text;
+	const startOffset = 4;
+	const eol = text.startsWith("---\r\n") ? "\r\n" : "\n";
+	const closeMarker = `\n---${eol}`;
+	const endIdx = text.indexOf(closeMarker, startOffset);
+	if (endIdx < 0) return text;
+	const after = text.slice(endIdx + closeMarker.length);
+	// Drop a single leading blank line so we don't end up with double blanks.
+	return after.replace(/^\r?\n/, "");
+}
+
 
 // ─── /start command ────────────────────────────────────────────────────────
 
