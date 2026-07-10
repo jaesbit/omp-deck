@@ -548,6 +548,12 @@ export class InProcessAgentBridge implements AgentBridge {
 		const uiBridge = new ExtensionUIBridge(sessionId);
 		// Internal backend sessions expose no interactive UI to SDK tools.
 		setToolUIContext(uiBridge, hasUI);
+		// T-89: pin the session title after its initial capture. The SDK's
+		// `title.refreshOnReplan` (default true) regenerates the title with
+		// source "auto" on every todo-init, so titles kept shifting in the
+		// sessions view while a session was active. Runtime override only —
+		// never persisted, so the user's own omp CLI settings are untouched.
+		session.settings.override("title.refreshOnReplan", false);
 
 		// Drives the plan-role model override (T-30). A single typed view of the
 		// session, read/written through the controller. `setModelTemporary` swaps

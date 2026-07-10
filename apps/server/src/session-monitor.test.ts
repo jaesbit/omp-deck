@@ -100,6 +100,10 @@ describe("listSessionMonitor", () => {
 
 		expect(entry).toEqual({
 			...persisted,
+			// Counters come from the full transcript scan, not the (prefix-derived)
+			// summary value: one user + one assistant message, no toolCall blocks.
+			messageCount: 2,
+			toolCallCount: 0,
 			status: "error",
 			error: "Agent turn ended with an error.",
 			recentMessages: [
@@ -127,6 +131,8 @@ describe("listSessionMonitor", () => {
 
 		expect(entry).toEqual({
 			...persisted,
+			messageCount: 2,
+			toolCallCount: 0,
 			status: "completed",
 			recentMessages: [
 				{ role: "user", text: "Review the diff" },
@@ -197,5 +203,135 @@ describe("listSessionMonitor", () => {
 
 		expect(bridge.listCalls).toEqual([{ cwd: selectedCwd }])
 		expect(entries.map((entry) => entry.id)).toEqual(["selected"])
+	})
+
+	test("counts toolCall blocks across all assistant messages and only user+assistant records", async () => {
+		const cwd = "/workspaces/counters"
+		const transcriptPath = writeTranscript("counters.jsonl", [
+			{ type: "session", version: 3, id: "counters", cwd },
+			{ type: "message", message: { role: "user", content: [{ type: "text", text: "Refactor the parser" }] } },
+			{
+				type: "message",
+				message: {
+					role: "assistant",
+					content: [
+						{ type: "text", text: "Reading the parser first" },
+						{ type: "toolCall", toolName: "read", args: { path: "parser.ts" } },
+						{ type: "toolCall", toolName: "grep", args: { pattern: "parse" } },
+					],
+				},
+			},
+			{
+				type: "message",
+				message: { role: "toolResult", toolName: "read", content: [{ type: "text", text: "parser source" }] },
+			},
+			{
+				type: "message",
+				message: {
+					role: "assistant",
+					content: [{ type: "toolCall", toolName: "edit", args: { path: "parser.ts" } }],
+				},
+			},
+			{ type: "agent_end", stopReason: "stop" },
+		])
+		const persisted = session("counters", transcriptPath, cwd)
+
+		const [entry] = await listSessionMonitor(asAgentBridge(new SessionMonitorBridge([persisted])))
+
+		// One user + two assistant messages, the toolResult record is not a message.
+		expect(entry.messageCount).toBe(3)
+		// 2 toolCall blocks in the first assistant message + 1 in the second.
+		expect(entry.toolCallCount).toBe(3)
+	})
+
+	test("derives live session counters from the transcript on disk, not the snapshot tail", async () => {
+		const cwd = "/workspaces/live-counters"
+		const transcriptPath = writeTranscript("live-counters.jsonl", [
+			{ type: "session", version: 3, id: "live-counters", cwd },
+			{ type: "message", message: { role: "user", content: [{ type: "text", text: "Run the migration" }] } },
+			{
+				type: "message",
+				message: {
+					role: "assistant",
+					content: [
+						{ type: "text", text: "Applying migrations" },
+						{ type: "toolCall", toolName: "bash", args: { command: "migrate" } },
+					],
+				},
+			},
+			{ type: "message", message: { role: "user", content: [{ type: "text", text: "Now verify the schema" }] } },
+		])
+		const persisted = session("live-counters", transcriptPath, cwd)
+		const snapshot: SessionSnapshot = {
+			sessionId: "live-counters",
+			sessionFile: transcriptPath,
+			cwd,
+			isStreaming: true,
+			// A single snapshot message with no toolCall blocks: if counters came
+			// from here, messageCount would be 1 and toolCallCount 0.
+			messages: [{ role: "assistant", content: [{ type: "text", text: "Verifying the schema" }] }],
+			todoPhases: [],
+		}
+		const bridge = new SessionMonitorBridge([persisted], [["live-counters", liveHandle(snapshot)]])
+
+		const [entry] = await listSessionMonitor(asAgentBridge(bridge))
+
+		expect(entry.status).toBe("active")
+		expect(entry.messageCount).toBe(3)
+		expect(entry.toolCallCount).toBe(1)
+		expect(entry.recentMessages).toEqual([{ role: "assistant", text: "Verifying the schema" }])
+	})
+
+	test("falls back to the summary messageCount when the transcript is unreadable", async () => {
+		const cwd = "/workspaces/missing"
+		const persisted = session("missing", path.join(tempDir, "does-not-exist.jsonl"), cwd)
+
+		const [entry] = await listSessionMonitor(asAgentBridge(new SessionMonitorBridge([persisted])))
+
+		expect(entry).toEqual({
+			...persisted,
+			// The `session` fixture's summary value survives untouched.
+			messageCount: persisted.messageCount,
+			toolCallCount: 0,
+			status: "completed",
+			recentMessages: [],
+		})
+	})
+
+	test("skips unparseable transcript lines without breaking the counters", async () => {
+		const cwd = "/workspaces/garbage"
+		const transcriptPath = path.join(tempDir, "garbage.jsonl")
+		const records = [
+			{ type: "session", version: 3, id: "garbage", cwd },
+			{ type: "message", message: { role: "user", content: [{ type: "text", text: "Fix the flaky test" }] } },
+			{
+				type: "message",
+				message: {
+					role: "assistant",
+					content: [
+						{ type: "text", text: "Pinning the clock" },
+						{ type: "toolCall", toolName: "edit", args: { path: "clock.test.ts" } },
+					],
+				},
+			},
+			{ type: "agent_end", stopReason: "stop" },
+		]
+		const lines = records.map((record) => JSON.stringify(record))
+		// Interleave garbage between every valid record, including a truncated JSON line.
+		lines.splice(3, 0, '{"type":"message","message":{"role":"assistant"')
+		lines.splice(2, 0, "not json at all")
+		lines.splice(1, 0, "%%%")
+		fs.writeFileSync(transcriptPath, `${lines.join("\n")}\n`, "utf8")
+		const persisted = session("garbage", transcriptPath, cwd)
+
+		const [entry] = await listSessionMonitor(asAgentBridge(new SessionMonitorBridge([persisted])))
+
+		expect(entry.status).toBe("completed")
+		expect(entry.messageCount).toBe(2)
+		expect(entry.toolCallCount).toBe(1)
+		expect(entry.recentMessages).toEqual([
+			{ role: "user", text: "Fix the flaky test" },
+			{ role: "assistant", text: "Pinning the clock" },
+		])
 	})
 })

@@ -18,6 +18,8 @@ export interface SessionMonitorEntry extends SessionSummary {
 	status: SessionMonitorStatus;
 	error?: string;
 	recentMessages: SessionMonitorMessage[];
+	/** Tool-call blocks in persisted assistant messages, over the whole transcript. */
+	toolCallCount: number;
 }
 
 interface TranscriptRecord {
@@ -40,42 +42,89 @@ export async function listSessionMonitor(bridge: AgentBridge, cwd?: string): Pro
 }
 
 async function monitorSession(bridge: AgentBridge, session: SessionSummary): Promise<SessionMonitorEntry> {
+	// The SDK's list projection derives `messageCount` from only the first
+	// 4 KB of the transcript, so it undercounts anything non-trivial (T-88).
+	// Scan the full file once for exact message + tool-call totals; the same
+	// pass yields the bounded record tail the persisted branch renders from.
+	const scan = await scanTranscript(session.path);
+	const counts = scan.ok
+		? { messageCount: scan.messageCount, toolCallCount: scan.toolCallCount }
+		: { messageCount: session.messageCount, toolCallCount: 0 };
+
 	const live = bridge.getSession(session.id);
 	if (live) {
 		const snapshot = await live.snapshot();
 		const recentMessages = messagesFromUnknown(snapshot.messages).slice(-RECENT_MESSAGE_LIMIT);
 		return {
 			...session,
+			...counts,
 			status: snapshot.isStreaming ? "active" : "completed",
 			recentMessages,
 		};
 	}
 
-	const transcript = await readTranscriptTail(session.path);
-	const recentMessages = transcript.flatMap(messageFromRecord).slice(-RECENT_MESSAGE_LIMIT);
-	const error = findTerminalError(transcript);
+	const recentMessages = scan.tail.flatMap(messageFromRecord).slice(-RECENT_MESSAGE_LIMIT);
+	const error = findTerminalError(scan.tail);
 	return {
 		...session,
+		...counts,
 		status: error ? "error" : "completed",
 		...(error ? { error } : {}),
 		recentMessages,
 	};
 }
 
-async function readTranscriptTail(filePath: string): Promise<TranscriptRecord[]> {
+interface TranscriptScan {
+	/** False when the transcript file could not be read at all. */
+	ok: boolean;
+	/** Last `RECENT_RECORD_LIMIT` parseable records, in transcript order. */
+	tail: TranscriptRecord[];
+	/** Persisted user + assistant messages across the WHOLE transcript. */
+	messageCount: number;
+	/** Tool-call blocks inside persisted assistant messages across the WHOLE transcript. */
+	toolCallCount: number;
+}
+
+/** Single pass over the whole transcript: exact counters + bounded tail. */
+async function scanTranscript(filePath: string): Promise<TranscriptScan> {
+	let lines: string[];
 	try {
-		const lines = (await Bun.file(filePath).text()).split("\n").filter(Boolean).slice(-RECENT_RECORD_LIMIT);
-		return lines.flatMap((line) => {
-			try {
-				return [JSON.parse(line) as TranscriptRecord];
-			} catch {
-				return [];
-			}
-		});
+		lines = (await Bun.file(filePath).text()).split("\n").filter(Boolean);
 	} catch (error) {
 		log.warn(`could not read transcript ${filePath}`, error);
-		return [];
+		return { ok: false, tail: [], messageCount: 0, toolCallCount: 0 };
 	}
+	let messageCount = 0;
+	let toolCallCount = 0;
+	const tail: TranscriptRecord[] = [];
+	for (const line of lines) {
+		let record: TranscriptRecord;
+		try {
+			record = JSON.parse(line) as TranscriptRecord;
+		} catch {
+			continue;
+		}
+		if (record.type === "message") {
+			const message = asRecord(record.message);
+			if (message?.role === "user") messageCount++;
+			if (message?.role === "assistant") {
+				messageCount++;
+				toolCallCount += countToolCallBlocks(message.content);
+			}
+		}
+		tail.push(record);
+		if (tail.length > RECENT_RECORD_LIMIT) tail.shift();
+	}
+	return { ok: true, tail, messageCount, toolCallCount };
+}
+
+function countToolCallBlocks(content: unknown): number {
+	if (!Array.isArray(content)) return 0;
+	let count = 0;
+	for (const part of content) {
+		if (asRecord(part)?.type === "toolCall") count++;
+	}
+	return count;
 }
 
 function findTerminalError(records: TranscriptRecord[]): string | undefined {

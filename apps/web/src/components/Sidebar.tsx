@@ -55,7 +55,10 @@ export function Sidebar() {
 	// the confirm prompt, matching the resume-failure `alert()` pattern above.
 	function handleDelete(id: string): void {
 		if (!window.confirm("Delete this session? This permanently removes its history and cannot be undone.")) return;
-		void deleteSession(id);
+		deleteSession(id).catch((err) => {
+			console.error(err);
+			alert(`Failed to delete: ${String(err)}`);
+		});
 	}
 
 	const liveSessions = Object.values(sessionsById);

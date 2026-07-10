@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Activity, AlertTriangle, CheckCircle2, ChevronDown, ChevronRight, RefreshCw } from "lucide-react";
+import { Activity, AlertTriangle, CheckCircle2, ChevronDown, ChevronRight, MessageSquare, RefreshCw, Trash2 } from "lucide-react";
+import { useNavigate } from "react-router-dom";
 import type { SessionMonitorEntry, SessionMonitorStatus } from "@omp-deck/protocol";
 
 import { Layout } from "@/components/Layout";
@@ -16,12 +17,29 @@ type StatusFilter = "all" | "active" | "error";
 export function SessionsView() {
 	const workspaces = useStore((s) => s.workspaces);
 	const sessionsChangeCounter = useStore((s) => s.sessionsChangeCounter);
+	const deleteSession = useStore((s) => s.deleteSession);
+	const navigate = useNavigate();
 	const [workspace, setWorkspace] = usePersistedViewState("sessions.workspace", "");
 	const [statusFilter, setStatusFilter] = usePersistedViewState<StatusFilter>("sessions.status", "all");
 	const [sessions, setSessions] = useState<SessionMonitorEntry[]>([]);
 	const [selectedId, setSelectedId] = useState<string>();
 	const [loading, setLoading] = useState(true);
 	const [error, setError] = useState<string>();
+
+	const handleDelete = useCallback(
+		async (id: string) => {
+			if (!window.confirm("Delete this session? This permanently removes its history and cannot be undone.")) return;
+			try {
+				await deleteSession(id);
+				// Prune optimistically only AFTER the backend confirmed the delete;
+				// the next poll re-syncs regardless.
+				setSessions((current) => current.filter((row) => row.id !== id));
+			} catch (err) {
+				setError(err instanceof Error ? err.message : String(err));
+			}
+		},
+		[deleteSession],
+	);
 
 	const refresh = useCallback(async () => {
 		try {
@@ -89,7 +107,7 @@ export function SessionsView() {
 						{!loading && !error && filtered.length === 0 ? <p className="text-sm text-ink-3">No sessions match these filters.</p> : null}
 						<div className="space-y-2">
 							{filtered.map((session) => (
-								<SessionCard key={session.id} session={session} expanded={session.id === selectedId} onToggle={() => setSelectedId((current) => current === session.id ? undefined : session.id)} />
+								<SessionCard key={session.id} session={session} expanded={session.id === selectedId} onToggle={() => setSelectedId((current) => current === session.id ? undefined : session.id)} onOpen={() => navigate(`/c/${encodeURIComponent(session.id)}`)} onDelete={() => void handleDelete(session.id)} />
 							))}
 						</div>
 					</div>
@@ -99,26 +117,55 @@ export function SessionsView() {
 	);
 }
 
-function SessionCard({ session, expanded, onToggle }: { session: SessionMonitorEntry; expanded: boolean; onToggle(): void }) {
+function SessionCard({ session, expanded, onToggle, onOpen, onDelete }: {
+	session: SessionMonitorEntry;
+	expanded: boolean;
+	onToggle(): void;
+	onOpen(): void;
+	onDelete(): void;
+}) {
 	return (
 		<article className={cn("overflow-hidden rounded-md border", expanded ? "border-accent/50" : "border-line")}>
-			<button type="button" onClick={onToggle} className="flex w-full items-start gap-3 px-3 py-3 text-left hover:bg-paper-3">
-				<StatusIcon status={session.status} />
-				<div className="min-w-0 flex-1">
-					<div className="flex items-start justify-between gap-3">
-						<div className="min-w-0">
-							<p className="truncate text-sm font-medium text-ink">{session.title || session.id}</p>
-							<p className="mt-0.5 truncate font-mono text-2xs text-ink-3" title={session.cwd}>{shortPath(session.cwd, 70)}</p>
+			<div className="flex items-stretch">
+				<button type="button" onClick={onToggle} className="flex min-w-0 flex-1 items-start gap-3 px-3 py-3 text-left hover:bg-paper-3">
+					<StatusIcon status={session.status} />
+					<div className="min-w-0 flex-1">
+						<div className="flex items-start justify-between gap-3">
+							<div className="min-w-0">
+								<p className="truncate text-sm font-medium text-ink">{session.title || session.id}</p>
+								<p className="mt-0.5 truncate font-mono text-2xs text-ink-3" title={session.cwd}>{shortPath(session.cwd, 70)}</p>
+							</div>
+							<div className="shrink-0 text-right text-xs text-ink-3">
+								<p>{formatTimestamp(session.updatedAt || session.createdAt)}</p>
+								<p className="mt-0.5">{session.messageCount} messages · {session.toolCallCount} tool calls</p>
+								{session.durationMs != null ? <p className="mt-0.5">{formatDurationMs(session.durationMs)}</p> : null}
+							</div>
 						</div>
-						<div className="shrink-0 text-right text-xs text-ink-3">
-							<p>{formatTimestamp(session.updatedAt || session.createdAt)}</p>
-							<p className="mt-0.5">{session.durationMs != null ? formatDurationMs(session.durationMs) : `${session.messageCount} messages`}</p>
-						</div>
+						{session.error ? <p className="mt-2 line-clamp-2 text-xs text-red-400">{session.error}</p> : null}
 					</div>
-					{session.error ? <p className="mt-2 line-clamp-2 text-xs text-red-400">{session.error}</p> : null}
+					{expanded ? <ChevronDown className="mt-1 h-4 w-4 shrink-0 text-ink-3" /> : <ChevronRight className="mt-1 h-4 w-4 shrink-0 text-ink-3" />}
+				</button>
+				<div className="flex shrink-0 flex-col items-center justify-center gap-1 border-l border-line px-1.5">
+					<button
+						type="button"
+						onClick={onOpen}
+						className="rounded p-1.5 text-ink-3 hover:bg-paper-3 hover:text-ink"
+						title="Open in chat"
+						aria-label="Open in chat"
+					>
+						<MessageSquare className="h-3.5 w-3.5" />
+					</button>
+					<button
+						type="button"
+						onClick={onDelete}
+						className="rounded p-1.5 text-ink-3 hover:bg-red-500/10 hover:text-red-400"
+						title="Delete session"
+						aria-label="Delete session"
+					>
+						<Trash2 className="h-3.5 w-3.5" />
+					</button>
 				</div>
-				{expanded ? <ChevronDown className="mt-1 h-4 w-4 shrink-0 text-ink-3" /> : <ChevronRight className="mt-1 h-4 w-4 shrink-0 text-ink-3" />}
-			</button>
+			</div>
 			{expanded ? <SessionMessages session={session} /> : null}
 		</article>
 	);

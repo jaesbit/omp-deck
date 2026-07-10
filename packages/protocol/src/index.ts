@@ -51,6 +51,8 @@ export interface SessionMonitorEntry extends SessionSummary {
 	status: SessionMonitorStatus;
 	error?: string;
 	recentMessages: SessionMonitorMessage[];
+	/** Tool-call blocks in persisted assistant messages, over the whole transcript. */
+	toolCallCount: number;
 }
 
 export interface ListSessionMonitorResponse {
