@@ -3,7 +3,7 @@ import type { ServerWebSocket } from "bun";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { AgentBridge, CreateSessionOpts, EventListener, SessionHandle } from "./bridge/types.ts";
+import type { AgentBridge, EventListener } from "./bridge/types.ts";
 import { broadcastBus } from "./broadcast-bus.ts";
 import { closeDb, openDb } from "./db/index.ts";
 import { setInternalTaskModel } from "./db/server-settings.ts";
@@ -254,12 +254,12 @@ describe("WsHub auto-title-on-first-prompt", () => {
 		bridge: AgentBridge;
 		promptCalls: string[];
 		setNameCalls: string[];
-		createSessionCalls: CreateSessionOpts[];
+		generateTitleCalls: Parameters<AgentBridge["generateTitle"]>[0][];
 		snapshotCalled: Promise<void>;
 	} {
 		const promptCalls: string[] = [];
 		const setNameCalls: string[] = [];
-		const createSessionCalls: CreateSessionOpts[] = [];
+		const generateTitleCalls: Parameters<AgentBridge["generateTitle"]>[0][] = [];
 		const snapshotCalled = Promise.withResolvers<void>();
 
 		const handle = {
@@ -284,26 +284,6 @@ describe("WsHub auto-title-on-first-prompt", () => {
 			},
 		};
 
-		// The one-shot session `generateSessionTitle` spins up internally for
-		// the title-generation turn. Its terminal event fires synchronously
-		// from `subscribe()` (see `session-title.test.ts`'s `FakeSessionHandle`
-		// for why a real timer would deadlock the sequential-await shape of
-		// `generateSessionTitle`), so this whole path never touches real time.
-		const titleTurnEnded = Promise.withResolvers<void>();
-		const titleHandle = {
-			sessionId: "title-session-1",
-			subscribe(listener: EventListener) {
-				listener({ type: "turn_end" } as never);
-				titleTurnEnded.resolve();
-				return () => {};
-			},
-			async prompt() {
-				await titleTurnEnded.promise;
-			},
-			async snapshot() {
-				return { messages: [{ role: "assistant", content: opts.titleResponse ?? "Generated Title" }] };
-			},
-		};
 
 		return {
 			bridge: {
@@ -317,24 +297,21 @@ describe("WsHub auto-title-on-first-prompt", () => {
 					return () => {};
 				},
 				bumpActivity() {},
-				async createSession(createOpts: CreateSessionOpts) {
-					createSessionCalls.push(createOpts);
-					return titleHandle as unknown as SessionHandle;
-				},
-				async deleteSession() {
-					return { deleted: true };
+				async generateTitle(request: Parameters<AgentBridge["generateTitle"]>[0]) {
+					generateTitleCalls.push(request);
+					return opts.titleResponse ?? "Generated Title";
 				},
 			} as unknown as AgentBridge,
 			promptCalls,
 			setNameCalls,
-			createSessionCalls,
+			generateTitleCalls,
 			snapshotCalled: snapshotCalled.promise,
 		};
 	}
 
 	test("triggers title generation on the first prompt, renaming the session and broadcasting sessions_changed", async () => {
 		setInternalTaskModel({ provider: "anthropic", id: "claude-good" });
-		const { bridge, setNameCalls, createSessionCalls } = fakePromptBridge({ titleResponse: "Fix The Login Bug" });
+		const { bridge, setNameCalls, generateTitleCalls } = fakePromptBridge({ titleResponse: "Fix The Login Bug" });
 		const hub = new WsHub(bridge, noopSkills);
 		const socket = makeSocket(hub);
 		try {
@@ -353,7 +330,7 @@ describe("WsHub auto-title-on-first-prompt", () => {
 			);
 			await sessionsChanged;
 
-			expect(createSessionCalls).toHaveLength(1);
+			expect(generateTitleCalls).toHaveLength(1);
 			expect(setNameCalls).toEqual(["Fix The Login Bug"]);
 		} finally {
 			hub.onClose(socket as unknown as ServerWebSocket<ConnectionData>);
@@ -363,7 +340,7 @@ describe("WsHub auto-title-on-first-prompt", () => {
 
 	test("never renames a session that already has a sessionName", async () => {
 		setInternalTaskModel({ provider: "anthropic", id: "claude-good" });
-		const { bridge, setNameCalls, createSessionCalls, snapshotCalled } = fakePromptBridge({
+		const { bridge, setNameCalls, generateTitleCalls, snapshotCalled } = fakePromptBridge({
 			sessionName: "Already Named",
 		});
 		const hub = new WsHub(bridge, noopSkills);
@@ -381,7 +358,7 @@ describe("WsHub auto-title-on-first-prompt", () => {
 			await Promise.resolve();
 
 			expect(setNameCalls).toEqual([]);
-			expect(createSessionCalls).toEqual([]);
+			expect(generateTitleCalls).toEqual([]);
 		} finally {
 			hub.onClose(socket as unknown as ServerWebSocket<ConnectionData>);
 			hub.dispose();
@@ -390,7 +367,7 @@ describe("WsHub auto-title-on-first-prompt", () => {
 
 	test("a second prompt on the same session never re-triggers generation", async () => {
 		setInternalTaskModel({ provider: "anthropic", id: "claude-good" });
-		const { bridge, createSessionCalls } = fakePromptBridge({ titleResponse: "First Title" });
+		const { bridge, generateTitleCalls } = fakePromptBridge({ titleResponse: "First Title" });
 		const hub = new WsHub(bridge, noopSkills);
 		const socket = makeSocket(hub);
 		try {
@@ -407,14 +384,14 @@ describe("WsHub auto-title-on-first-prompt", () => {
 				JSON.stringify({ type: "prompt", sessionId: "session-1", text: "First message" }),
 			);
 			await sessionsChanged;
-			expect(createSessionCalls).toHaveLength(1);
+			expect(generateTitleCalls).toHaveLength(1);
 
 			await hub.onMessage(
 				socket as unknown as ServerWebSocket<ConnectionData>,
 				JSON.stringify({ type: "prompt", sessionId: "session-1", text: "Second message" }),
 			);
 
-			expect(createSessionCalls).toHaveLength(1);
+			expect(generateTitleCalls).toHaveLength(1);
 		} finally {
 			hub.onClose(socket as unknown as ServerWebSocket<ConnectionData>);
 			hub.dispose();
@@ -422,7 +399,7 @@ describe("WsHub auto-title-on-first-prompt", () => {
 	});
 
 	test("attempts no title generation at all when internalTaskModel is unset, leaving the normal prompt flow unchanged", async () => {
-		const { bridge, setNameCalls, createSessionCalls, promptCalls } = fakePromptBridge();
+		const { bridge, setNameCalls, generateTitleCalls, promptCalls } = fakePromptBridge();
 		const hub = new WsHub(bridge, noopSkills);
 		const socket = makeSocket(hub);
 		try {
@@ -432,7 +409,7 @@ describe("WsHub auto-title-on-first-prompt", () => {
 			);
 
 			expect(promptCalls).toEqual(["Hello"]);
-			expect(createSessionCalls).toEqual([]);
+			expect(generateTitleCalls).toEqual([]);
 			expect(setNameCalls).toEqual([]);
 		} finally {
 			hub.onClose(socket as unknown as ServerWebSocket<ConnectionData>);

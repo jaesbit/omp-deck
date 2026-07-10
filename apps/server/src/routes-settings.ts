@@ -14,6 +14,8 @@ import type {
 	SetDeckBaseUrlRequest,
 	SetInternalTaskModelRequest,
 	SetTaskRewriteModelRequest,
+	SessionTitlePromptResponse,
+	SetSessionTitlePromptRequest,
 	TaskRewriteModelResponse,
 } from "@omp-deck/protocol";
 
@@ -29,9 +31,10 @@ import {
 	readManagedEnvFile,
 	writeManagedEnvUpdates,
 } from "./env-store.ts";
-import { getDeckBaseUrl, getInternalTaskModel, getTaskRewriteModel, setDeckBaseUrl, setInternalTaskModel, setTaskRewriteModel } from "./db/server-settings.ts";
+import { getDeckBaseUrl, getInternalTaskModel, getSessionTitlePrompt, getTaskRewriteModel, setDeckBaseUrl, setInternalTaskModel, setSessionTitlePrompt, setTaskRewriteModel } from "./db/server-settings.ts";
 import { setLogLevel } from "./log.ts";
 import type { AgentBridge } from "./bridge/types.ts";
+import { DEFAULT_SESSION_TITLE_PROMPT } from "./session-title.ts";
 
 export function buildSettingsRouter(
 	bridge: AgentBridge,
@@ -175,6 +178,35 @@ export function buildSettingsRouter(
 		const model = setInternalTaskModel(body.model);
 		const resp: InternalTaskModelResponse = { model };
 		return c.json(resp);
+	});
+
+	app.get("/settings/session-title-prompt", (c) => {
+		const override = getSessionTitlePrompt();
+		const body: SessionTitlePromptResponse = {
+			default: DEFAULT_SESSION_TITLE_PROMPT,
+			override,
+			effective: override ?? DEFAULT_SESSION_TITLE_PROMPT,
+		};
+		return c.json(body);
+	});
+
+	app.put("/settings/session-title-prompt", async (c) => {
+		let body: SetSessionTitlePromptRequest;
+		try {
+			body = (await c.req.json()) as SetSessionTitlePromptRequest;
+		} catch {
+			return c.json({ error: "invalid json body" }, 400);
+		}
+		if (body.value !== null && typeof body.value !== "string") {
+			return c.json({ error: "value must be a string or null" }, 400);
+		}
+		const override = setSessionTitlePrompt(body.value);
+		const response: SessionTitlePromptResponse = {
+			default: DEFAULT_SESSION_TITLE_PROMPT,
+			override,
+			effective: override ?? DEFAULT_SESSION_TITLE_PROMPT,
+		};
+		return c.json(response);
 	});
 
 	return app;

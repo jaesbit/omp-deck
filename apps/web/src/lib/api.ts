@@ -26,6 +26,8 @@ import type {
 	SetAutoWorkGlobalConfigRequest,
 	SetDeckBaseUrlRequest,
 	SetInternalTaskModelRequest,
+	SessionTitlePromptResponse,
+	SetSessionTitlePromptRequest,
 	SetTaskRewriteModelRequest,
 	SubscriptionUsageResponse,
 	TaskPriority,
@@ -213,6 +215,15 @@ export const api = {
 		return request<InternalTaskModelResponse>("/settings/internal-task-model", {
 			method: "PUT",
 			body: JSON.stringify({ model } satisfies SetInternalTaskModelRequest),
+		});
+	},
+	getSessionTitlePrompt(): Promise<SessionTitlePromptResponse> {
+		return request<SessionTitlePromptResponse>("/settings/session-title-prompt");
+	},
+	setSessionTitlePrompt(value: string | null): Promise<SessionTitlePromptResponse> {
+		return request<SessionTitlePromptResponse>("/settings/session-title-prompt", {
+			method: "PUT",
+			body: JSON.stringify({ value } satisfies SetSessionTitlePromptRequest),
 		});
 	},
 };

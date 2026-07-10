@@ -6,6 +6,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent";
 import type { AgentSession, CreateAgentSessionResult } from "@oh-my-pi/pi-coding-agent";
 import { parseConfiguredThinkingLevel } from "@oh-my-pi/pi-coding-agent/thinking";
+import { generateTitleOnline } from "@oh-my-pi/pi-coding-agent/utils/title-generator";
 import { getLatestTodoPhasesFromEntries } from "@oh-my-pi/pi-coding-agent/tools/todo";
 import { getEnvApiKey } from "@oh-my-pi/pi-ai";
 import { runExtensionCompact, runExtensionSetModel } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/compact-handler";
@@ -62,6 +63,7 @@ import type {
 	EventListener,
 	PlanApprovalResponse,
 	ResumeSessionOpts,
+	GenerateTitleOpts,
 	RuntimeEnvUpdate,
 	SessionHandle,
 	SlashDispatchResult,
@@ -335,6 +337,13 @@ export class InProcessAgentBridge implements AgentBridge {
 			return registry;
 		})();
 		return this.modelRegistryPromise;
+	}
+
+	async generateTitle(opts: GenerateTitleOpts): Promise<string | null> {
+		const registry = await this.ensureModelRegistry();
+		const model = registry.find(opts.model.provider, opts.model.id);
+		if (!model) return null;
+		return generateTitleOnline(opts.userMessage, registry, ompSettings, opts.sessionId, model, undefined, undefined, opts.systemPrompt);
 	}
 
 	async listModels(opts: { sessionId?: string } = {}): Promise<ModelInfo[]> {
