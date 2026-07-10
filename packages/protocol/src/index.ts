@@ -806,6 +806,44 @@ export interface ListSessionUsageResponse {
 }
 
 /**
+ * `GET /api/usage/spend` — per-account (workspace) spend totals, aggregated
+ * from the same session transcripts as `SessionUsageSummary`. "Account" maps
+ * to a workspace `cwd` — the deck has no separate account/tenant concept, so
+ * the workspace is the natural aggregation unit for "who spent what" (T-98).
+ *
+ * All three buckets are calendar-aligned in UTC and computed in a single
+ * pass so the client can switch granularity instantly with no refetch:
+ *   - `day`   — today, UTC calendar day (00:00–24:00 UTC).
+ *   - `week`  — this week, ISO week starting Monday 00:00 UTC.
+ *   - `month` — this month, UTC calendar month-to-date.
+ * Costs are `usage.cost.total` (USD) from each assistant message's own
+ * timestamp, so a session spanning a bucket boundary splits correctly.
+ */
+export interface AccountSpendEntry {
+	/** Workspace path — the aggregation key ("account"). */
+	cwd: string;
+	/** Display label, derived the same way as `WorkspaceEntry.label`. */
+	label: string;
+	/** USD spend in the current UTC day bucket. */
+	day: number;
+	/** USD spend in the current UTC ISO-week (Mon-start) bucket. */
+	week: number;
+	/** USD spend in the current UTC calendar-month bucket. */
+	month: number;
+}
+
+export interface SpendSummaryResponse {
+	/** ISO-8601 start of the current UTC day bucket. */
+	dayStart: string;
+	/** ISO-8601 start of the current UTC ISO-week bucket (Monday). */
+	weekStart: string;
+	/** ISO-8601 start of the current UTC month bucket. */
+	monthStart: string;
+	/** One entry per known workspace, sorted by month spend desc. */
+	accounts: AccountSpendEntry[];
+}
+
+/**
  * Effective model override applied while a session is in Plan Mode. Distinct
  * from the session's persistent model (which stays what the user configured):
  * the deck temporarily switches to the configured plan-role model on enter and

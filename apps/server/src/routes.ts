@@ -30,6 +30,7 @@ import { resolveIntegrationPrompt } from "./integration-prompts.ts";
 import { waitForAutoWorkSessionTerminal } from "./auto-work/engine.ts";
 import { getModelCatalogOverlay } from "./model-catalog-overlay.ts";
 import { listSessionMonitor } from "./session-monitor.ts";
+import { deriveLabel } from "./workspace-label.ts";
 
 const log = logger("routes");
 
@@ -473,7 +474,7 @@ export function buildRouter(
 	app.route("/", buildKbRouter(kb));
 	app.route("/auth/oauth", buildAuthOAuthRouter());
 	app.route("/onboarding", buildOnboardingRouter());
-	app.route("/", buildUsageRouter(bridge));
+	app.route("/", buildUsageRouter(bridge, config));
 	app.route("/", buildAutoWorkRouter(bridge, config));
 
 	return app;
@@ -505,12 +506,6 @@ async function validateModelRef(bridge: AgentBridge, ref: ModelRef): Promise<str
 		return `unavailable: ${ref.provider}/${ref.id} (shadowed by catalog overlay)`;
 	}
 	return `unknown model: ${ref.provider}/${ref.id}`;
-}
-
-function deriveLabel(cwd: string): string {
-	if (!cwd) return "(unknown)";
-	const parts = cwd.split(/[\\/]/).filter(Boolean);
-	return parts[parts.length - 1] ?? cwd;
 }
 
 /**
