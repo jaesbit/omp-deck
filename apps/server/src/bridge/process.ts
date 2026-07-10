@@ -9,6 +9,7 @@ import type {
 	ModelInfo,
 	ModelRef,
 	PendingPlanApprovalWire,
+	PendingPlanExecutionWire,
 	PlanModeContextWire,
 	QueuedPromptWire,
 	SessionHistoryResponse,
@@ -49,6 +50,7 @@ const CHILD_SUBSCRIBER_ID = "process-bridge-parent";
 type WorkerUiOpenFrame = Extract<WorkerUiFrame, { type: "ext_ui_dialog_open" }>;
 type WorkerPlanModeChangedFrame = Extract<WorkerPlanFrame, { type: "plan_mode_changed" }>;
 type WorkerPlanProposedFrame = Extract<WorkerPlanFrame, { type: "plan_proposed" }>;
+type WorkerPlanExecutionFrame = Extract<WorkerPlanFrame, { type: "plan_execution_changed" }>;
 
 export interface AgentWorkerProcess {
 	send(message: WorkerRequestFrame): void;
@@ -80,6 +82,7 @@ interface ActiveProcess {
 	planChannelSubscribed: boolean;
 	currentPlanModeFrame: WorkerPlanModeChangedFrame | undefined;
 	pendingPlanFrame: WorkerPlanProposedFrame | undefined;
+	pendingPlanExecutionFrame: WorkerPlanExecutionFrame | undefined;
 	disposal: Promise<void> | undefined;
 }
 
@@ -249,6 +252,9 @@ export class ProcessAgentBridge implements AgentBridge {
 		if (record.pendingPlanFrame) {
 			invokeListener(listener, record.pendingPlanFrame, "plan-mode replay");
 		}
+		if (record.pendingPlanExecutionFrame) {
+			invokeListener(listener, record.pendingPlanExecutionFrame, "plan-mode replay");
+		}
 		if (!record.planChannelSubscribed) {
 			record.planChannelSubscribed = true;
 			this.sendWithoutWaiting(record, "channel.subscribePlan", []);
@@ -270,6 +276,13 @@ export class ProcessAgentBridge implements AgentBridge {
 		if (!record) return "unknown";
 		record.lastActivityAt = Date.now();
 		return this.request(record, "bridge.respondToPlanApproval", [proposalId, response]);
+	}
+
+	async actOnPendingPlanExecution(sessionId: string, proposalId: string): Promise<"settled" | "unknown"> {
+		const record = this.active.get(sessionId);
+		if (!record) return "unknown";
+		record.lastActivityAt = Date.now();
+		return this.request(record, "bridge.actOnPendingPlanExecution", [proposalId]);
 	}
 
 	dispose(): Promise<void> {
@@ -332,6 +345,7 @@ export class ProcessAgentBridge implements AgentBridge {
 			planChannelSubscribed: false,
 			currentPlanModeFrame: undefined,
 			pendingPlanFrame: undefined,
+			pendingPlanExecutionFrame: undefined,
 			disposal: undefined,
 		};
 		this.processes.add(record);
@@ -427,6 +441,8 @@ export class ProcessAgentBridge implements AgentBridge {
 			if (!frame.frame.enabled) record.pendingPlanFrame = undefined;
 		} else if (frame.frame.type === "plan_proposed") {
 			record.pendingPlanFrame = frame.frame;
+		} else if (frame.frame.type === "plan_execution_changed") {
+			record.pendingPlanExecutionFrame = frame.frame.status === "dispatched" ? undefined : frame.frame;
 		} else if (record.pendingPlanFrame?.proposalId === frame.frame.proposalId) {
 			record.pendingPlanFrame = undefined;
 		}
@@ -449,6 +465,7 @@ export class ProcessAgentBridge implements AgentBridge {
 		record.pendingUiFrames.clear();
 		record.currentPlanModeFrame = undefined;
 		record.pendingPlanFrame = undefined;
+		record.pendingPlanExecutionFrame = undefined;
 	}
 
 	private disposeRecord(record: ActiveProcess): Promise<void> {
@@ -618,11 +635,19 @@ export class ProcessSessionHandle implements SessionHandle {
 		return this.call("session.getPendingPlanApproval", []);
 	}
 
+	getPendingPlanExecution(): Promise<PendingPlanExecutionWire | undefined> {
+		return this.call("session.getPendingPlanExecution", []);
+	}
+
 	respondToPlanApproval(
 		proposalId: string,
 		response: PlanApprovalResponse,
 	): Promise<"settled" | "unknown"> {
 		return this.call("session.respondToPlanApproval", [proposalId, response]);
+	}
+
+	actOnPendingPlanExecution(proposalId: string): Promise<"settled" | "unknown"> {
+		return this.call("session.actOnPendingPlanExecution", [proposalId]);
 	}
 
 	actOnGoal(action: GoalAction): Promise<void> {

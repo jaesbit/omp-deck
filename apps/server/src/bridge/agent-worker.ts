@@ -121,6 +121,8 @@ export async function runAgentWorker(): Promise<void> {
 					frame.args[0],
 					frame.args[1],
 				);
+			case "bridge.actOnPendingPlanExecution":
+				return requireBridge().actOnPendingPlanExecution(requireHandle().sessionId, frame.args[0]);
 			case "bridge.dispose":
 				unsubscribeEvents?.();
 				unsubscribeEvents = undefined;
@@ -209,8 +211,12 @@ export async function runAgentWorker(): Promise<void> {
 				return requireHandle().getPlanModeContext();
 			case "session.getPendingPlanApproval":
 				return requireHandle().getPendingPlanApproval();
+			case "session.getPendingPlanExecution":
+				return requireHandle().getPendingPlanExecution();
 			case "session.respondToPlanApproval":
 				return requireHandle().respondToPlanApproval(frame.args[0], frame.args[1]);
+			case "session.actOnPendingPlanExecution":
+				return requireHandle().actOnPendingPlanExecution(frame.args[0]);
 			case "session.actOnGoal":
 				return requireHandle().actOnGoal(frame.args[0]);
 			case "session.getGoalModeContext":

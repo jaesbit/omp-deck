@@ -30,6 +30,9 @@ type PromptCall = {
 	options?: { synthetic?: boolean; streamingBehavior?: "steer" | "followUp" };
 };
 
+type PlanExecutionFrame = Extract<PlanModeFrame, { type: "plan_execution_changed" }>;
+type PlanProposedFrame = Extract<PlanModeFrame, { type: "plan_proposed" }>;
+
 class StubSession implements PlanModeSessionSurface {
 	private activeTools: string[];
 	planModeStateCalls: Array<
@@ -38,9 +41,16 @@ class StubSession implements PlanModeSessionSurface {
 	standingHandlerCalls: Array<((input: unknown) => Promise<unknown> | unknown) | null> = [];
 	standingHandler: ((input: unknown) => Promise<unknown> | unknown) | null = null;
 	markPlanReferenceSentCount = 0;
+	setPlanReferencePathCalls: Array<string | undefined> = [];
+	markPlanInternalAbortPendingCount = 0;
+	clearPlanInternalAbortPendingCount = 0;
+	compactCalls = 0;
 	promptCalls: PromptCall[] = [];
 	setActiveToolsCalls: string[][] = [];
 	isStreaming = true;
+	#compactGate: Promise<void> = Promise.resolve();
+	#compactionStarted = Promise.withResolvers<void>();
+	#promptStarted = Promise.withResolvers<void>();
 
 	constructor(initialTools: string[] = ["read", "search", "find", "lsp", "web_search", "edit", "write"]) {
 		this.activeTools = [...initialTools];
@@ -68,6 +78,39 @@ class StubSession implements PlanModeSessionSurface {
 		this.standingHandler = handler;
 	}
 
+	setPlanReferencePath(planFilePath: string | undefined): void {
+		this.setPlanReferencePathCalls.push(planFilePath);
+	}
+
+	markPlanInternalAbortPending(): void {
+		this.markPlanInternalAbortPendingCount += 1;
+	}
+
+	clearPlanInternalAbortPending(): void {
+		this.clearPlanInternalAbortPendingCount += 1;
+	}
+
+	compact(): Promise<void> {
+		this.compactCalls += 1;
+		this.#compactionStarted.resolve();
+		return this.#compactGate;
+	}
+
+	deferCompaction() {
+		const gate = Promise.withResolvers<void>();
+		this.#compactGate = gate.promise;
+		this.#compactionStarted = Promise.withResolvers<void>();
+		return gate;
+	}
+
+	waitForCompaction(): Promise<void> {
+		return this.#compactionStarted.promise;
+	}
+
+	waitForPrompt(): Promise<void> {
+		return this.#promptStarted.promise;
+	}
+
 	markPlanReferenceSent(): void {
 		this.markPlanReferenceSentCount += 1;
 	}
@@ -77,6 +120,7 @@ class StubSession implements PlanModeSessionSurface {
 		options?: { synthetic?: boolean; streamingBehavior?: "steer" | "followUp" },
 	): Promise<void> {
 		this.promptCalls.push({ text, ...(options ? { options } : {}) });
+		this.#promptStarted.resolve();
 	}
 }
 
@@ -150,12 +194,52 @@ class FakePlanModel implements PlanModelController {
 	}
 }
 
-function collect(bridge: PlanModeBridge): { frames: PlanModeFrame[]; unsub: () => void } {
+function collect(bridge: PlanModeBridge): {
+	frames: PlanModeFrame[];
+	nextExecution: (status: PlanExecutionFrame["status"]) => Promise<PlanExecutionFrame>;
+	nextProposal: () => Promise<PlanProposedFrame>;
+	unsub: () => void;
+} {
 	const frames: PlanModeFrame[] = [];
+	const proposalWaiters = new Set<(frame: PlanProposedFrame) => void>();
+	const executionWaiters = new Set<{
+		status: PlanExecutionFrame["status"];
+		resolve: (frame: PlanExecutionFrame) => void;
+	}>();
 	const unsub = bridge.subscribeFrames((frame) => {
 		frames.push(frame);
+		if (frame.type === "plan_proposed") {
+			for (const resolve of proposalWaiters) resolve(frame);
+			proposalWaiters.clear();
+			return;
+		}
+		if (frame.type !== "plan_execution_changed") return;
+		for (const waiter of executionWaiters) {
+			if (waiter.status !== frame.status) continue;
+			waiter.resolve(frame);
+			executionWaiters.delete(waiter);
+		}
 	});
-	return { frames, unsub };
+	return {
+		frames,
+		async nextExecution(status) {
+			const existing = frames.find(
+				(frame): frame is PlanExecutionFrame => frame.type === "plan_execution_changed" && frame.status === status,
+			);
+			if (existing) return existing;
+			const { promise, resolve } = Promise.withResolvers<PlanExecutionFrame>();
+			executionWaiters.add({ status, resolve });
+			return promise;
+		},
+		async nextProposal() {
+			const existing = frames.find((frame): frame is PlanProposedFrame => frame.type === "plan_proposed");
+			if (existing) return existing;
+			const { promise, resolve } = Promise.withResolvers<PlanProposedFrame>();
+			proposalWaiters.add(resolve);
+			return promise;
+		},
+		unsub,
+	};
 }
 
 type ResolveAgentResult = {
@@ -179,6 +263,8 @@ interface Harness {
 	session: StubSession;
 	bridge: PlanModeBridge;
 	frames: PlanModeFrame[];
+	nextExecution: (status: PlanExecutionFrame["status"]) => Promise<PlanExecutionFrame>;
+	nextProposal: () => Promise<PlanProposedFrame>;
 	openFrames: ServerFrame[]; // for assertions on the wire-level types
 	cleanup: () => Promise<void>;
 }
@@ -196,13 +282,15 @@ async function makeHarness(planModel?: PlanModelController): Promise<Harness> {
 		getSessionId: () => "s_test",
 		...(planModel ? { planModel } : {}),
 	});
-	const { frames } = collect(bridge);
+	const { frames, nextExecution, nextProposal } = collect(bridge);
 	return {
 		dir,
 		planFile: path.join(localDir, "PLAN.md"),
 		session,
 		bridge,
 		frames,
+		nextProposal,
+		nextExecution,
 		openFrames: frames as unknown as ServerFrame[],
 		async cleanup() {
 			// Await the exit so the bridge's internal awaits drain before the
@@ -229,13 +317,7 @@ async function invokeApply(h: Harness, input: { reason?: string; extra?: Record<
 	// Don't let bun flag this as an unhandled rejection while the caller is
 	// still chaining off it — the test attaches its own assertions later.
 	resultPromise.catch(() => {});
-	// Poll on hasPendingApproval. Real timers (not setImmediate) — bun's
-	// test loop can starve the fs.promises pool under microtask-only yields,
-	// leaving the broadcast pending until after the test has already failed.
-	const deadline = Date.now() + 2000;
-	while (!h.bridge.hasPendingApproval() && Date.now() < deadline) {
-		await new Promise<void>((r) => setTimeout(r, 1));
-	}
+	await h.nextProposal();
 	return { resultPromise };
 }
 
@@ -344,7 +426,7 @@ describe("PlanModeBridge", () => {
 		await expect(handler({ action: "apply", reason: "ready" })).rejects.toThrow(/Plan file not found/i);
 	});
 
-	it("approve happy path: broadcasts proposal, keeps plan path, restores tools, queues followUp", async () => {
+	it("approve without executionStrategy preserves the keep-context handoff", async () => {
 		await harness.bridge.enter();
 		await fs.writeFile(harness.planFile, "# My feature\n\nDo a thing.\n");
 
@@ -374,6 +456,7 @@ describe("PlanModeBridge", () => {
 		expect(outcome).toBe("settled");
 
 		const result = await resultPromise;
+		expect(harness.session.compactCalls).toBe(0);
 		expect(result.details.action).toBe("apply");
 		expect(result.details.sourceToolName).toBe("plan_approval");
 		expect(result.details.sourceResultDetails?.planFilePath).toBe("local://PLAN.md");
@@ -403,8 +486,8 @@ describe("PlanModeBridge", () => {
 		// Marker for the SDK that the post-approval reference has been emitted.
 		expect(harness.session.markPlanReferenceSentCount).toBe(1);
 
-		// Resolved frame broadcast.
-		expect(harness.frames.at(-1)).toEqual({
+		// The mode exit precedes the direct handoff's dispatched event.
+		expect(harness.frames).toContainEqual({
 			type: "plan_mode_changed",
 			sessionId: "s_test",
 			enabled: false,
@@ -416,6 +499,135 @@ describe("PlanModeBridge", () => {
 		expect(resolvedFrame?.outcome).toBe("approved");
 		// And there were strictly more frames after approval than before.
 		expect(harness.frames.length).toBeGreaterThan(initialFrameCount);
+	});
+
+	it("compact_context compacts before directly dispatching execution when the session is idle", async () => {
+		await harness.bridge.enter();
+		await fs.writeFile(harness.planFile, "# Compact me\n\nExecute after compaction.\n");
+		const compaction = harness.session.deferCompaction();
+		const { resultPromise } = await invokeApply(harness);
+		const proposed = await harness.nextProposal();
+
+		const executionPrompt = harness.session.waitForPrompt();
+		expect(
+			harness.bridge.respond(proposed.proposalId, { approved: true, executionStrategy: "compact_context" }),
+		).toBe("settled");
+		await harness.session.waitForCompaction();
+		await resultPromise;
+
+		expect(harness.session.compactCalls).toBe(1);
+		expect(harness.session.promptCalls).toHaveLength(0);
+		expect(harness.session.setPlanReferencePathCalls).toEqual(["local://PLAN.md"]);
+		expect(harness.session.markPlanInternalAbortPendingCount).toBe(1);
+		expect(harness.frames).toContainEqual({
+			type: "plan_execution_changed",
+			sessionId: "s_test",
+			proposalId: proposed.proposalId,
+			planFilePath: "local://PLAN.md",
+			status: "compacting",
+		});
+
+		harness.session.isStreaming = false;
+		compaction.resolve();
+		await executionPrompt;
+
+		expect(harness.session.promptCalls).toHaveLength(1);
+		expect(harness.session.promptCalls[0]).toEqual({
+			text: expect.stringContaining("Plan approved. You MUST execute it now."),
+		});
+		expect(harness.bridge.getPendingPlanExecution()).toBeUndefined();
+	});
+
+	it("cancelled compaction does not enqueue execution and leaves one atomic recovery action", async () => {
+		await harness.bridge.enter();
+		await fs.writeFile(harness.planFile, "# Compact me\n");
+		const compaction = harness.session.deferCompaction();
+		const { resultPromise } = await invokeApply(harness);
+		const proposed = await harness.nextProposal();
+
+		const recoveryPrompt = harness.session.waitForPrompt();
+		harness.bridge.respond(proposed.proposalId, { approved: true, executionStrategy: "compact_context" });
+		await harness.session.waitForCompaction();
+		await resultPromise;
+		const cancelled = harness.nextExecution("compact_cancelled");
+		const cancellationError = new Error("compaction cancelled");
+		cancellationError.name = "CompactionCancelledError";
+		compaction.reject(cancellationError);
+		await cancelled;
+
+		expect(harness.session.promptCalls).toHaveLength(0);
+		expect(harness.frames).toContainEqual({
+			type: "plan_execution_changed",
+			sessionId: "s_test",
+			proposalId: proposed.proposalId,
+			planFilePath: "local://PLAN.md",
+			status: "compact_cancelled",
+		});
+		expect(harness.bridge.getPendingPlanExecution()?.proposalId).toBe(proposed.proposalId);
+
+		harness.session.isStreaming = false;
+		await Promise.all([
+			harness.bridge.actOnPendingPlanExecution(proposed.proposalId),
+			harness.bridge.actOnPendingPlanExecution(proposed.proposalId),
+		]);
+		await recoveryPrompt;
+		expect(harness.session.compactCalls).toBe(1);
+		expect(harness.session.promptCalls).toHaveLength(1);
+		expect(harness.bridge.getPendingPlanExecution()).toBeUndefined();
+	});
+
+	it("failed compaction does not enqueue execution and retains a recoverable pending execution", async () => {
+		await harness.bridge.enter();
+		await fs.writeFile(harness.planFile, "# Compact me\n");
+		const compaction = harness.session.deferCompaction();
+		const { resultPromise } = await invokeApply(harness);
+		const proposed = await harness.nextProposal();
+
+		const recoveryPrompt = harness.session.waitForPrompt();
+		harness.bridge.respond(proposed.proposalId, { approved: true, executionStrategy: "compact_context" });
+		await harness.session.waitForCompaction();
+		await resultPromise;
+		const failed = harness.nextExecution("compact_failed");
+		compaction.reject(new Error("compaction backend failed"));
+		await failed;
+
+		expect(harness.session.promptCalls).toHaveLength(0);
+		expect(harness.frames).toContainEqual({
+			type: "plan_execution_changed",
+			sessionId: "s_test",
+			proposalId: proposed.proposalId,
+			planFilePath: "local://PLAN.md",
+			status: "compact_failed",
+			error: "compaction backend failed",
+		});
+		expect(harness.bridge.getPendingPlanExecution()?.proposalId).toBe(proposed.proposalId);
+
+		harness.session.isStreaming = false;
+		await harness.bridge.actOnPendingPlanExecution(proposed.proposalId);
+		await recoveryPrompt;
+		expect(harness.session.promptCalls).toHaveLength(1);
+		expect(harness.bridge.getPendingPlanExecution()).toBeUndefined();
+	});
+
+	it("two tabs approving compact_context start only one compaction and one execution", async () => {
+		await harness.bridge.enter();
+		await fs.writeFile(harness.planFile, "# Compact me\n");
+		const compaction = harness.session.deferCompaction();
+		const { resultPromise } = await invokeApply(harness);
+		const proposed = await harness.nextProposal();
+		const response = { approved: true as const, executionStrategy: "compact_context" as const };
+
+		const executionPrompt = harness.session.waitForPrompt();
+		expect(harness.bridge.respond(proposed.proposalId, response)).toBe("settled");
+		expect(harness.bridge.respond(proposed.proposalId, response)).toBe("unknown");
+		await harness.session.waitForCompaction();
+		expect(harness.session.compactCalls).toBe(1);
+		await resultPromise;
+
+		harness.session.isStreaming = false;
+		compaction.resolve();
+		await executionPrompt;
+		expect(harness.session.promptCalls).toHaveLength(1);
 	});
 
 	it("approve with edited content writes back to plan file", async () => {

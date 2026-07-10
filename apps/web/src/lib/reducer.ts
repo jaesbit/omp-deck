@@ -54,6 +54,7 @@ export function initSession(snapshot: SessionSnapshot): SessionUi {
 		queuedPrompts: hydrateQueuedPrompts(snapshot.queuedPrompts),
 		planMode: snapshot.planMode,
 		pendingPlanApproval: snapshot.pendingPlanApproval,
+		pendingPlanExecution: snapshot.pendingPlanExecution,
 		goalMode: snapshot.goalMode,
 	};
 	const base = snapshot.messagesStartIndex ?? 0;

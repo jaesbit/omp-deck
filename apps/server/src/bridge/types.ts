@@ -8,6 +8,8 @@ import type {
 	ModelInfo,
 	ModelRef,
 	PendingPlanApprovalWire,
+	PendingPlanExecutionWire,
+	PlanExecutionStrategy,
 	PlanModeContextWire,
 	QueuedPromptWire,
 	ServerFrame,
@@ -72,7 +74,7 @@ export interface AgentBridge {
 		listener: (
 			frame: Extract<
 				ServerFrame,
-				{ type: "plan_mode_changed" | "plan_proposed" | "plan_proposal_resolved" }
+				{ type: "plan_mode_changed" | "plan_proposed" | "plan_proposal_resolved" | "plan_execution_changed" }
 			>,
 		) => void,
 	): () => void;
@@ -87,6 +89,7 @@ export interface AgentBridge {
 		proposalId: string,
 		response: PlanApprovalResponse,
 	): Promise<"settled" | "unknown">;
+	actOnPendingPlanExecution(sessionId: string, proposalId: string): Promise<"settled" | "unknown">;
 	dispose(): Promise<void>;
 }
 
@@ -233,15 +236,13 @@ export interface SessionHandle {
 	getPlanModeContext(): MaybePromise<PlanModeContextWire | undefined>;
 	/** Read the unresolved plan-approval card for snapshot replay. */
 	getPendingPlanApproval(): MaybePromise<PendingPlanApprovalWire | undefined>;
-	/**
-	 * Settle a plan-approval proposal. Returns `"settled"` on success,
-	 * `"unknown"` when the proposalId does not match the pending entry
-	 * (already resolved by a sibling tab; second clicker gets a 409).
-	 */
+	/** Read compact-before-execute recovery state for snapshot replay. */
+	getPendingPlanExecution(): MaybePromise<PendingPlanExecutionWire | undefined>;
 	respondToPlanApproval(
 		proposalId: string,
 		response: PlanApprovalResponse,
 	): Promise<"settled" | "unknown">;
+	actOnPendingPlanExecution(proposalId: string): Promise<"settled" | "unknown">;
 	/** Execute a Goal Mode lifecycle action for this session. */
 	actOnGoal(action: GoalAction): Promise<void>;
 	/** Read Goal Mode state for snapshot replay. */
@@ -261,8 +262,10 @@ export interface AgentMessagePassthrough extends AgentMessageJson {}
  */
 export interface PlanApprovalResponse {
 	approved: boolean;
-	/** Optional rename: `local://*.md`. When absent, uses the suggested final path. */
+	/** Defaults to `keep_context` when absent for old clients. */
+	executionStrategy?: PlanExecutionStrategy;
+	/** Ignored: plan files remain at their original path on current SDK versions. */
 	finalPath?: string;
-	/** Optional edited plan body. When present, overwrites `local://PLAN.md` before the rename. */
+	/** Optional edited plan body. When present, overwrites `local://PLAN.md` before approval. */
 	editedContent?: string;
 }
