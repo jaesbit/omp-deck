@@ -13,6 +13,7 @@ import type {
 	ListFilePathsResponse,
 	ListModelsResponse,
 	ListSessionsResponse,
+	ListSessionMonitorResponse,
 	ListSlashCommandsResponse,
 	ListTasksResponse,
 	ListWorkspacePreferencesResponse,
@@ -62,6 +63,10 @@ export const api = {
 	listSessions(cwd?: string): Promise<ListSessionsResponse> {
 		const q = cwd ? `?cwd=${encodeURIComponent(cwd)}` : "";
 		return request<ListSessionsResponse>(`/sessions${q}`);
+	},
+	listSessionMonitor(cwd?: string): Promise<ListSessionMonitorResponse> {
+		const q = cwd ? `?cwd=${encodeURIComponent(cwd)}` : "";
+		return request<ListSessionMonitorResponse>(`/sessions/monitor${q}`);
 	},
 	sessionHistory(id: string, before: number, limit: number): Promise<SessionHistoryResponse> {
 		return request<SessionHistoryResponse>(

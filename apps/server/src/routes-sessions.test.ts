@@ -19,7 +19,7 @@ import { closeDb, openDb } from "./db/index.ts";
 import { buildRouter } from "./routes.ts";
 import type { AgentBridge, CreateSessionOpts, SessionHandle } from "./bridge/types.ts";
 import { broadcastBus, type BroadcastFrame } from "./broadcast-bus.ts";
-import type { ModelInfo } from "@omp-deck/protocol";
+import type { ModelInfo, SessionSummary } from "@omp-deck/protocol"
 
 let dbDir: string | null = null;
 let createCalls: CreateSessionOpts[] = [];
@@ -387,3 +387,66 @@ describe("GET /sessions/:id/history", () => {
 		expect(forwarded).toBeLessThanOrEqual(500);
 	});
 });
+
+describe("GET /sessions/monitor", () => {
+	test("returns the filtered monitoring projection for a persisted terminal error", async () => {
+		const cwd = "/workspaces/monitor"
+		const transcriptPath = path.join(dbDir!, "monitor-error.jsonl")
+		fs.writeFileSync(
+			transcriptPath,
+			[
+				{ type: "session", version: 3, id: "monitor-error", cwd },
+				{ type: "message", message: { role: "user", content: "Deploy the release" } },
+				{
+					type: "message",
+					message: { role: "toolResult", content: "Deployment API returned 503", isError: true },
+				},
+				{ type: "agent_end", stopReason: "error" },
+			]
+				.map((record) => JSON.stringify(record))
+				.join("\n"),
+			"utf8",
+		)
+		const monitored: SessionSummary = {
+			id: "monitor-error",
+			path: transcriptPath,
+			cwd,
+			createdAt: "2026-07-10T10:00:00.000Z",
+			updatedAt: "2026-07-10T10:05:00.000Z",
+			messageCount: 2,
+		}
+		const otherWorkspace: SessionSummary = {
+			...monitored,
+			id: "not-selected",
+			cwd: "/workspaces/other",
+			path: path.join(dbDir!, "not-selected.jsonl"),
+		}
+		const listCalls: Array<{ cwd?: string }> = []
+		const bridge: AgentBridge = {
+			...fakeBridge([]),
+			async listSessions(opts: { cwd?: string }) {
+				listCalls.push(opts)
+				return opts.cwd === cwd ? [monitored] : [monitored, otherWorkspace]
+			},
+		}
+		const app = buildTestApp(bridge, cwd)
+
+		const res = await app.request(`/sessions/monitor?cwd=${encodeURIComponent(cwd)}`)
+
+		expect(res.status).toBe(200)
+		expect(await res.json()).toEqual({
+			sessions: [
+				{
+					...monitored,
+					status: "error",
+					error: "Agent turn ended with an error.",
+					recentMessages: [
+						{ role: "user", text: "Deploy the release" },
+						{ role: "tool", text: "Deployment API returned 503", isError: true },
+					],
+				},
+			],
+		})
+		expect(listCalls).toEqual([{ cwd }])
+	})
+})

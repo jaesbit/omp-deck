@@ -5,6 +5,7 @@ import type {
 	CreateSessionResponse,
 	ListModelsResponse,
 	ListSessionsResponse,
+	ListSessionMonitorResponse,
 	ListWorkspacePreferencesResponse,
 	ListWorkspacesResponse,
 	ModelRef,
@@ -27,6 +28,7 @@ import { getTask } from "./db/tasks.ts";
 import { getTaskRewriteModel } from "./db/server-settings.ts";
 import { waitForAutoWorkSessionTerminal } from "./auto-work/engine.ts";
 import { getModelCatalogOverlay } from "./model-catalog-overlay.ts";
+import { listSessionMonitor } from "./session-monitor.ts";
 
 const log = logger("routes");
 
@@ -170,6 +172,18 @@ export function buildRouter(
 			return c.json(body);
 		} catch (err) {
 			log.error(`listSessions failed`, err);
+			return c.json({ error: String(err) }, 500);
+		}
+	});
+
+	app.get("/sessions/monitor", async (c) => {
+		const cwd = c.req.query("cwd");
+		try {
+			const sessions = await listSessionMonitor(bridge, cwd);
+			const body: ListSessionMonitorResponse = { sessions };
+			return c.json(body);
+		} catch (err) {
+			log.error(`list session monitor failed`, err);
 			return c.json({ error: String(err) }, 500);
 		}
 	});
