@@ -7,6 +7,7 @@ import type {
 	ModelInfo,
 	ModelRef,
 	PendingPlanApprovalWire,
+	PendingPlanExecutionWire,
 	PlanModeContextWire,
 	QueuedPromptWire,
 	ServerFrame,
@@ -52,6 +53,7 @@ export interface WorkerMethodMap {
 		[proposalId: string, response: PlanApprovalResponse],
 		"settled" | "unknown"
 	>;
+	"bridge.actOnPendingPlanExecution": WorkerRequestSpec<[proposalId: string], "settled" | "unknown">;
 	"bridge.dispose": WorkerRequestSpec<[], void>;
 
 	"channel.subscribeEvents": WorkerRequestSpec<[], void>;
@@ -89,10 +91,12 @@ export interface WorkerMethodMap {
 	"session.setPlanMode": WorkerRequestSpec<[enabled: boolean], void>;
 	"session.getPlanModeContext": WorkerRequestSpec<[], PlanModeContextWire | undefined>;
 	"session.getPendingPlanApproval": WorkerRequestSpec<[], PendingPlanApprovalWire | undefined>;
+	"session.getPendingPlanExecution": WorkerRequestSpec<[], PendingPlanExecutionWire | undefined>;
 	"session.respondToPlanApproval": WorkerRequestSpec<
 		[proposalId: string, response: PlanApprovalResponse],
 		"settled" | "unknown"
 	>;
+	"session.actOnPendingPlanExecution": WorkerRequestSpec<[proposalId: string], "settled" | "unknown">;
 	"session.actOnGoal": WorkerRequestSpec<[action: GoalAction], void>;
 	"session.getGoalModeContext": WorkerRequestSpec<[], GoalModeContextWire | undefined>;
 	"session.dispose": WorkerRequestSpec<[], void>;
@@ -129,7 +133,7 @@ export type WorkerUiFrame = Extract<
 
 export type WorkerPlanFrame = Extract<
 	ServerFrame,
-	{ type: "plan_mode_changed" | "plan_proposed" | "plan_proposal_resolved" }
+	{ type: "plan_mode_changed" | "plan_proposed" | "plan_proposal_resolved" | "plan_execution_changed" }
 >;
 
 export type WorkerEventFrame =

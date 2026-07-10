@@ -57,6 +57,7 @@ import { ToolError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
 import type {
 	ModelRef,
 	PendingPlanApprovalWire,
+	PendingPlanExecutionWire,
 	PlanModeContextWire,
 	PlanModeModelOverrideWire,
 	ServerFrame,
@@ -99,7 +100,7 @@ Plan approved. You MUST execute it now.
 </critical>
 
 Finalized plan artifact: \`{{planFilePath}}\`
-Context preserved. Use conversation history when useful; the finalized plan is the source of truth if it conflicts with earlier exploration.
+{{contextGuidance}}
 
 ## Plan
 
@@ -118,10 +119,29 @@ You MUST keep going until complete. This matters.
 </critical>
 `;
 
+/** Mirror of the SDK's plan-mode compact guidance. Keep in sync on SDK upgrades. */
+const PLAN_COMPACT_INSTRUCTIONS = `Preparing to execute the approved plan.
+
+You MUST distill the plan-mode discussion. Preserve:
+- The plan rationale and the alternatives explicitly rejected.
+- Key decisions and the constraints that drove them.
+- Discovered files, symbols, and code paths the executor will need.
+- Explicit user preferences expressed during planning.
+
+You MUST drop:
+- Tool-call noise where the result is already captured in the plan.
+- Superseded plan drafts.
+- Restated context already present in the plan file.
+
+The approved plan file is at \`{{planFilePath}}\`; it is the authoritative source of truth.
+You MUST preserve this durable path and the fact that the executor must read it directly after compaction.`;
+
+
 type PlanModeChangedFrame = Extract<ServerFrame, { type: "plan_mode_changed" }>;
 type PlanProposedFrame = Extract<ServerFrame, { type: "plan_proposed" }>;
 type PlanProposalResolvedFrame = Extract<ServerFrame, { type: "plan_proposal_resolved" }>;
-export type PlanModeFrame = PlanModeChangedFrame | PlanProposedFrame | PlanProposalResolvedFrame;
+type PlanExecutionChangedFrame = Extract<ServerFrame, { type: "plan_execution_changed" }>;
+export type PlanModeFrame = PlanModeChangedFrame | PlanProposedFrame | PlanProposalResolvedFrame | PlanExecutionChangedFrame;
 
 type FrameListener = (frame: PlanModeFrame) => void;
 
@@ -133,6 +153,16 @@ interface PendingApproval {
 	suggestedFinalPath: string;
 	resolve: (resp: PlanApprovalResponse) => void;
 	reject: (err: Error) => void;
+}
+
+interface PendingExecution {
+	proposalId: string;
+	planFilePath: string;
+	planContent: string;
+	/** True only after the planning transcript was successfully compacted. */
+	contextCompacted: boolean;
+	status: PendingPlanExecutionWire["status"];
+	error?: string;
 }
 
 /**
@@ -147,7 +177,11 @@ export interface PlanModeSessionSurface {
 	setStandingResolveHandler(
 		handler: ((input: unknown) => Promise<unknown> | unknown) | null,
 	): void;
+	setPlanReferencePath(path: string): void;
 	markPlanReferenceSent(): void;
+	markPlanInternalAbortPending(): void;
+	clearPlanInternalAbortPending(): void;
+	compact(customInstructions?: string, options?: { internalGuidance?: string }): Promise<unknown>;
 	readonly isStreaming: boolean;
 	prompt(
 		text: string,
@@ -212,6 +246,7 @@ export class PlanModeBridge {
 	private planFilePath: string = PLAN_FILE_URL;
 	private previousTools: string[] = [];
 	private pendingApproval: PendingApproval | undefined;
+	private pendingExecution: PendingExecution | undefined;
 	private disposed = false;
 	/**
 	 * Persistent (pre-plan) model + thinking captured on enter, restored on
@@ -291,6 +326,17 @@ export class PlanModeBridge {
 		};
 	}
 
+	getPendingPlanExecution(): PendingPlanExecutionWire | undefined {
+		const pending = this.pendingExecution;
+		if (!pending) return undefined;
+		return {
+			proposalId: pending.proposalId,
+			planFilePath: pending.planFilePath,
+			status: pending.status,
+			...(pending.error ? { error: pending.error } : {}),
+		};
+	}
+
 	/** Replay frames sent verbatim to a late subscriber so a page-reload
 	 *  during plan mode immediately re-renders the pill + any open card. */
 	getReplayFrames(): PlanModeFrame[] {
@@ -310,6 +356,8 @@ export class PlanModeBridge {
 				suggestedFinalPath: p.suggestedFinalPath,
 			});
 		}
+		const execution = this.pendingExecution;
+		if (execution) out.push(this.#executionFrame(execution));
 		return out;
 	}
 
@@ -325,6 +373,9 @@ export class PlanModeBridge {
 	/** Enter plan mode. Idempotent — re-entry is a no-op. */
 	async enter(): Promise<void> {
 		if (this.disposed || this.enabled) return;
+		if (this.pendingExecution) {
+			throw new Error("Finish or recover the approved plan execution before entering Plan Mode again.");
+		}
 
 		const previousTools = this.session.getActiveToolNames();
 		const planTools = previousTools.includes(RESOLVE_TOOL)
@@ -415,13 +466,19 @@ export class PlanModeBridge {
 	 */
 	respond(proposalId: string, response: PlanApprovalResponse): "settled" | "unknown" {
 		const pending = this.pendingApproval;
-		if (!pending || pending.proposalId !== proposalId) {
-			return "unknown";
-		}
-		// Do NOT clear pendingApproval here — the apply callback clears it
-		// after the promise resolves so any concurrent respond() racing
-		// with the resolve still sees "settled" until the callback exits.
+		if (!pending || pending.proposalId !== proposalId) return "unknown";
+		// Claim synchronously. Only one tab can resolve or trigger execution.
+		this.pendingApproval = undefined;
 		pending.resolve(response);
+		return "settled";
+	}
+
+	async actOnPendingPlanExecution(proposalId: string): Promise<"settled" | "unknown"> {
+		const pending = this.pendingExecution;
+		if (!pending || pending.proposalId !== proposalId || pending.status === "compacting" || pending.status === "dispatching") return "unknown";
+		const dispatching = { ...pending, status: "dispatching" as const };
+		this.#setPendingExecution(dispatching);
+		await this.#dispatchApprovedPlan(dispatching);
 		return "settled";
 	}
 
@@ -683,42 +740,114 @@ export class PlanModeBridge {
 				});
 
 				await this.exit("approved");
-
-				this.session.markPlanReferenceSent();
-				const approvedPrompt = renderApprovedPrompt({
-					planContent: finalContent,
+				const pending: PendingExecution = {
+					proposalId,
 					planFilePath: planFilePathAtApproval,
-				});
-
-				// Fire-and-forget: the resolve tool is still streaming at
-				// this point (we haven't returned yet), so the SDK queues
-				// the prompt as followUp and fires it once the current
-				// turn ends. The `synthetic` flag is intentionally absent
-				// — the SDK's queue path doesn't preserve it; we accept
-				// the resulting user-role bubble so the user sees a
-				// visible "execute" handoff. v1.1 may swap to a deferred
-				// turn_end listener if the synthetic distinction matters.
-				void this.session
-					.prompt(approvedPrompt, { streamingBehavior: "followUp" })
-					.catch((err) => {
-						log.warn(`synthetic approved-plan prompt failed for ${this.sessionId}`, err);
-					});
-
-				return {
-					content: [
-						{
-							type: "text" as const,
-							text: `Plan approved. Executing from ${planFilePathAtApproval}.`,
-						},
-					],
-					details: {
-						planFilePath: planFilePathAtApproval,
-						title: stripMdExtension(extractFileName(planFilePathAtApproval)),
-						planExists: true,
-					} satisfies PlanApprovalDetails,
+					planContent: finalContent,
+					contextCompacted: false,
+					status: "compacting",
 				};
+
+				if (userResponse.executionStrategy === "compact_context") {
+					// Pin before compaction so any operator input queued during it retains
+					// the durable plan reference even if compaction is cancelled.
+					this.session.setPlanReferencePath(planFilePathAtApproval);
+					this.#setPendingExecution(pending);
+					void this.#compactThenDispatch(pending);
+					return this.#approvalResult(planFilePathAtApproval, "Plan approved. Compacting context before execution.");
+				}
+
+				await this.#dispatchApprovedPlan(pending);
+				return this.#approvalResult(planFilePathAtApproval, `Plan approved. Executing from ${planFilePathAtApproval}.`);
 			},
 		});
+	}
+
+
+	#approvalResult(planFilePath: string, text: string): {
+		content: Array<{ type: "text"; text: string }>;
+		details: PlanApprovalDetails;
+	} {
+		return {
+			content: [{ type: "text", text }],
+			details: {
+				planFilePath,
+				title: stripMdExtension(extractFileName(planFilePath)),
+				planExists: true,
+			},
+		};
+	}
+
+	#executionFrame(pending: PendingExecution): PlanExecutionChangedFrame {
+		return {
+			type: "plan_execution_changed",
+			sessionId: this.sessionId,
+			proposalId: pending.proposalId,
+			planFilePath: pending.planFilePath,
+			status: pending.status,
+			...(pending.error ? { error: pending.error } : {}),
+		};
+	}
+
+	#setPendingExecution(pending: PendingExecution): void {
+		this.pendingExecution = pending;
+		this.#broadcast(this.#executionFrame(pending));
+	}
+
+	async #compactThenDispatch(pending: PendingExecution): Promise<void> {
+		this.session.markPlanInternalAbortPending();
+		try {
+			await this.session.compact(undefined, {
+				internalGuidance: PLAN_COMPACT_INSTRUCTIONS.replaceAll("{{planFilePath}}", pending.planFilePath),
+			});
+			if (this.pendingExecution?.proposalId !== pending.proposalId) return;
+			const dispatching = { ...pending, contextCompacted: true, status: "dispatching" as const };
+			this.#setPendingExecution(dispatching);
+			await this.#dispatchApprovedPlan(dispatching);
+		} catch (err) {
+			if (this.pendingExecution?.proposalId !== pending.proposalId) return;
+			const cancelled = err instanceof Error && err.name === "CompactionCancelledError";
+			this.#setPendingExecution({
+				...pending,
+				status: cancelled ? "compact_cancelled" : "compact_failed",
+				...(!cancelled ? { error: String((err as Error).message ?? err) } : {}),
+			});
+		} finally {
+			this.session.clearPlanInternalAbortPending();
+		}
+	}
+
+	async #dispatchApprovedPlan(pending: PendingExecution): Promise<void> {
+		this.session.setPlanReferencePath(pending.planFilePath);
+		this.session.markPlanReferenceSent();
+		try {
+			const prompt = renderApprovedPrompt({
+				planContent: pending.planContent,
+				planFilePath: pending.planFilePath,
+				contextPreserved: !pending.contextCompacted,
+			});
+			if (this.session.isStreaming) {
+				await this.session.prompt(prompt, { streamingBehavior: "followUp" });
+			} else {
+				await this.session.prompt(prompt);
+			}
+			if (this.pendingExecution?.proposalId === pending.proposalId) {
+				this.pendingExecution = undefined;
+			}
+			this.#broadcast({
+				type: "plan_execution_changed",
+				sessionId: this.sessionId,
+				proposalId: pending.proposalId,
+				planFilePath: pending.planFilePath,
+				status: "dispatched",
+			});
+		} catch (err) {
+			this.#setPendingExecution({
+				...pending,
+				status: "compact_failed",
+				error: `Unable to queue execution: ${String((err as Error).message ?? err)}`,
+			});
+		}
 	}
 
 	async #readPlanFile(planFilePath: string): Promise<string | null> {
@@ -749,11 +878,13 @@ export class PlanModeBridge {
 	}
 }
 
-function renderApprovedPrompt(args: { planContent: string; planFilePath: string }): string {
-	return PLAN_APPROVED_PROMPT_TEMPLATE.replaceAll(
-		"{{planContent}}",
-		args.planContent,
-	).replaceAll("{{planFilePath}}", args.planFilePath);
+function renderApprovedPrompt(args: { planContent: string; planFilePath: string; contextPreserved: boolean }): string {
+	const contextGuidance = args.contextPreserved
+		? "Context preserved. Use conversation history when useful; the finalized plan is the source of truth if it conflicts with earlier exploration."
+		: "Context was compacted. The finalized plan is the source of truth; read it directly before executing.";
+	return PLAN_APPROVED_PROMPT_TEMPLATE.replaceAll("{{planContent}}", args.planContent)
+		.replaceAll("{{planFilePath}}", args.planFilePath)
+		.replaceAll("{{contextGuidance}}", contextGuidance);
 }
 
 /**

@@ -36,6 +36,7 @@ import type {
 	ModelRef,
 	GoalModeContextWire,
 	PendingPlanApprovalWire,
+	PendingPlanExecutionWire,
 	PlanModeContextWire,
 	QueuedPromptWire,
 	ServerFrame,
@@ -754,7 +755,7 @@ export class InProcessAgentBridge implements AgentBridge {
 		listener: (
 			frame: Extract<
 				ServerFrame,
-				{ type: "plan_mode_changed" | "plan_proposed" | "plan_proposal_resolved" }
+				{ type: "plan_mode_changed" | "plan_proposed" | "plan_proposal_resolved" | "plan_execution_changed" }
 			>,
 		) => void,
 	): () => void {
@@ -782,6 +783,13 @@ export class InProcessAgentBridge implements AgentBridge {
 		if (!entry) return "unknown";
 		this.bumpActivity(sessionId);
 		return entry.planBridge.respond(proposalId, response);
+	}
+
+	async actOnPendingPlanExecution(sessionId: string, proposalId: string): Promise<"settled" | "unknown"> {
+		const entry = this.active.get(sessionId);
+		if (!entry) return "unknown";
+		this.bumpActivity(sessionId);
+		return entry.planBridge.actOnPendingPlanExecution(proposalId);
 	}
 
 	/**
@@ -1059,6 +1067,8 @@ export class InProcessSessionHandle implements SessionHandle {
 		}
 		const pendingPlan = this.planBridge.getPendingPlanApproval();
 		if (pendingPlan) snap.pendingPlanApproval = pendingPlan;
+		const pendingExecution = this.planBridge.getPendingPlanExecution();
+		if (pendingExecution) snap.pendingPlanExecution = pendingExecution;
 		const goalMode = this.goalBridge.getContext();
 		if (goalMode) snap.goalMode = goalMode;
 		if (this.shadowQueue.length > 0) snap.queuedPrompts = [...this.shadowQueue];
@@ -1461,11 +1471,19 @@ export class InProcessSessionHandle implements SessionHandle {
 		return this.planBridge.getPendingPlanApproval();
 	}
 
+	getPendingPlanExecution(): PendingPlanExecutionWire | undefined {
+		return this.planBridge.getPendingPlanExecution();
+	}
+
 	async respondToPlanApproval(
 		proposalId: string,
 		response: PlanApprovalResponse,
 	): Promise<"settled" | "unknown"> {
 		return this.planBridge.respond(proposalId, response);
+	}
+
+	async actOnPendingPlanExecution(proposalId: string): Promise<"settled" | "unknown"> {
+		return this.planBridge.actOnPendingPlanExecution(proposalId);
 	}
 
 	async actOnGoal(action: GoalAction): Promise<void> {
