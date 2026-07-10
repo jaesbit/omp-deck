@@ -1440,6 +1440,18 @@ export class InProcessSessionHandle implements SessionHandle {
 	}
 }
 
+
+/** Compute elapsed ms between two ISO timestamps. Returns undefined when either
+ * is invalid or updatedAt is not after createdAt (stale / corrupted records). */
+function computeDurationMs(createdAt: string, updatedAt: string): number | undefined {
+	if (!createdAt || !updatedAt) return undefined;
+	const c = new Date(createdAt).getTime();
+	const u = new Date(updatedAt).getTime();
+	if (Number.isNaN(c) || Number.isNaN(u)) return undefined;
+	const diff = u - c;
+	return diff > 0 ? diff : undefined;
+}
+
 /** Normalize a SessionManager.list / listAll record into our SessionSummary. */
 function summarize(raw: any): SessionSummary {
 	// omp's list returns objects like:
@@ -1456,6 +1468,7 @@ function summarize(raw: any): SessionSummary {
 	const createdAt = String(raw.timestamp ?? raw.createdAt ?? raw.header?.timestamp ?? "");
 	const updatedAt = String(raw.modifiedAt ?? raw.updatedAt ?? createdAt);
 	const messageCount = Number(raw.messageCount ?? raw.count ?? 0);
+	const durationMs = computeDurationMs(createdAt, updatedAt);
 	return {
 		id,
 		path: filePath,
@@ -1464,6 +1477,7 @@ function summarize(raw: any): SessionSummary {
 		createdAt,
 		updatedAt,
 		messageCount,
+		durationMs,
 	};
 }
 

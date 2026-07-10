@@ -4,7 +4,7 @@ import { SessionLaunchModal, type SessionLaunchOpts } from "@/components/chat/Se
 import { launchSession } from "@/lib/first-prompt";
 import { useStore } from "@/lib/store";
 import { usePersistedViewState } from "@/lib/use-persisted-view-state";
-import { cn, shortPath } from "@/lib/utils";
+import { cn, formatDurationMs, formatTimestamp, shortPath } from "@/lib/utils";
 
 export function Sidebar() {
 	const workspaces = useStore((s) => s.workspaces);
@@ -142,8 +142,8 @@ export function Sidebar() {
 						key={s.id}
 						id={s.id}
 						title={s.title || formatSessionId(s.id)}
-						subtitle={`${shortPath(s.cwd, 26)} · ${s.messageCount}m`}
-						meta={formatRelative(s.updatedAt || s.createdAt)}
+						subtitle={`${shortPath(s.cwd, 26)}${s.durationMs != null ? ` · ${formatDurationMs(s.durationMs)}` : ""}`}
+						meta={formatTimestamp(s.createdAt)}
 						onClick={() => void handleResume(s.path)}
 						onDelete={handleDelete}
 					/>
@@ -255,28 +255,4 @@ function SessionRow({
 function formatSessionId(id: string): string {
 	if (id.length <= 8) return id;
 	return `${id.slice(0, 4)}…${id.slice(-4)}`;
-}
-
-const RELATIVE_THRESHOLDS: Array<[number, string]> = [
-	[60_000, "just now"],
-	[3_600_000, "m"],
-	[86_400_000, "h"],
-	[2_592_000_000, "d"],
-];
-
-function formatRelative(ts: string): string {
-	if (!ts) return "";
-	const d = new Date(ts);
-	if (Number.isNaN(d.getTime())) return ts;
-	const diff = Date.now() - d.getTime();
-	if (diff < 0) return d.toLocaleDateString();
-	const first = RELATIVE_THRESHOLDS[0];
-	if (!first || diff < first[0]) return "just now";
-	for (let i = 1; i < RELATIVE_THRESHOLDS.length; i++) {
-		const cur = RELATIVE_THRESHOLDS[i];
-		const prev = RELATIVE_THRESHOLDS[i - 1];
-		if (!cur || !prev) continue;
-		if (diff < cur[0]) return `${Math.floor(diff / prev[0])}${cur[1]} ago`;
-	}
-	return d.toLocaleDateString();
 }
