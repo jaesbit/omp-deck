@@ -33,6 +33,7 @@ const log = logger("auto-work:notify");
 export type AutoWorkNotificationEvent =
 	| { kind: "task_started"; displayId: number; title: string; model: string }
 	| { kind: "task_completed"; displayId: number; prNumber: number }
+	| { kind: "task_completed_pr_failed"; displayId: number; reason: string }
 	| { kind: "task_failed"; displayId: number; reason: string }
 	| { kind: "weekly_threshold"; cwd: string; pctUsed: number; thresholdPct: number }
 	| { kind: "session_limit"; sessionPctUsed: number; sessionPctLimit: number };
@@ -44,6 +45,8 @@ export function formatAutoWorkNotification(event: AutoWorkNotificationEvent): st
 			return `🤖 AutoWork started T-${event.displayId}: ${event.title} [${event.model}]`;
 		case "task_completed":
 			return `✅ T-${event.displayId} → validate. PR #${event.prNumber}`;
+		case "task_completed_pr_failed":
+			return `⚠️ T-${event.displayId} → validate (implementation complete, PR creation failed): ${event.reason}`;
 		case "task_failed":
 			return `❌ T-${event.displayId} failed: ${event.reason}`;
 		case "weekly_threshold":

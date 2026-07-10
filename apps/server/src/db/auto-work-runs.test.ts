@@ -162,4 +162,31 @@ describe("auto-work runs", () => {
 		// last 10 completed runs (started most recently) are pct 3..12 -> average 7.5
 		expect(estimate.avgPctConsumed).toBe(7.5);
 	});
+
+	test("getAutoWorkCostEstimate includes completed_pr_failed runs in the rolling average", () => {
+		bootDb();
+		// 3 completed P2 runs (pct 10, 20, 30) plus 1 completed_pr_failed P2 run (pct 40).
+		for (const pct of [10, 20, 30]) {
+			const runId = startAutoWorkRun({
+				taskId: `p2-completed-${pct}`,
+				taskPriority: "P2",
+				sessionId: `s-${pct}`,
+				worktreePath: `/tmp/${pct}`,
+			});
+			completeAutoWorkRun(runId, { status: "completed", pctConsumed: pct });
+		}
+		const prFailedId = startAutoWorkRun({
+			taskId: "p2-pr-failed",
+			taskPriority: "P2",
+			sessionId: "s-pr-failed",
+			worktreePath: "/tmp/pr-failed",
+		});
+		completeAutoWorkRun(prFailedId, { status: "completed_pr_failed", pctConsumed: 40 });
+
+		const estimate = getAutoWorkCostEstimate("P2");
+		// If completed_pr_failed rows were excluded, sampleSize would be 3 and the
+		// average would be 20 instead of 25 -> this fails against `status = 'completed'` only.
+		expect(estimate.sampleSize).toBe(4);
+		expect(estimate.avgPctConsumed).toBe(25);
+	});
 });

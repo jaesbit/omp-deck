@@ -29,6 +29,7 @@ import {
 	checkAutoWorkPreflight,
 	classifyRunningAutoWorkRun,
 	costFitsAutoWorkBudget,
+	createPullRequestViaGh,
 	decideSqueezeTiming,
 	extractAgentHistory,
 	generateBranchSlugWithModel,
@@ -1269,6 +1270,107 @@ describe("reconcileInactiveAutoWorkRuns", () => {
 	});
 });
 
+// ─── createPullRequestViaGh / describeGhFailure (T-85) ─────────────────────
+//
+// `describeGhFailure` isn't exported, so its stderr-pattern mapping is
+// exercised here through `createPullRequestViaGh`'s thrown error text
+// instead. A naive "prepend a fake `gh` script to PATH" approach does not
+// work against Bun: mutating `process.env.PATH` from inside a running Bun
+// process does not change what a default (no explicit `env`) `Bun.spawn`
+// call resolves — Bun snapshots the process environment for child-process
+// resolution once at startup, so a live PATH mutation is invisible to it
+// (verified experimentally, not an assumption). These tests instead
+// monkeypatch the global `Bun.spawn` for the duration of one test,
+// intercepting only `["gh", …]` commands — every other command (notably
+// the real `git ls-remote` call inside `resolveDefaultBranch`) passes
+// straight through to the real `Bun.spawn`, unaffected.
+type FakeGhSubprocess = {
+	stdout: ReadableStream<Uint8Array>;
+	stderr: ReadableStream<Uint8Array>;
+	exited: Promise<number>;
+};
+
+function fakeGhFailure(stderrText: string, exitCode = 1): FakeGhSubprocess {
+	return {
+		stdout: new Blob([""]).stream(),
+		stderr: new Blob([stderrText]).stream(),
+		exited: Promise.resolve(exitCode),
+	};
+}
+
+function withFakeGhSpawn(handler: (cmd: string[]) => FakeGhSubprocess): () => void {
+	const realSpawn = Bun.spawn;
+	// @ts-expect-error test-only monkeypatch — narrower signature than Bun.spawn's real overloads
+	Bun.spawn = (cmd: string[], opts: unknown) =>
+		Array.isArray(cmd) && cmd[0] === "gh" ? handler(cmd) : realSpawn(cmd as never, opts as never);
+	return () => {
+		Bun.spawn = realSpawn;
+	};
+}
+
+describe("createPullRequestViaGh", () => {
+	test("maps expired/missing gh auth stderr to a `gh auth login` hint", async () => {
+		const restore = withFakeGhSpawn(() =>
+			fakeGhFailure("gh: To use GitHub CLI, please run: gh auth login\nerror: not logged into any GitHub hosts"),
+		);
+		try {
+			await expect(createPullRequestViaGh({ cwd: repoCwd, title: "T", body: "B" })).rejects.toThrow(
+				/GitHub authentication expired or missing.*gh auth login/s,
+			);
+		} finally {
+			restore();
+		}
+	});
+
+	test("maps a GitHub API rate-limit stderr to a retry hint", async () => {
+		const restore = withFakeGhSpawn(() => fakeGhFailure("API rate limit exceeded for user ID 123."));
+		try {
+			await expect(createPullRequestViaGh({ cwd: repoCwd, title: "T", body: "B" })).rejects.toThrow(
+				/GitHub API rate limit exceeded — retry once the limit resets/,
+			);
+		} finally {
+			restore();
+		}
+	});
+
+	test("maps a missing-remote stderr to a no-remote-configured hint", async () => {
+		const restore = withFakeGhSpawn(() => fakeGhFailure("no git remotes found"));
+		try {
+			await expect(createPullRequestViaGh({ cwd: repoCwd, title: "T", body: "B" })).rejects.toThrow(
+				/no GitHub remote configured for this repository/,
+			);
+		} finally {
+			restore();
+		}
+	});
+
+	test("falls back to a generic message for an unrecognized gh failure, still keeping the raw stderr", async () => {
+		const restore = withFakeGhSpawn(() => fakeGhFailure("gh: some totally unexpected internal error", 1));
+		try {
+			await expect(createPullRequestViaGh({ cwd: repoCwd, title: "T", body: "B" })).rejects.toThrow(
+				/gh pr create failed \(gh pr create exited 1\): gh: some totally unexpected internal error/,
+			);
+		} finally {
+			restore();
+		}
+	});
+
+	test("throws an actionable message when the gh binary itself is missing (ENOENT)", async () => {
+		const restore = withFakeGhSpawn(() => {
+			const err = new Error('Executable not found in $PATH: "gh" ENOENT') as Error & { code?: string };
+			err.code = "ENOENT";
+			throw err;
+		});
+		try {
+			await expect(createPullRequestViaGh({ cwd: repoCwd, title: "T", body: "B" })).rejects.toThrow(
+				/gh CLI not found on the deck host — install it and run "gh auth login"/,
+			);
+		} finally {
+			restore();
+		}
+	});
+});
+
 describe("runAutoWorkCycle", () => {
 	test("selects the task, creates a worktree, starts a session, and closes the run as completed", async () => {
 		setAutoWorkConfig(repoCwd, { ...DEFAULT_AUTO_WORK_VALUES, enabled: true });
@@ -1471,10 +1573,45 @@ describe("runAutoWorkCycle", () => {
 		const updated = getTask(task.id);
 		expect(updated?.stateId).toBe("s_validate");
 		expect(updated?.body).toContain("[session sess_pr_](https://deck.example.com/c/sess_pr_fail)");
+		expect(updated?.body).toContain("**Auto Work — implementation complete, PR creation failed**");
 		expect(updated?.body).toContain("PR creation failed");
 
 		const runs = listAutoWorkRuns({ taskId: task.id });
-		expect(runs[0]?.status).toBe("completed");
+		expect(runs[0]?.status).toBe("completed_pr_failed");
+		expect(runs[0]?.failureReason).toBe("gh pr create failed (exit 1): no git remotes found");
+	});
+
+	test("records the completed_pr_failed run's failureReason and the fallback-note body when gh pr create fails with a non-no-commits error (T-85)", async () => {
+		setAutoWorkConfig(repoCwd, { ...DEFAULT_AUTO_WORK_VALUES, enabled: true });
+		const task = createTask({ title: "Auth failure on PR step", cwd: repoCwd, priority: "P5", autoWork: true });
+
+		const handle = new FakeSessionHandle("sess_pr_auth_fail", 10);
+		const authFailureMessage =
+			'GitHub authentication expired or missing — run `gh auth login` (gh pr create exited 1): 401 Unauthorized';
+		const result = await runAutoWorkCycle(repoCwd, fakeBridge(handle), {
+			getSubscriptionUsage: async () => ({ available: true, weeklyPct: 5 }),
+			getDeckBaseUrl: () => "https://deck.example.com",
+			createPullRequest: async () => {
+				throw new Error(authFailureMessage);
+			},
+		});
+
+		expect(result.outcome).toBe("completed");
+		if (result.outcome !== "completed") throw new Error("expected completed");
+
+		// Unlike the no-commits safety net, an auth/network/rate-limit style
+		// `gh` failure never touches `branchHasAgentCommits` — the task still
+		// completed its real work, so it still lands in validate with the
+		// exact error surfaced for a human to retry or fix manually.
+		const updated = getTask(task.id);
+		expect(updated?.stateId).toBe("s_validate");
+		expect(updated?.body).toContain("**Auto Work — implementation complete, PR creation failed**");
+		expect(updated?.body).toContain(`**Error:** ${authFailureMessage}`);
+		expect(updated?.body).toContain(`Retry with \`POST /auto-work/runs/${result.runId}/create-pr\``);
+
+		const runs = listAutoWorkRuns({ taskId: task.id });
+		expect(runs[0]?.status).toBe("completed_pr_failed");
+		expect(runs[0]?.failureReason).toBe(authFailureMessage);
 	});
 
 	test("a completed turn whose gh pr create fails with a no-commits error on a branch with zero agent commits is reclassified as failed, not completed (T-85)", async () => {
@@ -1540,15 +1677,18 @@ describe("runAutoWorkCycle", () => {
 		expect(result.worktreePath).toBe(worktreePath);
 
 		// branchHasAgentCommits correctly saw the real commit — the safety net
-		// must NOT fire, so this still falls through to the pre-existing "PR
-		// creation failed — open manually" fallback (T-66), not the new failed path.
+		// must NOT fire, so this still falls through to the pre-existing
+		// implementation-complete-but-PR-creation-failed fallback (T-66), not
+		// the new failed path.
 		const updated = getTask(task.id);
 		expect(updated?.stateId).toBe("s_validate");
+		expect(updated?.body).toContain("**Auto Work — implementation complete, PR creation failed**");
 		expect(updated?.body).toContain("PR creation failed");
 		expect(updated?.body).not.toContain("Auto Work aborted");
 
 		const runs = listAutoWorkRuns({ taskId: task.id });
-		expect(runs[0]?.status).toBe("completed");
+		expect(runs[0]?.status).toBe("completed_pr_failed");
+		expect(runs[0]?.failureReason).toBe("gh pr create failed (exit 1): No commits between main and main");
 	});
 
 	test("resumes the active run instead of starting new work when another run is already active for the workspace (mutex)", async () => {
@@ -2092,9 +2232,9 @@ describe("runAutoWorkCycle notifications (T-67)", () => {
 		}
 	});
 
-	test("does not notify task_completed when PR creation fails (fallback note only)", async () => {
+	test("notifies task_completed_pr_failed (not task_completed) when PR creation fails", async () => {
 		setAutoWorkConfig(repoCwd, { ...DEFAULT_AUTO_WORK_VALUES, enabled: true });
-		createTask({ title: "PR step fails", cwd: repoCwd, priority: "P5", autoWork: true });
+		const task = createTask({ title: "PR step fails", cwd: repoCwd, priority: "P5", autoWork: true });
 		const { notify, calls } = recordingNotify();
 
 		const handle = new FakeSessionHandle("sess_notify_pr_fail", 10);
@@ -2107,7 +2247,18 @@ describe("runAutoWorkCycle notifications (T-67)", () => {
 		});
 
 		expect(result.outcome).toBe("completed");
-		expect(calls.map((c) => c.kind)).toEqual(["task_started"]);
+		// A PR-creation failure still gets its own (quieter) notification kind
+		// so it's visible without being confused with a genuine PR-backed
+		// completion — never the silent "task_started only" of before T-85,
+		// and never the success-shaped "task_completed" either.
+		expect(calls).toEqual([
+			{ kind: "task_started", displayId: task.displayId, title: task.title, model: "default" },
+			{
+				kind: "task_completed_pr_failed",
+				displayId: task.displayId,
+				reason: "gh pr create failed (exit 1): no git remotes found",
+			},
+		]);
 	});
 
 	test("notifies weekly_threshold once usage crosses the configured threshold, even on a cycle that still starts a task", async () => {

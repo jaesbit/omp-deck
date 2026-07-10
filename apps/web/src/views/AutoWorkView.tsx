@@ -16,6 +16,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import {
 	Activity,
+	AlertTriangle,
 	ArrowUpRight,
 	BotMessageSquare,
 	CheckCircle2,
@@ -56,6 +57,8 @@ function StatusIcon({ status }: { status: AutoWorkRunStatus }) {
 			return <Activity className="h-3.5 w-3.5 animate-pulse text-green-400" />;
 		case "completed":
 			return <CheckCircle2 className="h-3.5 w-3.5 text-green-500" />;
+		case "completed_pr_failed":
+			return <AlertTriangle className="h-3.5 w-3.5 text-yellow-400" />;
 		case "failed":
 			return <XCircle className="h-3.5 w-3.5 text-red-400" />;
 		case "timed_out":
@@ -67,12 +70,14 @@ function StatusBadge({ status }: { status: AutoWorkRunStatus }) {
 	const variants: Record<AutoWorkRunStatus, string> = {
 		running: "bg-green-500/15 text-green-400",
 		completed: "bg-green-500/10 text-green-500",
+		completed_pr_failed: "bg-yellow-500/15 text-yellow-400",
 		failed: "bg-red-500/15 text-red-400",
 		timed_out: "bg-yellow-500/15 text-yellow-400",
 	};
 	const labels: Record<AutoWorkRunStatus, string> = {
 		running: "Running",
 		completed: "Completed",
+		completed_pr_failed: "PR failed",
 		failed: "Failed",
 		timed_out: "Timed out",
 	};
@@ -298,8 +303,10 @@ function DetailPane({ run, task, onRefresh }: DetailPaneProps) {
 				</div>
 			</div>
 
-			{/* PR retry — shown for completed runs whose task body signals a failed PR */}
-			{run.status === "completed" && task?.body?.includes("PR creation failed") && (
+			{/* PR retry — shown when the run's PR creation failed (T-85 distinct
+			    status), or, for pre-T-85 historical rows, a completed run whose
+			    task body still carries the old inline failure note. */}
+			{(run.status === "completed_pr_failed" || (run.status === "completed" && task?.body?.includes("PR creation failed"))) && (
 				<div className="border-b border-line px-4 py-2.5">
 					<div className="flex items-center justify-between gap-2">
 						<p className="text-xs text-ink-3">PR</p>
