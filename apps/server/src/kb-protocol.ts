@@ -202,7 +202,19 @@ export class KbProtocolHandler implements ProtocolHandler {
 				return buildDirectoryListing(url, realCandidate, relativePath, resolvedRoot);
 			}
 			if (stat.isFile()) {
-				const content = await fs.readFile(realCandidate, "utf8");
+				let content = await fs.readFile(realCandidate, "utf8");
+				const relativeCandidate = path.relative(resolvedRoot, realCandidate).split(path.sep).join("/");
+				if (relativeCandidate.startsWith("integrations/") && relativeCandidate.endsWith(".md") && !relativeCandidate.endsWith(".user.md")) {
+					const userPath = realCandidate.slice(0, -3) + ".user.md";
+					try {
+						const userRealPath = await fs.realpath(userPath);
+						ensureWithinRoot(userRealPath, resolvedRoot);
+						const userStat = await fs.stat(userRealPath);
+						if (userStat.isFile()) content += `\n\n${await fs.readFile(userRealPath, "utf8")}`;
+					} catch {
+						// An absent customization is the normal case.
+					}
+				}
 				return {
 					url: url.href,
 					content,

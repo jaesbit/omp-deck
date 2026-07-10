@@ -156,20 +156,3 @@ export function setPlanModel(model: PlanModelConfigRaw | null): PlanModelConfigR
 	}
 	return getPlanModel();
 }
-
-const SESSION_TITLE_PROMPT_KEY = "sessionTitlePrompt";
-
-/** Returns the operator override, or null to use the bundled title prompt. */
-export function getSessionTitlePrompt(): string | null {
-	return getServerSetting(SESSION_TITLE_PROMPT_KEY) ?? null;
-}
-
-/** Pass null to clear the override and restore the bundled title prompt. */
-export function setSessionTitlePrompt(value: string | null): string | null {
-	if (value === null) {
-		deleteServerSetting(SESSION_TITLE_PROMPT_KEY);
-	} else {
-		setServerSetting(SESSION_TITLE_PROMPT_KEY, value);
-	}
-	return getSessionTitlePrompt();
-}

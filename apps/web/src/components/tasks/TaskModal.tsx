@@ -143,206 +143,153 @@ export function TaskModal({
 
 	return (
 		<Modal open={open} onClose={onClose} widthClass="max-w-3xl">
-			<header className="flex h-14 shrink-0 items-center gap-2 border-b border-line px-4">
-				<span
-					className="flex h-8 shrink-0 items-center rounded-md border border-line bg-paper-2 px-2.5 font-mono text-sm font-semibold uppercase tracking-meta text-ink-2"
-					title={task.id}
-				>
-					T-{task.displayId}
-				</span>
-				<select
-					value={stateId}
-					onChange={(e) => commitState(e.target.value)}
-					className="field h-8 px-2 font-mono text-2xs uppercase tracking-meta"
-				>
-					{states.map((s) => (
-						<option key={s.id} value={s.id}>
-							{s.name}
-						</option>
-					))}
-				</select>
-				<div
-					className="h-2 w-2 rounded-full"
-					style={{
-						backgroundColor:
-							states.find((s) => s.id === stateId)?.color ?? "var(--ink-3, #6e6a62)",
-					}}
-				/>
-				<select
-					value={task.priority}
-					onChange={(e) => commitPriority(e.target.value as TaskPriority)}
-					title="Priority — P0 highest, P5 lowest"
-					className="field h-8 px-2 font-mono text-2xs uppercase tracking-meta"
-				>
-					{PRIORITIES.map((p) => (
-						<option key={p} value={p}>
-							{p}
-						</option>
-					))}
-				</select>
-				<div className="ml-auto flex shrink-0 items-center gap-1">
-					<IconAction
-						label={isArchived ? "Unarchive" : "Archive"}
-						icon={isArchived ? RotateCcw : Archive}
-						onClick={onArchive}
+			{/* Single scrollable wrapper — only the action bar (sticky) stays visible at all
+			    viewport heights; title, metadata, and body all scroll together so the body
+			    is reachable even on short/split-screen windows (T-86). */}
+			<div className="flex-1 min-h-0 overflow-y-auto">
+				<header className="sticky top-0 z-10 bg-paper flex h-14 shrink-0 items-center gap-2 border-b border-line px-4">
+					<span
+						className="flex h-8 shrink-0 items-center rounded-md border border-line bg-paper-2 px-2.5 font-mono text-sm font-semibold uppercase tracking-meta text-ink-2"
+						title={task.id}
+					>
+						T-{task.displayId}
+					</span>
+					<select
+						value={stateId}
+						onChange={(e) => commitState(e.target.value)}
+						className="field h-8 px-2 font-mono text-2xs uppercase tracking-meta"
+					>
+						{states.map((s) => (
+							<option key={s.id} value={s.id}>
+								{s.name}
+							</option>
+						))}
+					</select>
+					<div
+						className="h-2 w-2 rounded-full"
+						style={{
+							backgroundColor:
+								states.find((s) => s.id === stateId)?.color ?? "var(--ink-3, #6e6a62)",
+						}}
 					/>
-					<IconAction label="Delete" icon={Trash2} tone="danger" onClick={onDelete} />
-					<button
-						type="button"
-						onClick={() => void triggerRewrite()}
-						disabled={rewrite === "loading"}
-						className={cn(
-							"btn-ghost h-8 shrink-0 gap-1.5 whitespace-nowrap px-2.5 text-sm",
-							rewrite === "loading" && "opacity-60 cursor-wait",
-						)}
-						title="Rewrite this task with AI to improve clarity and completeness"
+					<select
+						value={task.priority}
+						onChange={(e) => commitPriority(e.target.value as TaskPriority)}
+						title="Priority — P0 highest, P5 lowest"
+						className="field h-8 px-2 font-mono text-2xs uppercase tracking-meta"
 					>
-						<Wand2 className="h-4 w-4 shrink-0" />
-						<span>{rewrite === "loading" ? "Rewriting…" : "Rewrite"}</span>
-					</button>
-					<button
-						type="button"
-						onClick={onSendToAgent}
-						className="btn-ghost h-8 shrink-0 gap-1.5 whitespace-nowrap px-2.5 text-sm"
-						title="Assign a short T-N reference as the first prompt — the agent reads the full task itself"
-					>
-						<Bot className="h-4 w-4 shrink-0" />
-						<span>Assign to agent</span>
-					</button>
-					<button
-						type="button"
-						onClick={onOpenInChat}
-						className="btn-primary h-8 shrink-0 gap-1.5 whitespace-nowrap px-2.5 text-sm"
-						title="Open this task as a new chat session"
-					>
-						<MessageSquarePlus className="h-4 w-4 shrink-0" />
-						<span>Open in chat</span>
-					</button>
-					<IconAction label="Close" icon={X} onClick={onClose} />
-				</div>
-			</header>
-
-			<div className="shrink-0 border-b border-line px-6 pt-5 pb-3">
-				<input
-					value={title}
-					onChange={(e) => setTitle(e.target.value)}
-					onBlur={commitTitle}
-					onKeyDown={(e) => {
-						if (e.key === "Enter") (e.target as HTMLInputElement).blur();
-					}}
-					placeholder="Untitled task"
-					className={cn(
-						"w-full bg-transparent text-xl font-semibold text-ink placeholder:text-ink-4 focus:outline-none",
-						isArchived && "text-ink-3 line-through",
-					)}
-				/>
-				<div className="mt-1 grid grid-cols-[max-content_1fr_max-content_1fr] gap-x-4 gap-y-1 font-mono text-2xs text-ink-3">
-					<span className="text-ink-4">created</span>
-					<span>{new Date(task.createdAt).toLocaleString()}</span>
-					<span className="text-ink-4">updated</span>
-					<span>{new Date(task.updatedAt).toLocaleString()}</span>
-					<span className="text-ink-4">cwd</span>
-					<span className="col-span-3">
-						<input
-							value={cwd}
-							onChange={(e) => setCwd(e.target.value)}
-							onBlur={commitCwd}
-							placeholder="(defaults to server cwd)"
-							className="w-full bg-transparent font-mono text-2xs text-ink placeholder:text-ink-4 focus:outline-none"
+						{PRIORITIES.map((p) => (
+							<option key={p} value={p}>
+								{p}
+							</option>
+						))}
+					</select>
+					<div className="ml-auto flex shrink-0 items-center gap-1">
+						<IconAction
+							label={isArchived ? "Unarchive" : "Archive"}
+							icon={isArchived ? RotateCcw : Archive}
+							onClick={onArchive}
 						/>
-					</span>
-					<span className="text-ink-4">auto work</span>
-					<span className="col-span-3">
-						<label className="inline-flex cursor-pointer items-center gap-1.5 text-ink-2">
-							<input
-								type="checkbox"
-								checked={task.autoWork}
-								onChange={(e) => onSave({ autoWork: e.target.checked })}
-								className="h-3.5 w-3.5 rounded-sm border-line accent-accent"
-							/>
-							<Zap className="h-3.5 w-3.5 shrink-0 text-accent" />
-							<span>Eligible for Auto Work</span>
-						</label>
-					</span>
-					{isArchived ? (
-						<>
-							<span className="text-warn">archived</span>
-							<span>{new Date(task.archivedAt!).toLocaleString()}</span>
-						</>
-					) : null}
-				</div>
-			</div>
-
-			<div className="shrink-0 border-b border-line px-6 py-3">
-				<div className="mb-2 flex items-center gap-1.5 font-mono text-2xs uppercase tracking-meta text-ink-4">
-					<Link2 className="h-3.5 w-3.5" />
-					<span>Depends on</span>
-				</div>
-				<div className="flex flex-wrap items-center gap-1.5">
-					{dependencyTasks.map((dep) => {
-						const depState = states.find((s) => s.id === dep.stateId);
-						const isDone = depState?.name.toLowerCase() === "done";
-						return (
-							<span
-								key={dep.id}
-								className="inline-flex items-center gap-1.5 rounded-md border border-line bg-paper-2 py-1 pl-2 pr-1 text-xs text-ink-2"
-								title={dep.title}
-							>
-								{isDone ? (
-									<CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-success" />
-								) : (
-									<Circle
-										className="h-3.5 w-3.5 shrink-0"
-										style={{ color: depState?.color ?? "var(--ink-3, #6e6a62)" }}
-									/>
-								)}
-								<span className="font-mono text-2xs text-ink-4">T-{dep.displayId}</span>
-								<span className="max-w-[16rem] truncate">{dep.title || "Untitled task"}</span>
-								<span className="text-2xs text-ink-4">{depState?.name ?? "?"}</span>
-								<button
-									type="button"
-									onClick={() => removeDependency(dep.id)}
-									aria-label={`Remove dependency T-${dep.displayId}`}
-									className="flex h-4 w-4 items-center justify-center rounded-sm text-ink-4 hover:bg-danger/10 hover:text-danger"
-								>
-									<X className="h-3 w-3" />
-								</button>
-							</span>
-						);
-					})}
-					{candidateTasks.length > 0 ? (
-						<select
-							value=""
-							onChange={(e) => addDependency(e.target.value)}
-							className="field h-7 px-2 text-2xs"
-							aria-label="Add dependency"
+						<IconAction label="Delete" icon={Trash2} tone="danger" onClick={onDelete} />
+						<button
+							type="button"
+							onClick={() => void triggerRewrite()}
+							disabled={rewrite === "loading"}
+							className={cn(
+								"btn-ghost h-8 shrink-0 gap-1.5 whitespace-nowrap px-2.5 text-sm",
+								rewrite === "loading" && "opacity-60 cursor-wait",
+							)}
+							title="Rewrite this task with AI to improve clarity and completeness"
 						>
-							<option value="">+ Add dependency…</option>
-							{candidateTasks.map((c) => (
-								<option key={c.id} value={c.id}>
-									T-{c.displayId} {c.title || "Untitled task"}
-								</option>
-							))}
-						</select>
-					) : dependencyTasks.length === 0 ? (
-						<span className="text-2xs text-ink-4">No other tasks to depend on yet.</span>
-					) : null}
+							<Wand2 className="h-4 w-4 shrink-0" />
+							<span>{rewrite === "loading" ? "Rewriting…" : "Rewrite"}</span>
+						</button>
+						<button
+							type="button"
+							onClick={onSendToAgent}
+							className="btn-ghost h-8 shrink-0 gap-1.5 whitespace-nowrap px-2.5 text-sm"
+							title="Assign a short T-N reference as the first prompt — the agent reads the full task itself"
+						>
+							<Bot className="h-4 w-4 shrink-0" />
+							<span>Assign to agent</span>
+						</button>
+						<button
+							type="button"
+							onClick={onOpenInChat}
+							className="btn-primary h-8 shrink-0 gap-1.5 whitespace-nowrap px-2.5 text-sm"
+							title="Open this task as a new chat session"
+						>
+							<MessageSquarePlus className="h-4 w-4 shrink-0" />
+							<span>Open in chat</span>
+						</button>
+						<IconAction label="Close" icon={X} onClick={onClose} />
+					</div>
+				</header>
+
+				<div className="border-b border-line px-6 pt-5 pb-3">
+					<input
+						value={title}
+						onChange={(e) => setTitle(e.target.value)}
+						onBlur={commitTitle}
+						onKeyDown={(e) => {
+							if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+						}}
+						placeholder="Untitled task"
+						className={cn(
+							"w-full bg-transparent text-xl font-semibold text-ink placeholder:text-ink-4 focus:outline-none",
+							isArchived && "text-ink-3 line-through",
+						)}
+					/>
+					<div className="mt-1 grid grid-cols-[max-content_1fr_max-content_1fr] gap-x-4 gap-y-1 font-mono text-2xs text-ink-3">
+						<span className="text-ink-4">created</span>
+						<span>{new Date(task.createdAt).toLocaleString()}</span>
+						<span className="text-ink-4">updated</span>
+						<span>{new Date(task.updatedAt).toLocaleString()}</span>
+						<span className="text-ink-4">cwd</span>
+						<span className="col-span-3">
+							<input
+								value={cwd}
+								onChange={(e) => setCwd(e.target.value)}
+								onBlur={commitCwd}
+								placeholder="(defaults to server cwd)"
+								className="w-full bg-transparent font-mono text-2xs text-ink placeholder:text-ink-4 focus:outline-none"
+							/>
+						</span>
+						<span className="text-ink-4">auto work</span>
+						<span className="col-span-3">
+							<label className="inline-flex cursor-pointer items-center gap-1.5 text-ink-2">
+								<input
+									type="checkbox"
+									checked={task.autoWork}
+									onChange={(e) => onSave({ autoWork: e.target.checked })}
+									className="h-3.5 w-3.5 rounded-sm border-line accent-accent"
+								/>
+								<Zap className="h-3.5 w-3.5 shrink-0 text-accent" />
+								<span>Eligible for Auto Work</span>
+							</label>
+						</span>
+						{isArchived ? (
+							<>
+								<span className="text-warn">archived</span>
+								<span>{new Date(task.archivedAt!).toLocaleString()}</span>
+							</>
+						) : null}
+					</div>
 				</div>
-			</div>
-			{dependentTasks.length > 0 && (
-				<div className="shrink-0 border-b border-line px-6 py-3">
+
+				<div className="border-b border-line px-6 py-3">
 					<div className="mb-2 flex items-center gap-1.5 font-mono text-2xs uppercase tracking-meta text-ink-4">
 						<Link2 className="h-3.5 w-3.5" />
-						<span>Required by</span>
+						<span>Depends on</span>
 					</div>
 					<div className="flex flex-wrap items-center gap-1.5">
-						{dependentTasks.map((dep) => {
+						{dependencyTasks.map((dep) => {
 							const depState = states.find((s) => s.id === dep.stateId);
 							const isDone = depState?.name.toLowerCase() === "done";
 							return (
 								<span
 									key={dep.id}
-									className="inline-flex items-center gap-1.5 rounded-md border border-line bg-paper-2 py-1 px-2 text-xs text-ink-2"
+									className="inline-flex items-center gap-1.5 rounded-md border border-line bg-paper-2 py-1 pl-2 pr-1 text-xs text-ink-2"
 									title={dep.title}
 								>
 									{isDone ? (
@@ -356,56 +303,114 @@ export function TaskModal({
 									<span className="font-mono text-2xs text-ink-4">T-{dep.displayId}</span>
 									<span className="max-w-[16rem] truncate">{dep.title || "Untitled task"}</span>
 									<span className="text-2xs text-ink-4">{depState?.name ?? "?"}</span>
+									<button
+										type="button"
+										onClick={() => removeDependency(dep.id)}
+										aria-label={`Remove dependency T-${dep.displayId}`}
+										className="flex h-4 w-4 items-center justify-center rounded-sm text-ink-4 hover:bg-danger/10 hover:text-danger"
+									>
+										<X className="h-3 w-3" />
+									</button>
 								</span>
 							);
 						})}
+						{candidateTasks.length > 0 ? (
+							<select
+								value=""
+								onChange={(e) => addDependency(e.target.value)}
+								className="field h-7 px-2 text-2xs"
+								aria-label="Add dependency"
+							>
+								<option value="">+ Add dependency…</option>
+								{candidateTasks.map((c) => (
+									<option key={c.id} value={c.id}>
+										T-{c.displayId} {c.title || "Untitled task"}
+									</option>
+								))}
+							</select>
+						) : dependencyTasks.length === 0 ? (
+							<span className="text-2xs text-ink-4">No other tasks to depend on yet.</span>
+						) : null}
 					</div>
 				</div>
-			)}
-			{rewriteError ? (
-				<div className="mx-6 mt-4 flex items-start gap-2 rounded-md border border-danger/30 bg-danger/10 px-3 py-2 text-xs text-danger">
-					<span className="min-w-0 flex-1">Rewrite failed: {rewriteError}</span>
-					<button type="button" onClick={() => setRewriteError(null)} className="shrink-0 hover:text-danger/80"><X className="h-3.5 w-3.5" /></button>
-				</div>
-			) : null}
-			{rewrite && rewrite !== "loading" ? (
-				<div className="mx-6 mt-4 rounded-md border border-accent/40 bg-accent-soft/20 px-3 py-2.5">
-					<div className="mb-1.5 flex items-center justify-between gap-2">
-						<span className="font-mono text-2xs uppercase tracking-meta text-accent">✦ Rewritten — review changes</span>
-						<div className="flex items-center gap-1.5">
-							<button
-								type="button"
-								onClick={acceptRewrite}
-								className="rounded-md bg-accent px-2.5 py-1 text-xs font-medium text-white hover:bg-accent/90"
-							>
-								Accept
-							</button>
-							<button
-								type="button"
-								onClick={() => setRewrite(null)}
-								className="rounded-md border border-line px-2.5 py-1 text-xs text-ink-3 hover:text-ink"
-							>
-								Dismiss
-							</button>
+				{dependentTasks.length > 0 && (
+					<div className="border-b border-line px-6 py-3">
+						<div className="mb-2 flex items-center gap-1.5 font-mono text-2xs uppercase tracking-meta text-ink-4">
+							<Link2 className="h-3.5 w-3.5" />
+							<span>Required by</span>
+						</div>
+						<div className="flex flex-wrap items-center gap-1.5">
+							{dependentTasks.map((dep) => {
+								const depState = states.find((s) => s.id === dep.stateId);
+								const isDone = depState?.name.toLowerCase() === "done";
+								return (
+									<span
+										key={dep.id}
+										className="inline-flex items-center gap-1.5 rounded-md border border-line bg-paper-2 py-1 px-2 text-xs text-ink-2"
+										title={dep.title}
+									>
+										{isDone ? (
+											<CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-success" />
+										) : (
+											<Circle
+												className="h-3.5 w-3.5 shrink-0"
+												style={{ color: depState?.color ?? "var(--ink-3, #6e6a62)" }}
+											/>
+										)}
+										<span className="font-mono text-2xs text-ink-4">T-{dep.displayId}</span>
+										<span className="max-w-[16rem] truncate">{dep.title || "Untitled task"}</span>
+										<span className="text-2xs text-ink-4">{depState?.name ?? "?"}</span>
+									</span>
+								);
+							})}
 						</div>
 					</div>
-					{rewrite.title !== task.title ? (
-						<div className="mb-1 text-sm font-medium text-ink">{rewrite.title}</div>
-					) : null}
-					{rewrite.body !== (task.body ?? "") ? (
-						<div className="line-clamp-3 text-xs text-ink-3">{rewrite.body.slice(0, 200)}{rewrite.body.length > 200 ? "…" : ""}</div>
-					) : null}
-					{rewrite.title === task.title && rewrite.body === (task.body ?? "") ? (
-						<div className="text-xs text-ink-3">No changes suggested.</div>
-					) : null}
+				)}
+				{rewriteError ? (
+					<div className="mx-6 mt-4 flex items-start gap-2 rounded-md border border-danger/30 bg-danger/10 px-3 py-2 text-xs text-danger">
+						<span className="min-w-0 flex-1">Rewrite failed: {rewriteError}</span>
+						<button type="button" onClick={() => setRewriteError(null)} className="shrink-0 hover:text-danger/80"><X className="h-3.5 w-3.5" /></button>
+					</div>
+				) : null}
+				{rewrite && rewrite !== "loading" ? (
+					<div className="mx-6 mt-4 rounded-md border border-accent/40 bg-accent-soft/20 px-3 py-2.5">
+						<div className="mb-1.5 flex items-center justify-between gap-2">
+							<span className="font-mono text-2xs uppercase tracking-meta text-accent">✦ Rewritten — review changes</span>
+							<div className="flex items-center gap-1.5">
+								<button
+									type="button"
+									onClick={acceptRewrite}
+									className="rounded-md bg-accent px-2.5 py-1 text-xs font-medium text-white hover:bg-accent/90"
+								>
+									Accept
+								</button>
+								<button
+									type="button"
+									onClick={() => setRewrite(null)}
+									className="rounded-md border border-line px-2.5 py-1 text-xs text-ink-3 hover:text-ink"
+								>
+									Dismiss
+								</button>
+							</div>
+						</div>
+						{rewrite.title !== task.title ? (
+							<div className="mb-1 text-sm font-medium text-ink">{rewrite.title}</div>
+						) : null}
+						{rewrite.body !== (task.body ?? "") ? (
+							<div className="line-clamp-3 text-xs text-ink-3">{rewrite.body.slice(0, 200)}{rewrite.body.length > 200 ? "…" : ""}</div>
+						) : null}
+						{rewrite.title === task.title && rewrite.body === (task.body ?? "") ? (
+							<div className="text-xs text-ink-3">No changes suggested.</div>
+						) : null}
+					</div>
+				) : null}
+				<div className="px-6 py-5">
+					<MarkdownEdit
+						value={task.body}
+						onChange={(next) => onSave({ body: next })}
+						placeholder="Click to add notes — markdown supported. Use this for context, acceptance criteria, links."
+					/>
 				</div>
-			) : null}
-			<div className="min-h-0 flex-1 overflow-y-auto px-6 py-5">
-				<MarkdownEdit
-					value={task.body}
-					onChange={(next) => onSave({ body: next })}
-					placeholder="Click to add notes — markdown supported. Use this for context, acceptance criteria, links."
-				/>
 			</div>
 		</Modal>
 	);

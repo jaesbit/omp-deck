@@ -49,8 +49,8 @@ import type { AgentBridge, SessionHandle } from "../bridge/types.ts";
 import { loadConfig } from "../config.ts";
 import { buildSessionUrl } from "../deck-links.ts";
 import { getAutoWorkConfig } from "../db/auto-work.ts";
-import { resolveKbRoot } from "../kb-service.ts";
-import { AUTO_WORK_RULES_BODY, BRANCH_NAMING_RULES_BODY } from "../kb-templates.ts";
+import { resolveIntegrationPrompt, type IntegrationPromptName } from "../integration-prompts.ts";
+import { KbService, resolveKbRoot, resolveProjectBranchPolicy } from "../kb-service.ts";
 import { completeAutoWorkRun, listAutoWorkRuns, startAutoWorkRun } from "../db/auto-work-runs.ts";
 import { getDeckBaseUrl as getServerDeckBaseUrl } from "../db/server-settings.ts";
 import { findStateByName, getTask, listTasks, moveTask, updateTask } from "../db/tasks.ts";
@@ -378,24 +378,18 @@ export interface RunGlobalAutoWorkCycleOptions extends RunAutoWorkCycleOptions {
 	selectTask?: GlobalTaskSelector;
 }
 
-/**
- * Reads `kb/rules/auto-work.md` off disk (same disk-first, in-process-copy-
- * as-fallback pattern `generateBranchSlugWithModel` below uses for
- * `kb/rules/branch-naming.md`). Passed as `systemPromptAppend` to every
- * auto-work task-execution session — both a fresh `bridge.createSession()`
- * (`runAutoWorkCycle`) and a post-restart `bridge.resumeSession()`
- * (`resolveRunningSessionHandle`) — so the agent actually sees the
- * commit/PR/Validate-column workflow instead of just the normal `kb/system`
- * prelude (T-82).
- */
-function resolveAutoWorkRulesBody(): string {
-	const rulesPath = path.join(resolveKbRoot(), "rules", "auto-work.md");
-	try {
-		return fs.readFileSync(rulesPath, "utf8");
-	} catch {
-		return AUTO_WORK_RULES_BODY;
+let integrationKb: KbService | undefined;
+let integrationKbRoot: string | undefined;
+
+function resolveAutoWorkIntegrationPrompt(name: IntegrationPromptName): Promise<string> {
+	const root = resolveKbRoot();
+	if (!integrationKb || integrationKbRoot !== root) {
+		integrationKb = new KbService({ root });
+		integrationKbRoot = root;
 	}
+	return resolveIntegrationPrompt(integrationKb, name);
 }
+
 
 /**
  * Runs exactly one auto-work cycle for `cwd`: pre-flight checks, task
@@ -520,8 +514,7 @@ export async function runAutoWorkCycle(
 
 	const session = await bridge.createSession({
 		cwd,
-		suppressAutoStart: true,
-		systemPromptAppend: resolveAutoWorkRulesBody(),
+		systemPromptAppend: await resolveAutoWorkIntegrationPrompt("auto-work"),
 		...(model ? { model } : {}),
 	});
 
@@ -558,41 +551,6 @@ export async function runAutoWorkCycle(
 		usageLookup,
 		startPct: subscriptionPctUsed,
 	});
-	activeRunIds.add(runId);
-	try {
-		const autoWorkRulesPath = path.join(resolveKbRoot(), "rules", "auto-work.md");
-		let autoWorkRules: string;
-		try {
-			autoWorkRules = fs.readFileSync(autoWorkRulesPath, "utf8");
-		} catch {
-			autoWorkRules = AUTO_WORK_RULES_BODY;
-		}
-		// `kb/rules/*.md` is not auto-inlined into the session's system prompt
-		// (only `kb/system/*.md` is, per T-70) — prepend it to the prompt text
-		// itself so the workflow rules (commit format, PR convention,
-		// Validate-not-Done) reach the agent alongside the normal prelude.
-		const prompt = `${autoWorkRules}\n\n---\n\nTrabaja en T-${task.displayId}: ${task.title}\n\n(contexto completo disponible via GET /api/tasks/${task.id})\n\nEl worktree para esta tarea ya está configurado en \`${worktreePath}\` (rama \`auto-work/t${task.displayId}-${branchSlug}\`). Usa ese directorio para todos los commits y cambios de fichero.`;
-		await session.prompt(prompt);
-
-		const timeoutMinutes = resolveAutoWorkTimeoutMinutes(task.priority, config);
-		return await finalizeAutoWorkRun({
-			runId,
-			task,
-			session,
-			worktreePath,
-			timeoutMinutes,
-			resolveDeckBaseUrl,
-			createPullRequest,
-			notify,
-		});
-	} catch (err) {
-		const failureReason = `session prompt failed: ${String(err)}`;
-		failAutoWorkRun(runId, task.id, failureReason);
-		await notify({ kind: "task_failed", displayId: task.displayId, reason: failureReason });
-		return { outcome: "failed", taskId: task.id, runId, sessionId: session.sessionId, worktreePath, failureReason };
-	} finally {
-		activeRunIds.delete(runId);
-	}
 }
 
 // ─── Small IO helpers ───────────────────────────────────────────────────────
@@ -840,7 +798,7 @@ async function resolveRunningSessionHandle(
 
 	const persisted = await findPersistedAutoWorkSession(bridge, run);
 	if (!persisted) return undefined;
-	return bridge.resumeSession({ sessionPath: persisted.path, systemPromptAppend: resolveAutoWorkRulesBody() });
+	return bridge.resumeSession({ sessionPath: persisted.path, systemPromptAppend: await resolveAutoWorkIntegrationPrompt("auto-work") });
 }
 
 /**
@@ -888,7 +846,7 @@ async function removeAutoWorkWorktree(repoCwd: string, worktreePath: string): Pr
  */
 async function branchHasAgentCommits(worktreePath: string): Promise<boolean> {
 	try {
-		const baseBranch = await resolveDefaultBranch(worktreePath);
+		const baseBranch = await resolveBaseBranch(worktreePath);
 		const proc = Bun.spawn(
 			["git", "rev-list", "--count", `origin/${baseBranch}..HEAD`],
 			{ cwd: worktreePath, stdin: "ignore", stdout: "pipe", stderr: "pipe", windowsHide: true },
@@ -896,8 +854,8 @@ async function branchHasAgentCommits(worktreePath: string): Promise<boolean> {
 		const [stdout, exitCode] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
 		return exitCode === 0 && Number(stdout.trim()) > 0;
 	} catch {
-		// If we can't check (e.g. no origin remote), err on the side of
-		// assuming commits exist — a git error shouldn't tank a real run.
+		// A rev-list failure after a base was resolved must not turn a real
+		// implementation into an empty-branch failure.
 		return true;
 	}
 }
@@ -1064,11 +1022,10 @@ export async function waitForAutoWorkSessionTerminal(
 
 /**
  * `git worktree add -b auto-work/T<displayId>-<slug> .worktrees/aw-T<displayId>-<slug>
- * origin/<default-branch>`, run from `repoCwd`. The start-point is the remote
- * default branch (resolved via `git ls-remote --symref origin HEAD`), never the
- * currently checked-out branch in the main worktree — ensures all auto-work
- * branches share the same clean base regardless of what the developer has
- * checked out locally, preventing squash-merge conflicts between independent tasks.
+ * origin/<base-branch>`, run from `repoCwd`. The start-point is resolved from
+ * the matching project policy before the remote default, never from the
+ * currently checked-out branch in the main worktree. This keeps every
+ * auto-work branch on the configured clean base regardless of local checkout.
  */
 async function createAutoWorkWorktree(repoCwd: string, task: Task, slug: string): Promise<string> {
 	const dirName = `aw-T${task.displayId}-${slug}`;
@@ -1083,9 +1040,9 @@ async function createAutoWorkWorktree(repoCwd: string, task: Task, slug: string)
 		return existing;
 	}
 
-	const defaultBranch = await resolveDefaultBranch(repoCwd);
+	const baseBranch = await resolveBaseBranch(repoCwd);
 
-	const proc = Bun.spawn(["git", "worktree", "add", "-b", branch, worktreePath, `origin/${defaultBranch}`], {
+	const proc = Bun.spawn(["git", "worktree", "add", "-b", branch, worktreePath, `origin/${baseBranch}`], {
 		cwd: repoCwd,
 		stdin: "ignore",
 		stdout: "pipe",
@@ -1131,16 +1088,11 @@ function slugifyTaskTitle(title: string): string {
 }
 
 /**
- * Ask a short-lived agent session — the global `taskSelectionModel` reused
- * across every internal auto-work decision (T-77) — for a short English
- * kebab-case branch-name slug. The session's system prompt is entirely
- * replaced by `kb/rules/branch-naming.md`'s content (`systemPromptOverride`)
- * instead of the normal `kb/system` prelude, so this stays a narrow, cheap
- * call that runs on every cycle. Any model/session failure or unusable
- * response falls back to `slugifyTaskTitle(task.title)` — the exact naive
- * slug the engine always produced before this existed, so a misconfigured
- * or unreachable model degrades to the old behavior instead of blocking
- * the cycle.
+ * Ask a short-lived internal session for an English kebab-case branch-name slug.
+ * Its system prompt is the `branch-naming` integration, not the normal
+ * `kb/system` prelude. Any model/session failure or unusable response falls
+ * back to `slugifyTaskTitle(task.title)`, preserving the deterministic behavior
+ * that existed before model-backed naming.
  */
 export async function generateBranchSlugWithModel(
 	bridge: AgentBridge,
@@ -1153,17 +1105,10 @@ export async function generateBranchSlugWithModel(
 
 	let session: SessionHandle | undefined;
 	try {
-		const rulesPath = path.join(resolveKbRoot(), "rules", "branch-naming.md");
-		let rules: string;
-		try {
-			rules = fs.readFileSync(rulesPath, "utf8");
-		} catch {
-			rules = BRANCH_NAMING_RULES_BODY;
-		}
 		session = await bridge.createSession({
 			cwd,
-			suppressAutoStart: true,
-			systemPromptOverride: rules,
+			systemPromptOverride: await resolveAutoWorkIntegrationPrompt("branch-naming"),
+			internal: true,
 			...(model ? { model } : {}),
 		});
 		const s = session;
@@ -1235,30 +1180,68 @@ export interface CreatePullRequestResult {
 }
 
 /**
- * Resolves the remote default branch for `repoCwd` by parsing
- * `git ls-remote --symref origin HEAD`. Falls back to `"main"` if the
- * command fails or the symref is absent (shallow clones, custom remotes).
- * No dependency on `gh` or any GitHub API.
- *
- * Example output:
- *   ref: refs/heads/main\tHEAD
- *   <sha>\tHEAD
+ * Resolves Auto Work's base branch consistently for worktree creation, commit
+ * detection, and PR creation. A valid matching `kb://projects/` policy wins.
+ * Without one, use the remote symbolic HEAD, then the local origin/HEAD ref.
+ * There is deliberately no literal branch-name fallback.
  */
-async function resolveDefaultBranch(repoCwd: string): Promise<string> {
-	const proc = Bun.spawn(["git", "ls-remote", "--symref", "origin", "HEAD"], {
-		cwd: repoCwd,
-		stdin: "ignore",
-		stdout: "pipe",
-		stderr: "pipe",
-		windowsHide: true,
-	});
-	const [stdout, exitCode] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
-	if (exitCode !== 0) return "main";
-	for (const line of stdout.split("\n")) {
-		const m = line.match(/^ref:\s+refs\/heads\/(\S+)\s+HEAD$/);
-		if (m?.[1]) return m[1];
+async function resolveBaseBranch(repoCwd: string): Promise<string> {
+	const projectPolicy = await resolveProjectBranchPolicy(repoCwd);
+	if (projectPolicy) {
+		log.info(`using project base branch ${projectPolicy.baseBranch} from ${projectPolicy.sourcePath}`);
+		return projectPolicy.baseBranch;
 	}
-	return "main";
+
+	const remoteDefaultBranch = await resolveRemoteDefaultBranch(repoCwd);
+	if (remoteDefaultBranch) return remoteDefaultBranch;
+
+	const localOriginHeadBranch = await resolveLocalOriginHeadBranch(repoCwd);
+	if (localOriginHeadBranch) return localOriginHeadBranch;
+
+	throw new Error(
+		`unable to resolve Auto Work base branch for ${path.resolve(repoCwd)}: no matching valid project policy, origin HEAD did not identify a branch, and refs/remotes/origin/HEAD is unavailable. Add projectRoot and baseBranch frontmatter under kb://projects/ or configure origin/HEAD.`,
+	);
+}
+
+/** Reads the authoritative default branch advertised by the remote. */
+async function resolveRemoteDefaultBranch(repoCwd: string): Promise<string | undefined> {
+	try {
+		const proc = Bun.spawn(["git", "ls-remote", "--symref", "origin", "HEAD"], {
+			cwd: repoCwd,
+			stdin: "ignore",
+			stdout: "pipe",
+			stderr: "pipe",
+			windowsHide: true,
+		});
+		const [stdout, exitCode] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
+		if (exitCode !== 0) return undefined;
+		for (const line of stdout.split("\n")) {
+			const match = line.match(/^ref:\s+refs\/heads\/(\S+)\s+HEAD$/);
+			if (match?.[1]) return match[1];
+		}
+	} catch {
+		// Local refs/remotes/origin/HEAD remains a useful offline fallback.
+	}
+	return undefined;
+}
+
+/** Reads the cached remote HEAD for clones that cannot query the remote. */
+async function resolveLocalOriginHeadBranch(repoCwd: string): Promise<string | undefined> {
+	try {
+		const proc = Bun.spawn(["git", "symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"], {
+			cwd: repoCwd,
+			stdin: "ignore",
+			stdout: "pipe",
+			stderr: "pipe",
+			windowsHide: true,
+		});
+		const [stdout, exitCode] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
+		if (exitCode !== 0) return undefined;
+		const match = stdout.trim().match(/^origin\/(\S+)$/);
+		return match?.[1];
+	} catch {
+		return undefined;
+	}
 }
 
 /**
@@ -1282,20 +1265,13 @@ function describeGhFailure(stderr: string): string {
 }
 
 /**
- * `gh pr create --base <default-branch> --title <title> --body <body>`, run
- * from the worktree directory so `gh` infers the PR head from the branch
- * already checked out there (see `createAutoWorkWorktree`). Follows the same
- * `Bun.spawn` convention as `createAutoWorkWorktree`/`removeAutoWorkWorktree`
- * rather than `node:child_process`. Parses the PR number out of the URL
- * `gh pr create` prints on stdout (e.g. `https://github.com/o/r/pull/123`).
- * The base branch is resolved dynamically from the remote rather than
- * hardcoded, so repos whose default branch is not `main` work correctly.
- * Thrown errors lead with `describeGhFailure`'s actionable summary rather
- * than raw `gh` stderr (T-85), with the raw text still appended for
- * debugging.
+ * `gh pr create --base <base-branch> --title <title> --body <body>`, run from
+ * the worktree directory so `gh` infers the PR head from the checked-out task
+ * branch. The same project-aware base resolver used by worktree creation and
+ * commit detection also covers explicit PR retries through this function.
  */
 export async function createPullRequestViaGh(params: CreatePullRequestParams): Promise<CreatePullRequestResult> {
-	const baseBranch = await resolveDefaultBranch(params.cwd);
+	const baseBranch = await resolveBaseBranch(params.cwd);
 	let proc: Subprocess<"ignore", "pipe", "pipe">;
 	try {
 		proc = Bun.spawn(
@@ -1511,7 +1487,8 @@ async function selectTaskWithModel(
 	try {
 		session = await bridge.createSession({
 			cwd: candidates[0]!.workspaceCwd,
-			suppressAutoStart: true,
+			systemPromptOverride: await resolveAutoWorkIntegrationPrompt("auto-work-task-selection"),
+			internal: true,
 			...(model ? { model } : {}),
 		});
 		const s = session;
@@ -1585,7 +1562,8 @@ export async function decideSqueezeTiming(
 	try {
 		session = await bridge.createSession({
 			cwd: input.workspaceCwd,
-			suppressAutoStart: true,
+			systemPromptOverride: await resolveAutoWorkIntegrationPrompt("auto-work-squeeze"),
+			internal: true,
 			...(model ? { model } : {}),
 		});
 		const s = session;

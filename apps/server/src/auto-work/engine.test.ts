@@ -22,7 +22,7 @@ import { DEFAULT_AUTO_WORK_VALUES, setAutoWorkConfig } from "../db/auto-work.ts"
 import { getAutoWorkCostEstimate, listAutoWorkRuns, startAutoWorkRun } from "../db/auto-work-runs.ts";
 import { closeDb, openDb } from "../db/index.ts";
 import { createTask, getTask, moveTask } from "../db/tasks.ts";
-import { BRANCH_NAMING_RULES_BODY } from "../kb-templates.ts";
+import { AUTO_WORK_RULES_BODY, BRANCH_NAMING_RULES_BODY } from "../kb-templates.ts";
 import type { AutoWorkNotificationEvent } from "./notify.ts";
 import {
 	appendAgentHistoryEntry,
@@ -835,11 +835,10 @@ describe("decideSqueezeTiming", () => {
 			const handle = new FakeSessionHandle("sess_squeeze_timeout", null); // never emits turn_end
 			const deleteSessionCalls: string[] = [];
 			const resultPromise = decideSqueezeTiming(fakeBridge(handle, { deleteSessionCalls }), baseInput(), null);
-			// Flush the microtask hops between session creation and the internal
-			// waitForAutoWorkSessionTerminal 30s timer being armed, then fire it.
-			await Promise.resolve();
-			await Promise.resolve();
-			await Promise.resolve();
+			// `resolveIntegrationPrompt` performs async KB I/O before the session is
+			// created. The fake resolves this only after waitForAutoWorkSessionTerminal
+			// has subscribed and armed its timer, so advancing time cannot race setup.
+			await handle.subscriptionStarted;
 			jest.advanceTimersByTime(30_000);
 			const result = await resultPromise;
 			expect(result).toBe(false);
@@ -869,7 +868,9 @@ describe("decideSqueezeTiming", () => {
 			baseInput({ workspaceCwd: "/tmp/squeeze-null" }),
 			null,
 		);
-		expect(createSessionCalls).toEqual([{ cwd: "/tmp/squeeze-null", suppressAutoStart: true }]);
+		expect(createSessionCalls).toHaveLength(1);
+		expect(createSessionCalls[0]).toMatchObject({ cwd: "/tmp/squeeze-null", internal: true });
+		expect(createSessionCalls[0]?.systemPromptOverride).toEqual(expect.any(String));
 	});
 
 	test("passes the model through verbatim in createSession opts when non-null", async () => {
@@ -880,9 +881,13 @@ describe("decideSqueezeTiming", () => {
 			baseInput({ workspaceCwd: "/tmp/squeeze-model" }),
 			{ provider: "anthropic", id: "claude-good" },
 		);
-		expect(createSessionCalls).toEqual([
-			{ cwd: "/tmp/squeeze-model", suppressAutoStart: true, model: { provider: "anthropic", id: "claude-good" } },
-		]);
+		expect(createSessionCalls).toHaveLength(1);
+		expect(createSessionCalls[0]).toMatchObject({
+			cwd: "/tmp/squeeze-model",
+			internal: true,
+			model: { provider: "anthropic", id: "claude-good" },
+		});
+		expect(createSessionCalls[0]?.systemPromptOverride).toEqual(expect.any(String));
 	});
 });
 
@@ -928,10 +933,9 @@ describe("sanitizeBranchSlug", () => {
 
 describe("generateBranchSlugWithModel", () => {
 	// Sandboxes OMP_DECK_KB_ROOT to an empty temp dir per test so
-	// `resolveKbRoot()` never touches the real user's `~/kb` — with no
-	// `rules/branch-naming.md` present, the function must fall back to the
-	// in-process `BRANCH_NAMING_RULES_BODY` constant, letting these tests
-	// assert the exact `systemPromptOverride` content instead of just "some string".
+	// `resolveKbRoot()` never touches the real user's `~/kb`. With no
+	// `integrations/branch-naming.md`, the resolver must use its raw template
+	// fallback, letting these tests assert the full system-prompt override.
 	let savedKbRoot: string | undefined;
 	let kbRootDir: string;
 
@@ -947,7 +951,7 @@ describe("generateBranchSlugWithModel", () => {
 		fs.rmSync(kbRootDir, { recursive: true, force: true });
 	});
 
-	test("returns the sanitized slug from the model's response, requesting a suppressed-autostart session with the branch-naming rules as the system prompt override", async () => {
+	test("returns the sanitized slug from the model response with the isolated branch-naming integration", async () => {
 		const task = baseTask({ title: "Arreglar el error de inicio de sesión" });
 		const handle = new FakeSessionHandle("sess_branch_happy", 10, "Fix Login Bug!!");
 		const createSessionCalls: CreateSessionOpts[] = [];
@@ -962,15 +966,15 @@ describe("generateBranchSlugWithModel", () => {
 
 		expect(result).toBe("fix-login-bug");
 		expect(createSessionCalls).toEqual([
-			{ cwd: "/tmp/branch-slug-ws", suppressAutoStart: true, systemPromptOverride: BRANCH_NAMING_RULES_BODY },
+			{ cwd: "/tmp/branch-slug-ws", systemPromptOverride: BRANCH_NAMING_RULES_BODY, internal: true },
 		]);
 		expect(deleteSessionCalls).toEqual(["sess_branch_happy"]);
 	});
 
-	test("reads kb/rules/branch-naming.md from the sandboxed KB root when present, instead of the in-process fallback constant", async () => {
+	test("reads kb/integrations/branch-naming.md from the sandboxed KB root when present", async () => {
 		const customRules = "# Custom branch naming rules\n\nAlways return `custom-slug`.\n";
-		fs.mkdirSync(path.join(kbRootDir, "rules"), { recursive: true });
-		fs.writeFileSync(path.join(kbRootDir, "rules", "branch-naming.md"), customRules, "utf8");
+		fs.mkdirSync(path.join(kbRootDir, "integrations"), { recursive: true });
+		fs.writeFileSync(path.join(kbRootDir, "integrations", "branch-naming.md"), customRules, "utf8");
 
 		const task = baseTask({ title: "Whatever" });
 		const handle = new FakeSessionHandle("sess_branch_custom_rules", 10, "custom-slug");
@@ -979,7 +983,7 @@ describe("generateBranchSlugWithModel", () => {
 		await generateBranchSlugWithModel(fakeBridge(handle, { createSessionCalls }), "/tmp/branch-slug-ws", task, null);
 
 		expect(createSessionCalls).toEqual([
-			{ cwd: "/tmp/branch-slug-ws", suppressAutoStart: true, systemPromptOverride: customRules },
+			{ cwd: "/tmp/branch-slug-ws", systemPromptOverride: customRules, internal: true },
 		]);
 	});
 
@@ -996,7 +1000,7 @@ describe("generateBranchSlugWithModel", () => {
 		);
 
 		expect(createSessionCalls).toEqual([
-			{ cwd: "/tmp/branch-slug-model-null", suppressAutoStart: true, systemPromptOverride: BRANCH_NAMING_RULES_BODY },
+			{ cwd: "/tmp/branch-slug-model-null", systemPromptOverride: BRANCH_NAMING_RULES_BODY, internal: true },
 		]);
 	});
 
@@ -1015,8 +1019,8 @@ describe("generateBranchSlugWithModel", () => {
 		expect(createSessionCalls).toEqual([
 			{
 				cwd: "/tmp/branch-slug-model-set",
-				suppressAutoStart: true,
 				systemPromptOverride: BRANCH_NAMING_RULES_BODY,
+				internal: true,
 				model: { provider: "anthropic", id: "claude-good" },
 			},
 		]);
@@ -1039,11 +1043,9 @@ describe("generateBranchSlugWithModel", () => {
 				task,
 				null,
 			);
-			// Flush the microtask hops between session creation and the internal
-			// waitForAutoWorkSessionTerminal 20s timer being armed, then fire it.
-			await Promise.resolve();
-			await Promise.resolve();
-			await Promise.resolve();
+			// Wait for the fake's subscription signal, which occurs only after the
+			// asynchronous integration lookup and timeout setup are complete.
+			await handle.subscriptionStarted;
 			jest.advanceTimersByTime(20_000);
 			const result = await resultPromise;
 			expect(result).toBe(expectedFallback);
@@ -1215,6 +1217,22 @@ function runGit(args: string[], cwd: string): void {
 	}
 }
 
+async function withProjectBasePolicy<T>(baseBranch: string, run: () => Promise<T>): Promise<T> {
+	const savedKbRoot = process.env.OMP_DECK_KB_ROOT;
+	const kbRoot = fs.mkdtempSync(path.join(os.tmpdir(), "omp-deck-auto-work-policy-kb-"));
+	const policyPath = path.join(kbRoot, "projects", "workspace.md");
+	fs.mkdirSync(path.dirname(policyPath), { recursive: true });
+	fs.writeFileSync(policyPath, `---\nprojectRoot: ${repoCwd}\nbaseBranch: ${baseBranch}\n---\n# Workspace policy\n`, "utf8");
+	process.env.OMP_DECK_KB_ROOT = kbRoot;
+	try {
+		return await run();
+	} finally {
+		if (savedKbRoot === undefined) delete process.env.OMP_DECK_KB_ROOT;
+		else process.env.OMP_DECK_KB_ROOT = savedKbRoot;
+		fs.rmSync(kbRoot, { recursive: true, force: true });
+	}
+}
+
 beforeEach(() => {
 	dbDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-deck-auto-work-engine-db-"));
 	openDb({ path: path.join(dbDir, "deck.db") });
@@ -1240,6 +1258,9 @@ beforeEach(() => {
 	runGit(["init", "--bare", "-q"], originDir);
 	runGit(["remote", "add", "origin", originDir], repoCwd);
 	runGit(["push", "origin", "HEAD:main"], repoCwd);
+	runGit(["symbolic-ref", "HEAD", "refs/heads/main"], originDir);
+	runGit(["fetch", "-q", "origin"], repoCwd);
+	runGit(["remote", "set-head", "origin", "-a"], repoCwd);
 });
 
 afterEach(() => {
@@ -1341,6 +1362,7 @@ function fakeGhFailure(stderrText: string, exitCode = 1): FakeGhSubprocess {
 	};
 }
 
+
 function withFakeGhSpawn(handler: (cmd: string[]) => FakeGhSubprocess): () => void {
 	const realSpawn = Bun.spawn;
 	// @ts-expect-error test-only monkeypatch — narrower signature than Bun.spawn's real overloads
@@ -1412,6 +1434,29 @@ describe("createPullRequestViaGh", () => {
 			restore();
 		}
 	});
+
+	test("opens a pull request against the matching KB policy instead of origin/HEAD", async () => {
+		const restore = withFakeGhSpawn((cmd) => {
+			const baseIndex = cmd.indexOf("--base");
+			if (cmd[baseIndex + 1] === "devel") {
+				return {
+					stdout: new Blob(["https://github.com/jaesbit/omp-deck/pull/808\n"]).stream(),
+					stderr: new Blob([""]).stream(),
+					exited: Promise.resolve(0),
+				};
+			}
+			return fakeGhFailure(`unexpected PR base ${cmd[baseIndex + 1]}`);
+		});
+		try {
+			const result = await withProjectBasePolicy("devel", () =>
+				createPullRequestViaGh({ cwd: repoCwd, title: "Policy branch", body: "Uses the configured branch." }),
+			);
+
+			expect(result).toEqual({ url: "https://github.com/jaesbit/omp-deck/pull/808", number: 808 });
+		} finally {
+			restore();
+		}
+	});
 });
 
 describe("runAutoWorkCycle", () => {
@@ -1438,6 +1483,8 @@ describe("runAutoWorkCycle", () => {
 		expect(updated?.body).toContain("**Auto Work**");
 		expect(updated?.body).toContain("[session sess_1](https://deck.example.com/c/sess_1)");
 		expect(updated?.body).toContain("PR #321");
+		expect(handle.prompts).toHaveLength(1);
+		expect(handle.prompts[0]).not.toContain(AUTO_WORK_RULES_BODY);
 
 		const runs = listAutoWorkRuns({ taskId: task.id });
 		expect(runs).toHaveLength(1);
@@ -1446,9 +1493,31 @@ describe("runAutoWorkCycle", () => {
 		expect(runs[0]?.worktreePath).toBe(result.worktreePath);
 	});
 
-	test("creates Auto Work sessions with auto-start suppressed", async () => {
+	test("creates an Auto Work worktree from the matching KB branch rather than origin/HEAD", async () => {
+		runGit(["checkout", "-q", "-b", "devel"], repoCwd);
+		fs.writeFileSync(path.join(repoCwd, "devel-only.txt"), "from devel\n");
+		runGit(["add", "devel-only.txt"], repoCwd);
+		runGit(["commit", "-q", "-m", "devel base"], repoCwd);
+		runGit(["push", "-q", "--set-upstream", "origin", "devel"], repoCwd);
+
 		setAutoWorkConfig(repoCwd, { ...DEFAULT_AUTO_WORK_VALUES, enabled: true });
-		createTask({ title: "Avoid duplicate start prompt", cwd: repoCwd, priority: "P5", autoWork: true });
+		const task = createTask({ title: "Use configured base", cwd: repoCwd, priority: "P5", autoWork: true });
+
+		const result = await withProjectBasePolicy("devel", () =>
+			runAutoWorkCycle(repoCwd, fakeBridge(new FakeSessionHandle("sess_policy_base", 10)), {
+				getSubscriptionUsage: async () => ({ available: true, weeklyPct: 5 }),
+				createPullRequest: stubCreatePullRequest,
+			}),
+		);
+
+		expect(result.outcome).toBe("completed");
+		if (result.outcome !== "completed") throw new Error("expected completed");
+		expect(fs.readFileSync(path.join(result.worktreePath, "devel-only.txt"), "utf8")).toBe("from devel\n");
+	});
+
+	test("creates Auto Work sessions without legacy startup options", async () => {
+		setAutoWorkConfig(repoCwd, { ...DEFAULT_AUTO_WORK_VALUES, enabled: true });
+		createTask({ title: "Runs one task session", cwd: repoCwd, priority: "P5", autoWork: true });
 		const createSessionCalls: CreateSessionOpts[] = [];
 
 		const result = await runAutoWorkCycle(repoCwd, fakeBridge(new FakeSessionHandle("sess_no_autostart", 10), { createSessionCalls }), {
@@ -1458,8 +1527,40 @@ describe("runAutoWorkCycle", () => {
 
 		expect(result.outcome).toBe("completed");
 		if (result.outcome !== "completed") throw new Error("expected completed");
-		expect(createSessionCalls).toEqual([{ cwd: repoCwd, suppressAutoStart: true }]);
+		expect(createSessionCalls).toHaveLength(1);
+		expect(createSessionCalls[0]).toMatchObject({ cwd: repoCwd });
+		expect(createSessionCalls[0]?.systemPromptAppend).toEqual(expect.any(String));
 	});
+    test("reads auto-work instructions from integrations and ignores the legacy rules path", async () => {
+        const savedKbRoot = process.env.OMP_DECK_KB_ROOT;
+        const kbRoot = fs.mkdtempSync(path.join(os.tmpdir(), "omp-deck-auto-work-rules-kb-"));
+        const customRules = "---\ntype: integration\n---\n# Custom auto-work instructions\n";
+        fs.mkdirSync(path.join(kbRoot, "integrations"), { recursive: true });
+        fs.mkdirSync(path.join(kbRoot, "rules"), { recursive: true });
+        fs.writeFileSync(path.join(kbRoot, "integrations", "auto-work.md"), customRules);
+        fs.writeFileSync(path.join(kbRoot, "rules", "auto-work.md"), "legacy rules content\n");
+        process.env.OMP_DECK_KB_ROOT = kbRoot;
+        try {
+            setAutoWorkConfig(repoCwd, { ...DEFAULT_AUTO_WORK_VALUES, enabled: true });
+            createTask({ title: "Reads integration rules", cwd: repoCwd, priority: "P5", autoWork: true });
+            const createSessionCalls: CreateSessionOpts[] = [];
+            const result = await runAutoWorkCycle(
+                repoCwd,
+                fakeBridge(new FakeSessionHandle("sess_integration_rules", 10), { createSessionCalls }),
+                {
+                    getSubscriptionUsage: async () => ({ available: true, weeklyPct: 5 }),
+                    createPullRequest: stubCreatePullRequest,
+                },
+            );
+
+            expect(result.outcome).toBe("completed");
+            expect(createSessionCalls).toEqual([{ cwd: repoCwd, systemPromptAppend: customRules }]);
+        } finally {
+            if (savedKbRoot === undefined) delete process.env.OMP_DECK_KB_ROOT;
+            else process.env.OMP_DECK_KB_ROOT = savedKbRoot;
+            fs.rmSync(kbRoot, { recursive: true, force: true });
+        }
+    });
 
 	test("records an aborted agent turn as failed instead of completed", async () => {
 		setAutoWorkConfig(repoCwd, { ...DEFAULT_AUTO_WORK_VALUES, enabled: true });
@@ -1691,6 +1792,37 @@ describe("runAutoWorkCycle", () => {
 		);
 	});
 
+	test("settles the normal PR-failed lifecycle when no-commits verification cannot resolve a base branch", async () => {
+		setAutoWorkConfig(repoCwd, { ...DEFAULT_AUTO_WORK_VALUES, enabled: true });
+		const task = createTask({ title: "No-commits resolver unavailable", cwd: repoCwd, priority: "P5", autoWork: true });
+		const prFailureMessage = "gh pr create failed (exit 1): No commits between main and main";
+
+		const result = await runAutoWorkCycle(repoCwd, fakeBridge(new FakeSessionHandle("sess_no_base_branch", 10)), {
+			getSubscriptionUsage: async () => ({ available: true, weeklyPct: 5 }),
+			getDeckBaseUrl: () => "https://deck.example.com",
+			createPullRequest: async () => {
+				// Worktree creation has already used origin/main. Remove every base
+				// resolver source before the no-commits safety check runs.
+				runGit(["remote", "remove", "origin"], repoCwd);
+				runGit(["update-ref", "-d", "refs/remotes/origin/HEAD"], repoCwd);
+				throw new Error(prFailureMessage);
+			},
+		});
+
+		expect(result.outcome).toBe("completed");
+		if (result.outcome !== "completed") throw new Error("expected completed");
+
+		const updated = getTask(task.id);
+		expect(updated?.stateId).toBe("s_validate");
+		expect(updated?.body).toContain("**Auto Work — implementation complete, PR creation failed**");
+		expect(updated?.body).toContain(`**Error:** ${prFailureMessage}`);
+
+		const runs = listAutoWorkRuns({ taskId: task.id });
+		expect(runs[0]).toEqual(
+			expect.objectContaining({ status: "completed_pr_failed", failureReason: prFailureMessage }),
+		);
+	});
+
 	test("a no-commits gh pr create error on a branch that DOES have agent commits still falls through to the completed+fallback-note path (T-85)", async () => {
 		setAutoWorkConfig(repoCwd, { ...DEFAULT_AUTO_WORK_VALUES, enabled: true });
 		const task = createTask({ title: "Branch has real commits", cwd: repoCwd, priority: "P5", autoWork: true });
@@ -1893,7 +2025,9 @@ describe("runAutoWorkCycle", () => {
 		// Only the one real task session — the injected fn stands in for the LLM
 		// call `generateBranchSlugWithModel` would otherwise make, so there's no
 		// extra bridge.createSession beyond it.
-		expect(createSessionCalls).toEqual([{ cwd: repoCwd, suppressAutoStart: true }]);
+		expect(createSessionCalls).toHaveLength(1);
+		expect(createSessionCalls[0]).toMatchObject({ cwd: repoCwd });
+		expect(createSessionCalls[0]?.systemPromptAppend).toEqual(expect.any(String));
 	});
 
 
@@ -2013,6 +2147,9 @@ describe("runGlobalAutoWorkCycle", () => {
 		runGit(["init", "--bare", "-q"], otherOriginDir);
 		runGit(["remote", "add", "origin", otherOriginDir], otherRepoCwd);
 		runGit(["push", "origin", "HEAD:main"], otherRepoCwd);
+		runGit(["symbolic-ref", "HEAD", "refs/heads/main"], otherOriginDir);
+		runGit(["fetch", "-q", "origin"], otherRepoCwd);
+		runGit(["remote", "set-head", "origin", "-a"], otherRepoCwd);
 
 		setAutoWorkConfig(repoCwd, { ...DEFAULT_AUTO_WORK_VALUES, enabled: true });
 		setAutoWorkConfig(otherRepoCwd, { ...DEFAULT_AUTO_WORK_VALUES, enabled: true });
@@ -2041,8 +2178,8 @@ describe("runGlobalAutoWorkCycle", () => {
 		setAutoWorkConfig(repoCwd, { ...DEFAULT_AUTO_WORK_VALUES, enabled: true });
 		const task = createTask({ title: "Arreglar error de inicio de sesión", cwd: repoCwd, priority: "P5", autoWork: true });
 		const handle = new FakeSessionHandle("sess_global_branch_slug", 10, "Fix Login Error!!");
-
-		const result = await runGlobalAutoWorkCycle(fakeBridge(handle), {
+		const createSessionCalls: CreateSessionOpts[] = [];
+		const result = await runGlobalAutoWorkCycle(fakeBridge(handle, { createSessionCalls }), {
 			getSubscriptionUsage: async () => ({ available: true, weeklyPct: 5 }),
 			createPullRequest: stubCreatePullRequest,
 		});
@@ -2057,6 +2194,13 @@ describe("runGlobalAutoWorkCycle", () => {
 			.replace(/^-+|-+$/g, "")
 			.slice(0, 40);
 		expect(result.worktreePath).not.toContain(naiveSlug);
+		expect(createSessionCalls).toHaveLength(3);
+		for (const call of createSessionCalls.slice(0, 2)) {
+			expect(call.internal).toBe(true);
+			expect(call.systemPromptOverride).toEqual(expect.any(String));
+		}
+		expect(createSessionCalls[2]).toMatchObject({ cwd: repoCwd });
+		expect(createSessionCalls[2]?.systemPromptAppend).toEqual(expect.any(String));
 	});
 });
 

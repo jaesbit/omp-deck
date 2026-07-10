@@ -22,7 +22,6 @@ import { Column } from "@/components/tasks/Column";
 import { TaskCardBody } from "@/components/tasks/TaskCard";
 import { TaskModal } from "@/components/tasks/TaskModal";
 import { SessionLaunchModal, type SessionLaunchOpts } from "@/components/chat/SessionLaunchModal";
-import { combineWithAutoStart, SESSION_INITIALISATION_COMMAND } from "@/lib/first-prompt";
 import { StateConfig } from "@/components/tasks/StateConfig";
 import { projectColorForCwd, useProjectColors } from "@/lib/project-colors";
 import {
@@ -307,7 +306,6 @@ export function TasksView() {
 			cwd: opts.cwd,
 			model: opts.model,
 			planMode: opts.planMode,
-			suppressAutoStart: true,
 			...(opts.thinking ? { thinking: opts.thinking } : {}),
 		});
 		const message =
@@ -315,7 +313,7 @@ export function TasksView() {
 				? `# ${task.title}\n\n${task.body}`.trim()
 				: `Work on T-${task.displayId}: ${task.title}`;
 		setPendingDraft({
-			text: combineWithAutoStart(SESSION_INITIALISATION_COMMAND, message),
+			text: message,
 			sessionId,
 			autoSend: true,
 		});

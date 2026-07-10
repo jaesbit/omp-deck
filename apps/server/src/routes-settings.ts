@@ -16,13 +16,11 @@ import type {
 	SetInternalTaskModelRequest,
 	SetPlanModelRequest,
 	SetTaskRewriteModelRequest,
-	SessionTitlePromptResponse,
-	SetSessionTitlePromptRequest,
 	TaskRewriteModelResponse,
 } from "@omp-deck/protocol";
 
 import type { Config } from "./config.ts";
-import { parseAutoStart, parseInt10, splitList } from "./config.ts";
+import { parseInt10, splitList } from "./config.ts";
 import { ENV_SCHEMA, ENV_SCHEMA_BY_KEY, type EnvSchemaEntry, validateEnvValue } from "./env-schema.ts";
 import {
 	MANAGED_ENV_KEYS_LOADED,
@@ -33,10 +31,9 @@ import {
 	readManagedEnvFile,
 	writeManagedEnvUpdates,
 } from "./env-store.ts";
-import { getDeckBaseUrl, getInternalTaskModel, getPlanModel, getSessionTitlePrompt, getTaskRewriteModel, setDeckBaseUrl, setInternalTaskModel, setPlanModel, setSessionTitlePrompt, setTaskRewriteModel } from "./db/server-settings.ts";
+import { getDeckBaseUrl, getInternalTaskModel, getPlanModel, getTaskRewriteModel, setDeckBaseUrl, setInternalTaskModel, setPlanModel, setTaskRewriteModel } from "./db/server-settings.ts";
 import { setLogLevel } from "./log.ts";
 import type { AgentBridge } from "./bridge/types.ts";
-import { DEFAULT_SESSION_TITLE_PROMPT } from "./session-title.ts";
 
 export function buildSettingsRouter(
 	bridge: AgentBridge,
@@ -219,35 +216,6 @@ export function buildSettingsRouter(
 		return c.json(resp);
 	});
 
-	app.get("/settings/session-title-prompt", (c) => {
-		const override = getSessionTitlePrompt();
-		const body: SessionTitlePromptResponse = {
-			default: DEFAULT_SESSION_TITLE_PROMPT,
-			override,
-			effective: override ?? DEFAULT_SESSION_TITLE_PROMPT,
-		};
-		return c.json(body);
-	});
-
-	app.put("/settings/session-title-prompt", async (c) => {
-		let body: SetSessionTitlePromptRequest;
-		try {
-			body = (await c.req.json()) as SetSessionTitlePromptRequest;
-		} catch {
-			return c.json({ error: "invalid json body" }, 400);
-		}
-		if (body.value !== null && typeof body.value !== "string") {
-			return c.json({ error: "value must be a string or null" }, 400);
-		}
-		const override = setSessionTitlePrompt(body.value);
-		const response: SessionTitlePromptResponse = {
-			default: DEFAULT_SESSION_TITLE_PROMPT,
-			override,
-			effective: override ?? DEFAULT_SESSION_TITLE_PROMPT,
-		};
-		return c.json(response);
-	});
-
 	return app;
 }
 
@@ -318,12 +286,6 @@ function applyHotUpdates(
 		config.idleTimeoutMs = next;
 		bridge.applyEnvUpdate?.({ idleTimeoutMs: next });
 		applied.push("OMP_DECK_IDLE_TIMEOUT_MS");
-	}
-	if ("OMP_DECK_AUTO_START" in updates) {
-		const next = parseAutoStart(effective.get("OMP_DECK_AUTO_START"));
-		config.autoStartCommand = next;
-		bridge.applyEnvUpdate?.({ autoStartCommand: next });
-		applied.push("OMP_DECK_AUTO_START");
 	}
 	if ("OMP_DECK_DEFAULT_CWD" in updates) {
 		const next = effective.get("OMP_DECK_DEFAULT_CWD")?.trim() || os.homedir();

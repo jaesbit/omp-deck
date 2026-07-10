@@ -30,9 +30,6 @@ export interface WorkerSessionMetadata {
 	cwd: string;
 }
 
-export interface WorkerBridgeOptions {
-	autoStartCommand: string | null;
-}
 
 interface WorkerRequestSpec<Args extends unknown[], Result> {
 	args: Args;
@@ -40,14 +37,8 @@ interface WorkerRequestSpec<Args extends unknown[], Result> {
 }
 
 export interface WorkerMethodMap {
-	"bridge.createSession": WorkerRequestSpec<
-		[opts: CreateSessionOpts, bridgeOptions: WorkerBridgeOptions],
-		WorkerSessionMetadata
-	>;
-	"bridge.resumeSession": WorkerRequestSpec<
-		[opts: ResumeSessionOpts, bridgeOptions: WorkerBridgeOptions],
-		WorkerSessionMetadata
-	>;
+	"bridge.createSession": WorkerRequestSpec<[opts: CreateSessionOpts], WorkerSessionMetadata>;
+	"bridge.resumeSession": WorkerRequestSpec<[opts: ResumeSessionOpts], WorkerSessionMetadata>;
 	"bridge.listModels": WorkerRequestSpec<[opts?: { sessionId?: string }], ModelInfo[]>;
 	"bridge.trackSubscriberAdded": WorkerRequestSpec<[connectionId: string], void>;
 	"bridge.trackSubscriberRemoved": WorkerRequestSpec<[connectionId: string], void>;

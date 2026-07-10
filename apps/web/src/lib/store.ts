@@ -245,7 +245,6 @@ interface StoreState {
 		resumeFromPath?: string;
 		model?: ModelRef;
 		planMode?: boolean;
-		suppressAutoStart?: boolean;
 		/** Thinking level for session creation (T-73). */
 		thinking?: string;
 	}): Promise<string>;
@@ -445,7 +444,6 @@ export const useStore = create<StoreState>()(
 				...(opts.resumeFromPath ? { resumeFromPath: opts.resumeFromPath } : {}),
 				...(opts.model ? { model: opts.model } : {}),
 				...(opts.planMode ? { planMode: true } : {}),
-				...(opts.suppressAutoStart ? { suppressAutoStart: true } : {}),
 				...(opts.thinking ? { thinking: opts.thinking } : {}),
 			});
 			const previousActiveId = get().activeId;

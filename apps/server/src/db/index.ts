@@ -137,19 +137,6 @@ const WELCOME_BODY = `Welcome to omp-deck. A few orientation pointers; mark this
 - **Marketplace** — browse and install plugins/skills from registered catalogs. The empty-state suggests \`anthropics/claude-plugins-official\`.
 - **Settings** — env vars, themes, messaging bridges, appearance.
 
-### Define an auto-start prompt (optional)
-
-Want the agent to greet you with a workspace summary every time you open a fresh chat? Write \`~/.omp/agent/commands/start.md\` (the SDK's user-global slash-command location), e.g.:
-
-\`\`\`md
----
-description: Summarize the active workspace and surface anything in-flight
----
-Summarize the current workspace's state. Mention any active tasks (from the kanban),
-recent git activity, and anything that looks blocked.
-\`\`\`
-
-Then in **Settings → Env**, set \`OMP_DECK_AUTO_START\` to \`/start\`. The deck fires it once per new session, after you subscribe.
 
 ### Themes
 

@@ -4,14 +4,13 @@
  * GET  /api/onboarding/state          → OnboardingState (composite)
  * POST /api/onboarding/complete       → mark done (skipped flag distinguishes
  *                                       walked-through vs X-ed out)
- * POST /api/onboarding/seed-kb-system → write the README + every
- *                                       `system/*.md` / `rules/*.md` template
- *                                       (see `kb-templates.ts`); idempotent
+ * POST /api/onboarding/seed-kb-system → write the README plus every
+ *                                       `system/*.md` / `integrations/*.md` /
+ *                                       `rules/*.md` template (see
+ *                                       `kb-templates.ts`), idempotently
  *                                       (won't overwrite existing files)
  *
- * Provider auth, kb init, start.md write, and env updates all reuse their
- * existing routes (`/api/auth/oauth/*`, `/api/kb/init`,
- * `/api/orientation/*`, `/api/env/*`). The wizard just sequences them.
+ * Provider auth, kb init, and env updates all reuse their existing routes (`/api/auth/oauth/*`, `/api/kb/init`, `/api/env/`). The wizard just sequences them.
  */
 import { Hono } from "hono";
 
@@ -31,11 +30,9 @@ import { getOnboardingState, markOnboardingComplete } from "./onboarding-state.t
 const log = logger("routes:onboarding");
 
 /**
- * The four `kb://system/*.md` files the deck inlines into every session's
- * system prompt (via `getEffectivePrelude` in `orientation-store.ts`).
- * Shipped as blank-ish stubs so a fresh KB doesn't produce an empty
- * injection block on the first session. Users can edit / replace at
- * will — we never overwrite a file the user has touched.
+ * Top-level `kb://system/*.md` files are inlined into every session's system
+ * prompt by `getEffectivePrelude`. The seed is idempotent and never overwrites
+ * files the user has edited.
  */
 /**
  * Top-level README written at the kb root by `seed-kb-system`. Same
@@ -63,8 +60,8 @@ const KB_README_BODY = [
 	"  `updated`, `tags` are parsed automatically).",
 	"- `[[some-file]]` resolves by filename stem. `[[dir/path]]` for explicit",
 	"  paths. `[[target|label]]` to rename the rendered text.",
-	"- The `/start` slash command reads `system/*.md` at session boot — drop",
-	"  notes about your voice, projects, and org system there.",
+	"- The system prompt inlines `system/*.md` at session creation — use these",
+	"  files for notes about your voice, projects, and org system.",
 	"",
 	"## What this is NOT",
 	"",
@@ -87,8 +84,8 @@ const KB_SYSTEM_STUBS: ReadonlyArray<{ name: string; body: string }> = [
 			"# Working voice",
 			"",
 			"How you prefer the agent to communicate with you. Drop short notes here as",
-			"you notice things you want the agent to do or stop doing. Read at session",
-			"start by the default `/start` command.",
+			"you notice things you want the agent to do or stop doing. The system prompt",
+			"inlines these files at session creation.",
 			"",
 			"## Examples",
 			"",
@@ -121,7 +118,7 @@ const KB_SYSTEM_STUBS: ReadonlyArray<{ name: string; body: string }> = [
 			"",
 			"## Local API base",
 			"",
-			"`http://127.0.0.1:8787/api` — reachable from any session via `bash` + `curl`.",
+			"Use the configured local API base URL from the session prelude via `bash` + `curl`.",
 			"",
 		].join("\n"),
 	},

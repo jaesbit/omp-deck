@@ -36,8 +36,6 @@ import type {
 	SetInternalTaskModelRequest,
 	PlanModelResponse,
 	SetPlanModelRequest,
-	SessionTitlePromptResponse,
-	SetSessionTitlePromptRequest,
 	SetTaskRewriteModelRequest,
 	SubscriptionUsageResponse,
 	TaskPriority,
@@ -234,15 +232,6 @@ export const api = {
 		return request<PlanModelResponse>("/settings/plan-model", {
 			method: "PUT",
 			body: JSON.stringify({ model, thinking } satisfies SetPlanModelRequest),
-		});
-	},
-	getSessionTitlePrompt(): Promise<SessionTitlePromptResponse> {
-		return request<SessionTitlePromptResponse>("/settings/session-title-prompt");
-	},
-	setSessionTitlePrompt(value: string | null): Promise<SessionTitlePromptResponse> {
-		return request<SessionTitlePromptResponse>("/settings/session-title-prompt", {
-			method: "PUT",
-			body: JSON.stringify({ value } satisfies SetSessionTitlePromptRequest),
 		});
 	},
 	getDelegationSettings(): Promise<GetDelegationSettingsResponse> {
