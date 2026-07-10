@@ -78,6 +78,16 @@ function stubFetchThrows(): void {
 	}) as unknown as typeof fetch;
 }
 
+function telegramText(body: unknown): string {
+	if (body && typeof body === "object" && "text" in body && typeof body.text === "string") return body.text;
+	throw new Error("expected a telegram payload with a string text field");
+}
+
+function telegramChatId(body: unknown): string {
+	if (body && typeof body === "object" && "chat_id" in body && typeof body.chat_id === "string") return body.chat_id;
+	throw new Error("expected a telegram payload with a string chat_id field");
+}
+
 describe("formatAutoWorkNotification", () => {
 	test("task_started", () => {
 		expect(
@@ -88,6 +98,18 @@ describe("formatAutoWorkNotification", () => {
 	test("task_completed", () => {
 		expect(formatAutoWorkNotification({ kind: "task_completed", displayId: 42, prNumber: 7 })).toBe(
 			"✅ T-42 → validate. PR #7",
+		);
+	});
+
+	test("task_completed_pr_failed", () => {
+		expect(
+			formatAutoWorkNotification({
+				kind: "task_completed_pr_failed",
+				displayId: 42,
+				reason: "GitHub authentication expired or missing — run `gh auth login`",
+			}),
+		).toBe(
+			"⚠️ T-42 → validate (implementation complete, PR creation failed): GitHub authentication expired or missing — run `gh auth login`",
 		);
 	});
 
@@ -131,6 +153,22 @@ describe("notify — configuration gate", () => {
 		const texts = fetchCalls.map((c) => (c.body as { text: string }).text);
 		expect(texts).toEqual(["✅ T-5 → validate. PR #99", "✅ T-5 → validate. PR #99"]);
 		const chatIds = fetchCalls.map((c) => (c.body as { chat_id: string }).chat_id).sort();
+		expect(chatIds).toEqual(["111", "222"]);
+	});
+
+	test("sends task_completed_pr_failed to every allowed user when configured", async () => {
+		configureTelegram();
+		stubFetchOk();
+
+		await notify({ kind: "task_completed_pr_failed", displayId: 5, reason: "boom" });
+
+		expect(fetchCalls).toHaveLength(2);
+		const texts = fetchCalls.map((c) => telegramText(c.body));
+		expect(texts).toEqual([
+			"⚠️ T-5 → validate (implementation complete, PR creation failed): boom",
+			"⚠️ T-5 → validate (implementation complete, PR creation failed): boom",
+		]);
+		const chatIds = fetchCalls.map((c) => telegramChatId(c.body)).sort();
 		expect(chatIds).toEqual(["111", "222"]);
 	});
 });

@@ -159,7 +159,7 @@ export function getAutoWorkCostEstimate(priority: TaskPriority): {
 	const rows = getDb()
 		.query<{ pct_consumed: number | null }, [string, number]>(
 			`SELECT pct_consumed FROM auto_work_runs
-			 WHERE task_priority = ? AND status = 'completed' AND pct_consumed IS NOT NULL
+			 WHERE task_priority = ? AND status IN ('completed', 'completed_pr_failed') AND pct_consumed IS NOT NULL
 			 ORDER BY started_at DESC, rowid DESC
 			 LIMIT ?`,
 		)

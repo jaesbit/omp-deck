@@ -2130,7 +2130,7 @@ export interface SetInternalTaskModelRequest {
 // Auto Work run history and cost tracking (T-62)
 // ─────────────────────────────────────────────────────────────────────────────
 
-export type AutoWorkRunStatus = "running" | "completed" | "failed" | "timed_out";
+export type AutoWorkRunStatus = "running" | "completed" | "completed_pr_failed" | "failed" | "timed_out";
 
 /**
  * One historical (or in-flight) Auto Work run. A row is inserted with
@@ -2139,6 +2139,14 @@ export type AutoWorkRunStatus = "running" | "completed" | "failed" | "timed_out"
  * (`completeAutoWorkRun`). `completedAt` is `null` while `status ===
  * "running"`. The engine that actually drives this lifecycle is T-64 —
  * this type only describes the persisted record.
+ *
+ * `"completed_pr_failed"` means the agent's implementation genuinely
+ * finished and the task moved to validate, but `gh pr create` failed —
+ * distinct from `"completed"` (a PR was actually opened) so the UI and
+ * `GET /auto-work/runs?status=` can tell the two apart instead of
+ * inferring PR failure from task-body text (T-85). `failureReason` on
+ * such a row holds the actionable `gh` error; retry via
+ * `POST /auto-work/runs/:id/create-pr`.
  */
 export interface AutoWorkRun {
 	id: string;
