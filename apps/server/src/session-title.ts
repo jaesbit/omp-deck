@@ -15,7 +15,8 @@
  * means this is a no-op, so an unconfigured install behaves exactly as before.
  */
 
-import type { AgentBridge } from "./bridge/types.ts";
+import { broadcastBus } from "./broadcast-bus.ts";
+import type { AgentBridge, SessionHandle } from "./bridge/types.ts";
 import { getInternalTaskModel } from "./db/server-settings.ts";
 import { getTask } from "./db/tasks.ts";
 import { resolveIntegrationPrompt } from "./integration-prompts.ts";
@@ -63,6 +64,30 @@ export async function generateSessionTitle(
 		log.warn("session-title generation failed", err);
 		return undefined;
 	}
+}
+
+/**
+ * Fire-and-forget: generates and persists a session's title from its first
+ * user message exactly once, the moment the session's first turn starts.
+ * Shared by the regular WS chat flow (`WsHub#maybeAutoTitleSession`, T-78)
+ * and the Auto Work engine (T-94) so both paths title "on first turn, never
+ * again" identically — skips already-named sessions, and is itself a no-op
+ * when `internalTaskModel` is unset (`generateSessionTitle`'s own gate).
+ */
+export function maybeAutoTitleSession(bridge: AgentBridge, handle: SessionHandle, firstMessage: string): void {
+	if (!getInternalTaskModel()) return;
+	void (async () => {
+		try {
+			const snapshot = await handle.snapshot();
+			if (snapshot.sessionName) return;
+			const title = await generateSessionTitle(bridge, { sessionId: handle.sessionId, firstMessage });
+			if (!title) return;
+			await handle.setName(title);
+			broadcastBus.broadcast({ type: "sessions_changed" });
+		} catch (err) {
+			log.warn(`auto-title failed for session ${handle.sessionId}`, err);
+		}
+	})();
 }
 
 function resolveSessionTitleIntegrationPrompt(): Promise<string> {

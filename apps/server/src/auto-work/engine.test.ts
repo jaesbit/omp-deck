@@ -18,9 +18,11 @@ import * as path from "node:path";
 import type { AutoWorkConfig, ModelInfo, SessionSummary, Task, TaskPriority } from "@omp-deck/protocol";
 
 import type { AgentBridge, CreateSessionOpts, EventListener, SessionHandle } from "../bridge/types.ts";
+import { broadcastBus } from "../broadcast-bus.ts";
 import { DEFAULT_AUTO_WORK_VALUES, setAutoWorkConfig } from "../db/auto-work.ts";
 import { getAutoWorkCostEstimate, listAutoWorkRuns, startAutoWorkRun } from "../db/auto-work-runs.ts";
 import { closeDb, openDb } from "../db/index.ts";
+import { setInternalTaskModel } from "../db/server-settings.ts";
 import { createTask, getTask, moveTask } from "../db/tasks.ts";
 import { AUTO_WORK_RULES_BODY, BRANCH_NAMING_RULES_BODY } from "../kb-templates.ts";
 import type { AutoWorkNotificationEvent } from "./notify.ts";
@@ -632,6 +634,8 @@ class FakeSessionHandle {
 	private turnEnded = Promise.withResolvers<void>();
 	/** Every prompt text sent through `prompt()`, in call order. */
 	readonly prompts: string[] = [];
+	/** Every title passed to `setName()`, in call order (T-94). */
+	readonly setNameCalls: string[] = [];
 	/** Number of `abort()` calls received. */
 	abortCalls = 0;
 	/** What `isStreamingNow()` reports — set true to model a resumed handle whose turn is still in flight. */
@@ -682,6 +686,11 @@ class FakeSessionHandle {
 		this.turnEnded = Promise.withResolvers<void>();
 	}
 
+	/** T-94: records the title `maybeAutoTitleSession` applies via the shared session-title helper. */
+	async setName(name: string): Promise<void> {
+		this.setNameCalls.push(name);
+	}
+
 	/** Minimal snapshot stand-in — enough for `latestAssistantText` to read the configured response and for usage capture. */
 	async snapshot(): Promise<{ messages: Array<{ role: string; content: unknown }>; usageRollup?: typeof this.usageRollup }> {
 		return { messages: [{ role: "assistant", content: this.assistantResponse }], usageRollup: this.usageRollup };
@@ -701,6 +710,10 @@ function fakeBridge(
 		liveSessions?: Map<string, FakeSessionHandle>;
 		/** Persisted (on-disk) session summaries `bridge.listSessions`/`resumeSession` can see across a restart. */
 		persistedSessions?: SessionSummary[];
+		/** T-94: response `bridge.generateTitle` resolves with — omit to leave it returning `null`, as if the model produced nothing usable. */
+		titleResponse?: string;
+		/** Every `generateTitle` request, in call order. */
+		generateTitleCalls?: Parameters<AgentBridge["generateTitle"]>[0][];
 	} = {},
 ): AgentBridge {
 	const models = opts.models ?? [AVAILABLE_MODEL];
@@ -730,6 +743,10 @@ function fakeBridge(
 		async deleteSession(sessionId: string) {
 			opts.deleteSessionCalls?.push(sessionId);
 			return { deleted: true };
+		},
+		async generateTitle(request: Parameters<AgentBridge["generateTitle"]>[0]) {
+			opts.generateTitleCalls?.push(request);
+			return opts.titleResponse ?? null;
 		},
 	} as unknown as AgentBridge;
 }
@@ -2197,6 +2214,97 @@ describe("runAutoWorkCycle", () => {
 		expect(handle.prompts).toHaveLength(1);
 		expect(handle.prompts[0]).not.toContain("Agent history");
 		expect(handle.prompts[0]).not.toContain("Agent History");
+	});
+});
+
+// ─── T-94: auto-title on first turn (shared session-title helper, T-78) ────
+
+describe("T-94: auto-title on first turn", () => {
+	test("titles a fresh worker session from its first-turn prompt when internalTaskModel is configured", async () => {
+		setInternalTaskModel({ provider: "anthropic", id: "claude-good" });
+		setAutoWorkConfig(repoCwd, { ...DEFAULT_AUTO_WORK_VALUES, enabled: true });
+		const task = createTask({ title: "Fix the broken login", cwd: repoCwd, priority: "P5", autoWork: true });
+
+		const generateTitleCalls: Parameters<AgentBridge["generateTitle"]>[0][] = [];
+		const handle = new FakeSessionHandle("sess_auto_title", 10);
+		const bridge = fakeBridge(handle, { titleResponse: "Fix The Login Bug", generateTitleCalls });
+
+		const sessionsChanged = new Promise<void>((resolve) => {
+			const stop = broadcastBus.subscribe((frame) => {
+				if (frame.type === "sessions_changed") {
+					stop();
+					resolve();
+				}
+			});
+		});
+
+		const result = await runAutoWorkCycle(repoCwd, bridge, {
+			getSubscriptionUsage: async () => ({ available: true, weeklyPct: 5 }),
+			createPullRequest: stubCreatePullRequest,
+		});
+		await sessionsChanged;
+
+		expect(result.outcome).toBe("completed");
+		expect(generateTitleCalls).toHaveLength(1);
+		// Same first-turn text handed to `session.prompt()`, embedding the
+		// GET /api/tasks/<id> reference `generateSessionTitle` regexes out.
+		expect(generateTitleCalls[0]?.userMessage).toContain(handle.prompts[0]);
+		expect(generateTitleCalls[0]?.userMessage).toContain(`GET /api/tasks/${task.id}`);
+		expect(handle.setNameCalls).toEqual(["Fix The Login Bug"]);
+	});
+
+	test("never generates or sets a title when internalTaskModel is unset — the default for every other runAutoWorkCycle test", async () => {
+		setAutoWorkConfig(repoCwd, { ...DEFAULT_AUTO_WORK_VALUES, enabled: true });
+		createTask({ title: "Ship the thing", cwd: repoCwd, priority: "P5", autoWork: true });
+
+		const generateTitleCalls: Parameters<AgentBridge["generateTitle"]>[0][] = [];
+		const handle = new FakeSessionHandle("sess_no_title_model", 10);
+		const bridge = fakeBridge(handle, { titleResponse: "Should Never Be Used", generateTitleCalls });
+
+		const result = await runAutoWorkCycle(repoCwd, bridge, {
+			getSubscriptionUsage: async () => ({ available: true, weeklyPct: 5 }),
+			createPullRequest: stubCreatePullRequest,
+		});
+
+		expect(result.outcome).toBe("completed");
+		expect(generateTitleCalls).toEqual([]);
+		expect(handle.setNameCalls).toEqual([]);
+	});
+
+	test("does not trigger title generation from the internal task-selector or branch-naming one-shot sessions — only the real task session titles", async () => {
+		setInternalTaskModel({ provider: "anthropic", id: "claude-good" });
+		setAutoWorkConfig(repoCwd, { ...DEFAULT_AUTO_WORK_VALUES, enabled: true });
+		createTask({ title: "Arreglar error de inicio de sesión", cwd: repoCwd, priority: "P5", autoWork: true });
+
+		const generateTitleCalls: Parameters<AgentBridge["generateTitle"]>[0][] = [];
+		const createSessionCalls: CreateSessionOpts[] = [];
+		const handle = new FakeSessionHandle("sess_global_title", 10, "Fix Login Error!!");
+		const bridge = fakeBridge(handle, { createSessionCalls, titleResponse: "Fix The Login Error", generateTitleCalls });
+
+		const sessionsChanged = new Promise<void>((resolve) => {
+			const stop = broadcastBus.subscribe((frame) => {
+				if (frame.type === "sessions_changed") {
+					stop();
+					resolve();
+				}
+			});
+		});
+
+		// `runGlobalAutoWorkCycle`'s default wiring (T-77) runs a task-selector
+		// AND a branch-naming internal one-shot session (`internal: true`,
+		// unrelated scratch sessions) before the real task session — see
+		// "wires in the real LLM-backed branch slug generator by default"
+		// above, which asserts the same 3 `createSession` calls.
+		const result = await runGlobalAutoWorkCycle(bridge, {
+			getSubscriptionUsage: async () => ({ available: true, weeklyPct: 5 }),
+			createPullRequest: stubCreatePullRequest,
+		});
+		await sessionsChanged;
+
+		expect(result.outcome).toBe("completed");
+		expect(createSessionCalls).toHaveLength(3);
+		expect(generateTitleCalls).toHaveLength(1);
+		expect(handle.setNameCalls).toEqual(["Fix The Login Error"]);
 	});
 });
 

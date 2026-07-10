@@ -7,7 +7,7 @@ import { broadcastBus } from "./broadcast-bus.ts";
 import { logger } from "./log.ts";
 import { getBuildInfo, getUptimeSecs } from "./build-info.ts";
 import { getInternalTaskModel } from "./db/server-settings.ts";
-import { generateSessionTitle } from "./session-title.ts";
+import { maybeAutoTitleSession as sharedMaybeAutoTitleSession } from "./session-title.ts";
 import { buildSkillInvocationPrompt, parseSkillSlashCommand } from "./skill-invocation.ts";
 import { StreamCoalescer } from "./stream-coalescer.ts";
 import type { SkillsService } from "./skills-service.ts";
@@ -347,24 +347,14 @@ export class WsHub {
 	 * `getInternalTaskModel()` read per prompt. Auto-work and other internal
 	 * one-shot sessions never reach here: they never go through this WS
 	 * client-prompt path, only through direct `session.prompt()` calls in
-	 * `auto-work/engine.ts` / `routes.ts`.
+	 * `auto-work/engine.ts` / `routes.ts`, which title via the same shared
+	 * `maybeAutoTitleSession` helper from `session-title.ts` directly (T-94).
 	 */
 	private maybeAutoTitleSession(handle: SessionHandle, sessionId: string, firstMessage: string): void {
 		if (this.titledSessions.has(sessionId)) return;
 		if (!getInternalTaskModel()) return;
 		this.titledSessions.add(sessionId);
-		void (async () => {
-			try {
-				const snapshot = await handle.snapshot();
-				if (snapshot.sessionName) return;
-				const title = await generateSessionTitle(this.bridge, { sessionId, firstMessage });
-				if (!title) return;
-				await handle.setName(title);
-				broadcastBus.broadcast({ type: "sessions_changed" });
-			} catch (err) {
-				log.warn(`auto-title failed for session ${sessionId}`, err);
-			}
-		})();
+		sharedMaybeAutoTitleSession(this.bridge, handle, firstMessage);
 	}
 
 	/** The pre-T-21 slash dispatch chain: deck-native commands, then SDK ACP builtins, then plain prompt. */
