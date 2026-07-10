@@ -354,7 +354,7 @@ export class WsHub {
 			try {
 				const snapshot = await handle.snapshot();
 				if (snapshot.sessionName) return;
-				const title = await generateSessionTitle(this.bridge, { cwd: handle.cwd, firstMessage });
+				const title = await generateSessionTitle(this.bridge, { sessionId, firstMessage });
 				if (!title) return;
 				await handle.setName(title);
 				broadcastBus.broadcast({ type: "sessions_changed" });

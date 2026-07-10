@@ -36,6 +36,7 @@ import type {
 	AgentBridge,
 	CreateSessionOpts,
 	EventListener,
+	GenerateTitleOpts,
 	PlanApprovalResponse,
 	ResumeSessionOpts,
 	RuntimeEnvUpdate,
@@ -212,6 +213,10 @@ export class ProcessAgentBridge implements AgentBridge {
 			if (record) return this.request(record, "bridge.listModels", [opts]);
 		}
 		return this.sessionlessBridge.listModels(opts);
+	}
+
+	generateTitle(opts: GenerateTitleOpts): Promise<string | null> {
+		return this.sessionlessBridge.generateTitle(opts);
 	}
 
 	subscribeUiFrames(
