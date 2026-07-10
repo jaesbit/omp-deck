@@ -46,10 +46,12 @@ class StubSession implements PlanModeSessionSurface {
 	clearPlanInternalAbortPendingCount = 0;
 	compactCalls = 0;
 	promptCalls: PromptCall[] = [];
+	nextPromptError: Error | undefined;
 	setActiveToolsCalls: string[][] = [];
 	isStreaming = true;
 	#compactGate: Promise<void> = Promise.resolve();
 	#compactionStarted = Promise.withResolvers<void>();
+	#promptGate: Promise<void> = Promise.resolve();
 	#promptStarted = Promise.withResolvers<void>();
 
 	constructor(initialTools: string[] = ["read", "search", "find", "lsp", "web_search", "edit", "write"]) {
@@ -111,6 +113,13 @@ class StubSession implements PlanModeSessionSurface {
 		return this.#promptStarted.promise;
 	}
 
+	deferPrompt() {
+		const gate = Promise.withResolvers<void>();
+		this.#promptGate = gate.promise;
+		this.#promptStarted = Promise.withResolvers<void>();
+		return gate;
+	}
+
 	markPlanReferenceSent(): void {
 		this.markPlanReferenceSentCount += 1;
 	}
@@ -121,6 +130,10 @@ class StubSession implements PlanModeSessionSurface {
 	): Promise<void> {
 		this.promptCalls.push({ text, ...(options ? { options } : {}) });
 		this.#promptStarted.resolve();
+		const error = this.nextPromptError;
+		this.nextPromptError = undefined;
+		if (error) throw error;
+		await this.#promptGate;
 	}
 }
 
@@ -528,14 +541,96 @@ describe("PlanModeBridge", () => {
 		});
 
 		harness.session.isStreaming = false;
+		const dispatched = harness.nextExecution("dispatched");
 		compaction.resolve();
 		await executionPrompt;
+		await dispatched;
 
 		expect(harness.session.promptCalls).toHaveLength(1);
 		expect(harness.session.promptCalls[0]).toEqual({
 			text: expect.stringContaining("Plan approved. You MUST execute it now."),
 		});
 		expect(harness.bridge.getPendingPlanExecution()).toBeUndefined();
+	});
+
+	it("enter() remains blocked while a compacted execution prompt is dispatching", async () => {
+		await harness.bridge.enter();
+		await fs.writeFile(harness.planFile, "# Compact me\n\nExecute after compaction.\n");
+		const compaction = harness.session.deferCompaction();
+		const prompt = harness.session.deferPrompt();
+		const { resultPromise } = await invokeApply(harness);
+		const proposed = await harness.nextProposal();
+		const dispatched = harness.nextExecution("dispatched");
+
+		expect(
+			harness.bridge.respond(proposed.proposalId, { approved: true, executionStrategy: "compact_context" }),
+		).toBe("settled");
+		await harness.session.waitForCompaction();
+		await resultPromise;
+
+		harness.session.isStreaming = false;
+		compaction.resolve();
+		await harness.session.waitForPrompt();
+
+		expect(harness.bridge.getPendingPlanExecution()?.status).toBe("dispatching");
+		await expect(harness.bridge.enter()).rejects.toThrow(
+			"Finish or recover the approved plan execution before entering Plan Mode again.",
+		);
+
+		prompt.resolve();
+		await dispatched;
+		expect(harness.bridge.getPendingPlanExecution()).toBeUndefined();
+
+		await harness.bridge.enter();
+		expect(harness.bridge.isEnabled()).toBe(true);
+	});
+
+	it("enter() refuses to restore restricted Plan Mode tools while compaction is in progress", async () => {
+		await harness.bridge.enter();
+		await fs.writeFile(harness.planFile, "# Compact me\n");
+		const compaction = harness.session.deferCompaction();
+		const { resultPromise } = await invokeApply(harness);
+		const proposed = await harness.nextProposal();
+
+		expect(
+			harness.bridge.respond(proposed.proposalId, { approved: true, executionStrategy: "compact_context" }),
+		).toBe("settled");
+		await harness.session.waitForCompaction();
+		await resultPromise;
+
+		expect(harness.session.getActiveToolNames()).not.toContain("resolve");
+		await expect(harness.bridge.enter()).rejects.toThrow(
+			"Finish or recover the approved plan execution before entering Plan Mode again.",
+		);
+		expect(harness.session.getActiveToolNames()).not.toContain("resolve");
+
+		harness.session.isStreaming = false;
+		compaction.resolve();
+		await harness.session.waitForPrompt();
+	});
+
+	it("enter() refuses to restore restricted Plan Mode tools while compaction recovery is pending", async () => {
+		await harness.bridge.enter();
+		await fs.writeFile(harness.planFile, "# Compact me\n");
+		const compaction = harness.session.deferCompaction();
+		const { resultPromise } = await invokeApply(harness);
+		const proposed = await harness.nextProposal();
+		const failed = harness.nextExecution("compact_failed");
+
+		harness.bridge.respond(proposed.proposalId, { approved: true, executionStrategy: "compact_context" });
+		await harness.session.waitForCompaction();
+		await resultPromise;
+		compaction.reject(new Error("compaction backend failed"));
+		await failed;
+
+		expect(harness.session.getActiveToolNames()).not.toContain("resolve");
+		await expect(harness.bridge.enter()).rejects.toThrow(
+			"Finish or recover the approved plan execution before entering Plan Mode again.",
+		);
+		expect(harness.session.getActiveToolNames()).not.toContain("resolve");
+
+		harness.session.isStreaming = false;
+		await expect(harness.bridge.actOnPendingPlanExecution(proposed.proposalId)).resolves.toBe("settled");
 	});
 
 	it("cancelled compaction does not enqueue execution and leaves one atomic recovery action", async () => {
@@ -607,6 +702,29 @@ describe("PlanModeBridge", () => {
 		await recoveryPrompt;
 		expect(harness.session.promptCalls).toHaveLength(1);
 		expect(harness.bridge.getPendingPlanExecution()).toBeUndefined();
+	});
+
+	it("retries a prompt failure after compaction with compacted-context guidance", async () => {
+		await harness.bridge.enter();
+		await fs.writeFile(harness.planFile, "# Compact me\n\nExecute after compaction.\n");
+		const compaction = harness.session.deferCompaction();
+		const { resultPromise } = await invokeApply(harness);
+		const proposed = await harness.nextProposal();
+		const failed = harness.nextExecution("compact_failed");
+
+		harness.bridge.respond(proposed.proposalId, { approved: true, executionStrategy: "compact_context" });
+		await harness.session.waitForCompaction();
+		await resultPromise;
+		harness.session.nextPromptError = new Error("follow-up queue unavailable");
+		harness.session.isStreaming = false;
+		compaction.resolve();
+		await failed;
+
+		expect(harness.bridge.getPendingPlanExecution()?.proposalId).toBe(proposed.proposalId);
+		await expect(harness.bridge.actOnPendingPlanExecution(proposed.proposalId)).resolves.toBe("settled");
+		expect(harness.session.promptCalls).toHaveLength(2);
+		expect(harness.session.promptCalls[1]?.text).toContain("Context was compacted.");
+		expect(harness.session.promptCalls[1]?.text).not.toContain("Context preserved.");
 	});
 
 	it("two tabs approving compact_context start only one compaction and one execution", async () => {

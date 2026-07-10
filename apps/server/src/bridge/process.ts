@@ -442,7 +442,13 @@ export class ProcessAgentBridge implements AgentBridge {
 		} else if (frame.frame.type === "plan_proposed") {
 			record.pendingPlanFrame = frame.frame;
 		} else if (frame.frame.type === "plan_execution_changed") {
-			record.pendingPlanExecutionFrame = frame.frame.status === "dispatched" ? undefined : frame.frame;
+			if (frame.frame.status === "dispatched") {
+				if (record.pendingPlanExecutionFrame?.proposalId === frame.frame.proposalId) {
+					record.pendingPlanExecutionFrame = undefined;
+				}
+			} else {
+				record.pendingPlanExecutionFrame = frame.frame;
+			}
 		} else if (record.pendingPlanFrame?.proposalId === frame.frame.proposalId) {
 			record.pendingPlanFrame = undefined;
 		}

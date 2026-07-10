@@ -202,7 +202,7 @@ function PlanExecutionRecovery({ session }: { session: SessionUi }) {
 	const pending = session.pendingPlanExecution;
 	const act = useStore((s) => s.actOnPendingPlanExecution);
 	if (!pending) return null;
-	const isCompacting = pending.status === "compacting";
+	const isWaiting = pending.status === "compacting" || pending.status === "dispatching";
 	const cancelled = pending.status === "compact_cancelled";
 	return (
 		<section aria-label="Plan execution recovery" className="rounded-lg border border-accent-plan/40 bg-accent-plan/[0.04] p-4 shadow-sm">
@@ -213,13 +213,15 @@ function PlanExecutionRecovery({ session }: { session: SessionUi }) {
 				<span className="truncate font-mono text-2xs text-ink-3">→ {pending.planFilePath}</span>
 			</header>
 			<p className="mb-3 text-sm text-ink-2">
-				{isCompacting
-					? "Compacting the planning context before execution."
+				{isWaiting
+					? pending.status === "compacting"
+						? "Compacting the planning context before execution."
+						: "Dispatching the approved plan."
 					: cancelled
 						? "Compaction was cancelled. Execution has not started."
-						: `Compaction failed. Execution has not started.${pending.error ? ` ${pending.error}` : ""}`}
+						: `Preparation for execution failed. Execution has not started.${pending.error ? ` ${pending.error}` : ""}`}
 			</p>
-			{!isCompacting ? (
+			{!isWaiting ? (
 				<button
 					type="button"
 					onClick={() => act(session.sessionId, pending.proposalId)}

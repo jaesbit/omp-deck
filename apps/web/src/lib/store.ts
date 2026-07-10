@@ -944,6 +944,8 @@ function handleFrame(
 			set((s) => {
 				const prev = s.sessionsById[frame.sessionId];
 				if (!prev) return {};
+				const existing = prev.pendingPlanExecution;
+				if (frame.status === "dispatched" && existing?.proposalId !== frame.proposalId) return {};
 				return {
 					sessionsById: {
 						...s.sessionsById,

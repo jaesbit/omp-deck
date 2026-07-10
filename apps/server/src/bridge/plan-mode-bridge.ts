@@ -159,6 +159,8 @@ interface PendingExecution {
 	proposalId: string;
 	planFilePath: string;
 	planContent: string;
+	/** True only after the planning transcript was successfully compacted. */
+	contextCompacted: boolean;
 	status: PendingPlanExecutionWire["status"];
 	error?: string;
 }
@@ -371,6 +373,9 @@ export class PlanModeBridge {
 	/** Enter plan mode. Idempotent — re-entry is a no-op. */
 	async enter(): Promise<void> {
 		if (this.disposed || this.enabled) return;
+		if (this.pendingExecution) {
+			throw new Error("Finish or recover the approved plan execution before entering Plan Mode again.");
+		}
 
 		const previousTools = this.session.getActiveToolNames();
 		const planTools = previousTools.includes(RESOLVE_TOOL)
@@ -470,9 +475,10 @@ export class PlanModeBridge {
 
 	async actOnPendingPlanExecution(proposalId: string): Promise<"settled" | "unknown"> {
 		const pending = this.pendingExecution;
-		if (!pending || pending.proposalId !== proposalId || pending.status === "compacting") return "unknown";
-		this.pendingExecution = undefined;
-		await this.#dispatchApprovedPlan(pending);
+		if (!pending || pending.proposalId !== proposalId || pending.status === "compacting" || pending.status === "dispatching") return "unknown";
+		const dispatching = { ...pending, status: "dispatching" as const };
+		this.#setPendingExecution(dispatching);
+		await this.#dispatchApprovedPlan(dispatching);
 		return "settled";
 	}
 
@@ -738,6 +744,7 @@ export class PlanModeBridge {
 					proposalId,
 					planFilePath: planFilePathAtApproval,
 					planContent: finalContent,
+					contextCompacted: false,
 					status: "compacting",
 				};
 
@@ -794,8 +801,9 @@ export class PlanModeBridge {
 				internalGuidance: PLAN_COMPACT_INSTRUCTIONS.replaceAll("{{planFilePath}}", pending.planFilePath),
 			});
 			if (this.pendingExecution?.proposalId !== pending.proposalId) return;
-			this.pendingExecution = undefined;
-			await this.#dispatchApprovedPlan(pending);
+			const dispatching = { ...pending, contextCompacted: true, status: "dispatching" as const };
+			this.#setPendingExecution(dispatching);
+			await this.#dispatchApprovedPlan(dispatching);
 		} catch (err) {
 			if (this.pendingExecution?.proposalId !== pending.proposalId) return;
 			const cancelled = err instanceof Error && err.name === "CompactionCancelledError";
@@ -816,12 +824,15 @@ export class PlanModeBridge {
 			const prompt = renderApprovedPrompt({
 				planContent: pending.planContent,
 				planFilePath: pending.planFilePath,
-				contextPreserved: pending.status !== "compacting",
+				contextPreserved: !pending.contextCompacted,
 			});
 			if (this.session.isStreaming) {
 				await this.session.prompt(prompt, { streamingBehavior: "followUp" });
 			} else {
 				await this.session.prompt(prompt);
+			}
+			if (this.pendingExecution?.proposalId === pending.proposalId) {
+				this.pendingExecution = undefined;
 			}
 			this.#broadcast({
 				type: "plan_execution_changed",

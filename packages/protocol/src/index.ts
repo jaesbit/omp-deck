@@ -868,7 +868,7 @@ export interface PendingPlanApprovalWire {
 export interface PendingPlanExecutionWire {
 	proposalId: string;
 	planFilePath: string;
-	status: "compacting" | "compact_cancelled" | "compact_failed";
+	status: "compacting" | "dispatching" | "compact_cancelled" | "compact_failed";
 	error?: string;
 }
 
@@ -1263,7 +1263,7 @@ export type ServerFrame =
 			sessionId: string;
 			proposalId: string;
 			planFilePath: string;
-			status: "compacting" | "compact_cancelled" | "compact_failed" | "dispatched";
+			status: "compacting" | "dispatching" | "compact_cancelled" | "compact_failed" | "dispatched";
 			error?: string;
 	  }
 	/**
