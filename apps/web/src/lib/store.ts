@@ -122,10 +122,17 @@ interface StoreState {
 	 * Tool-card view state. `allCollapsed` is the bulk default; `perCard` holds
 	 * user overrides (key = toolCallId, value = isOpen). On bulk toggle we clear
 	 * `perCard` so the new default applies to every card uniformly.
+	 *
+	 * `hideAll` is a separate, more aggressive axis (T-48): when on, tool
+	 * calls render nothing but a live spinner + running tool name, and never
+	 * render history (see `AssistantMessage.tsx`). It takes visual precedence
+	 * over `allCollapsed`/`perCard` — those stay togglable but have no visible
+	 * effect while `hideAll` is active.
 	 */
 	toolView: {
 		allCollapsed: boolean;
 		perCard: Record<string, boolean>;
+		hideAll: boolean;
 	};
 
 	/** Pinned todo panel in the conversation, toggled next to `ToolCardsToggle`
@@ -294,6 +301,7 @@ interface StoreState {
 	resumeIfKnown(id: string): Promise<void>;
 	renameSession(id: string, name: string): Promise<void>;
 	toggleAllToolCards(): void;
+	toggleHideAllToolCards(): void;
 	setToolCardOpen(id: string, open: boolean): void;
 	toggleTodoPanel(): void;
 	setPendingDraft(draft: { text: string; sessionId?: string; autoSend?: boolean } | undefined): void;
@@ -360,7 +368,7 @@ export const useStore = create<StoreState>()(
 		activeId: readLastSessionId(),
 		watchingSessionCounts: new Map(),
 		subscribed: new Set<string>(),
-		toolView: { allCollapsed: false, perCard: {} },
+		toolView: { allCollapsed: false, perCard: {}, hideAll: false },
 		todoPanelOpen: false,
 		tasksChangeCounter: 0,
 		tasksSubscribed: false,
@@ -655,14 +663,20 @@ export const useStore = create<StoreState>()(
 
 		toggleAllToolCards() {
 			set((s) => ({
-				toolView: { allCollapsed: !s.toolView.allCollapsed, perCard: {} },
+				toolView: { ...s.toolView, allCollapsed: !s.toolView.allCollapsed, perCard: {} },
+			}));
+		},
+
+		toggleHideAllToolCards() {
+			set((s) => ({
+				toolView: { ...s.toolView, hideAll: !s.toolView.hideAll },
 			}));
 		},
 
 		setToolCardOpen(id, open) {
 			set((s) => ({
 				toolView: {
-					allCollapsed: s.toolView.allCollapsed,
+					...s.toolView,
 					perCard: { ...s.toolView.perCard, [id]: open },
 				},
 			}));

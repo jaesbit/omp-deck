@@ -1,6 +1,6 @@
 import { useEffect, type ReactNode } from "react";
 import { NavRail } from "./NavRail";
-import { FoldVertical, ListTodo, Menu, PanelRight, UnfoldVertical, X } from "lucide-react";
+import { Eye, EyeOff, FoldVertical, ListTodo, Menu, PanelRight, UnfoldVertical, X } from "lucide-react";
 import { useStore } from "@/lib/store";
 import { cn } from "@/lib/utils";
 import { ConnectionIndicator } from "./ConnectionIndicator";
@@ -53,6 +53,7 @@ export function Layout({ sidebar, main, inspector, topBar }: Props) {
 					<div className="hidden min-w-0 truncate sm:block">{topBar}</div>
 					<ConnectionIndicator />
 					<ToolCardsToggle />
+					<HideToolCallsToggle />
 					<TodoPanelToggle />
 					<button
 						type="button"
@@ -155,6 +156,30 @@ function ToolCardsToggle() {
 			onClick={toggle}
 			aria-label={allCollapsed ? "Expand all tool cards" : "Collapse all tool cards"}
 			title={allCollapsed ? "Expand all tool cards" : "Collapse all tool cards"}
+		>
+			<Icon className="h-4 w-4" />
+		</button>
+	);
+}
+
+/**
+ * T-48: the more aggressive "hide tool calls" mode — while on, tool calls
+ * render nothing but a live spinner + the running tool's name, with no
+ * history trail once a turn finishes (see `AssistantMessage.tsx`). This is
+ * a separate axis from `ToolCardsToggle`'s collapse/expand; it takes visual
+ * precedence when active, but `ToolCardsToggle` stays clickable underneath.
+ */
+function HideToolCallsToggle() {
+	const hideAll = useStore((s) => s.toolView.hideAll);
+	const toggle = useStore((s) => s.toggleHideAllToolCards);
+	const Icon = hideAll ? EyeOff : Eye;
+	return (
+		<button
+			type="button"
+			className={cn("btn-ghost h-7 w-7 p-0", hideAll && "lg:bg-paper-3")}
+			onClick={toggle}
+			aria-label={hideAll ? "Show tool call history" : "Hide tool call history"}
+			title={hideAll ? "Show tool call history" : "Hide tool call history (spinner only)"}
 		>
 			<Icon className="h-4 w-4" />
 		</button>
