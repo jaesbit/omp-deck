@@ -770,9 +770,19 @@ export async function reconcileInactiveAutoWorkRuns(bridge: AgentBridge, now = D
 	let reconciled = 0;
 	for (const run of listAutoWorkRuns({ status: "running" })) {
 		if (activeRunIds.has(run.id) || now - Date.parse(run.startedAt) < STALE_RUN_GRACE_MS) continue;
-		const handle = bridge.getSession(run.sessionId);
-		if (handle && (await handle.isStreamingNow())) continue;
-		if (await findPersistedAutoWorkSession(bridge, run)) continue;
+		let stillLive: boolean;
+		try {
+			const handle = bridge.getSession(run.sessionId);
+			stillLive = (handle !== undefined && (await handle.isStreamingNow())) || (await findPersistedAutoWorkSession(bridge, run)) !== undefined;
+		} catch (err) {
+			// A transient bridge/filesystem error is not proof the session is
+			// gone — declaring it stale here would fail (and reopen the mutex
+			// for) a run that is still genuinely alive. Leave it untouched;
+			// the next reconcile pass re-evaluates from scratch.
+			log.warn(`run ${run.id}: liveness check failed, leaving status untouched this pass`, err);
+			continue;
+		}
+		if (stillLive) continue;
 		failAutoWorkRun(run.id, run.taskId, "session_not_running");
 		log.warn(`run ${run.id} (session ${run.sessionId}) is no longer running; moved task back to backlog`);
 		reconciled += 1;
@@ -947,17 +957,44 @@ type AutoWorkTerminalResult =
 	| { outcome: "failed"; failureReason: string }
 	| { outcome: "timed_out" };
 
+/**
+ * `stopReason` values meaning the model paused mid-task to invoke a tool,
+ * not that the agent turn actually ended. The SDK emits one `turn_end` per
+ * internal LLM round of a multi-tool-call task — every round but the last
+ * carries one of these. Only the FINAL `turn_end` (or the `agent_end` that
+ * follows the whole loop) reflects the real outcome. Treating an
+ * intermediate `turn_end` as terminal marked a still-running task "failed"
+ * right after its first tool call (regression fixed by T-96), closing the
+ * DB row and clearing the mutex while the agent kept working underneath.
+ */
+const TOOL_CONTINUATION_STOP_REASONS: Record<string, true> = { toolUse: true, tool_use: true };
+
+/**
+ * Extracts the stop reason regardless of event shape: `turn_end` carries a
+ * single `message`, `agent_end` carries the full `messages` array (the
+ * outcome lives on its last entry).
+ */
+function stopReasonFromEvent(event: { message?: unknown; messages?: unknown; stopReason?: unknown }): string | undefined {
+	if (typeof event.stopReason === "string") return event.stopReason;
+	const single = event.message && typeof event.message === "object" ? (event.message as Record<string, unknown>) : undefined;
+	if (single && typeof single.stopReason === "string") return single.stopReason;
+	if (Array.isArray(event.messages)) {
+		const last = event.messages[event.messages.length - 1] as Record<string, unknown> | undefined;
+		if (last && typeof last.stopReason === "string") return last.stopReason;
+	}
+	return undefined;
+}
+
 function terminalOutcomeFromEvent(event: unknown): AutoWorkTerminalResult | undefined {
 	if (!event || typeof event !== "object" || !("type" in event)) return undefined;
 	if (event.type !== "turn_end" && event.type !== "agent_end") return undefined;
 
-	const nestedMessage = "message" in event && event.message && typeof event.message === "object" ? event.message : undefined;
-	const directStopReason = "stopReason" in event && typeof event.stopReason === "string" ? event.stopReason : undefined;
-	const nestedStopReason =
-		nestedMessage && "stopReason" in nestedMessage && typeof nestedMessage.stopReason === "string"
-			? nestedMessage.stopReason
-			: undefined;
-	const stopReason = directStopReason ?? nestedStopReason;
+	const stopReason = stopReasonFromEvent(event as { message?: unknown; messages?: unknown; stopReason?: unknown });
+
+	// An intermediate `turn_end` inside a multi-tool-call task — the agent is
+	// still working towards `agent_end`, not actually done yet.
+	if (event.type === "turn_end" && stopReason && TOOL_CONTINUATION_STOP_REASONS[stopReason]) return undefined;
+
 	if (!stopReason) return { outcome: "failed", failureReason: "agent turn ended without a stop reason" };
 	if (stopReason === "end_turn" || stopReason === "stop") return { outcome: "completed" };
 	return { outcome: "failed", failureReason: `agent turn ended with stop reason: ${stopReason}` };
