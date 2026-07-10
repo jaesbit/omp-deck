@@ -10,11 +10,12 @@ import * as path from "node:path";
 
 import type { ModelRef } from "@omp-deck/protocol";
 
-import type { AgentBridge } from "./bridge/types.ts";
+import { broadcastBus } from "./broadcast-bus.ts";
+import type { AgentBridge, SessionHandle } from "./bridge/types.ts";
 import { closeDb, openDb } from "./db/index.ts";
 import { setInternalTaskModel } from "./db/server-settings.ts";
 import { createTask } from "./db/tasks.ts";
-import { generateSessionTitle } from "./session-title.ts";
+import { generateSessionTitle, maybeAutoTitleSession } from "./session-title.ts";
 
 let dbDir: string;
 
@@ -160,4 +161,91 @@ describe("generateSessionTitle", () => {
 			expect(result).toBeUndefined();
 		});
 	}
+});
+
+describe("maybeAutoTitleSession", () => {
+	function fakeHandle(opts: { sessionName?: string } = {}): {
+		handle: SessionHandle;
+		setNameCalls: string[];
+		snapshotCalls: number[];
+		snapshotCalled: Promise<void>;
+	} {
+		const setNameCalls: string[] = [];
+		const snapshotCalls: number[] = [];
+		const snapshotCalled = Promise.withResolvers<void>();
+		const handle = {
+			sessionId: "session-42",
+			snapshot() {
+				snapshotCalls.push(snapshotCalls.length);
+				snapshotCalled.resolve();
+				return opts.sessionName ? { sessionName: opts.sessionName } : {};
+			},
+			async setName(name: string) {
+				setNameCalls.push(name);
+			},
+		};
+		return {
+			handle: handle as unknown as SessionHandle,
+			setNameCalls,
+			snapshotCalls,
+			snapshotCalled: snapshotCalled.promise,
+		};
+	}
+
+	test("generates a title, renames the session, and broadcasts sessions_changed when unnamed", async () => {
+		setInternalTaskModel({ provider: "anthropic", id: "claude-good" });
+		const task = createTask({ title: "Fix the login flow", body: "Steps to repro..." });
+		const calls: GenerateTitleRequest[] = [];
+		const { handle, setNameCalls } = fakeHandle();
+
+		const sessionsChanged = new Promise<void>((resolve) => {
+			const stop = broadcastBus.subscribe((frame) => {
+				if (frame.type === "sessions_changed") {
+					stop();
+					resolve();
+				}
+			});
+		});
+
+		maybeAutoTitleSession(
+			fakeBridge('"Fix The Login Bug"', calls),
+			handle,
+			`Please look at GET /api/tasks/${task.id} and fix it`,
+		);
+		await sessionsChanged;
+
+		expect(calls).toHaveLength(1);
+		expect(calls[0]?.sessionId).toBe("session-42");
+		expect(calls[0]?.userMessage).toContain(`GET /api/tasks/${task.id}`);
+		expect(calls[0]?.userMessage).toContain(`Linked kanban task: T-${task.displayId}: Fix the login flow`);
+		expect(setNameCalls).toEqual(["Fix The Login Bug"]);
+	});
+
+	test("never renames a session that already has a sessionName", async () => {
+		setInternalTaskModel({ provider: "anthropic", id: "claude-good" });
+		const calls: GenerateTitleRequest[] = [];
+		const { handle, setNameCalls, snapshotCalled } = fakeHandle({ sessionName: "Already Named" });
+
+		maybeAutoTitleSession(fakeBridge("unused", calls), handle, "Hello");
+		await snapshotCalled;
+		// Flush the microtask hops between `snapshot()` resolving and the
+		// early `if (snapshot.sessionName) return` landing right after it.
+		await Promise.resolve();
+		await Promise.resolve();
+		await Promise.resolve();
+
+		expect(calls).toEqual([]);
+		expect(setNameCalls).toEqual([]);
+	});
+
+	test("attempts no title generation at all when internalTaskModel is unset", () => {
+		const calls: GenerateTitleRequest[] = [];
+		const { handle, setNameCalls, snapshotCalls } = fakeHandle();
+
+		maybeAutoTitleSession(fakeBridge("unused", calls), handle, "Hello");
+
+		expect(snapshotCalls).toEqual([]);
+		expect(calls).toEqual([]);
+		expect(setNameCalls).toEqual([]);
+	});
 });

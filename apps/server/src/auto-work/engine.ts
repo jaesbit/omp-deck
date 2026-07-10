@@ -57,6 +57,7 @@ import { findStateByName, getTask, listTasks, moveTask, updateTask } from "../db
 import { getWorkspacePreference } from "../db/workspace-preferences.ts";
 import { logger } from "../log.ts";
 import { notify as sendAutoWorkNotification } from "./notify.ts";
+import { maybeAutoTitleSession } from "../session-title.ts";
 import type { AutoWorkNotificationEvent } from "./notify.ts";
 import { getSubscriptionUsage } from "../usage-subscription.ts";
 import { estimateTaskCostPct } from "./estimate.ts";
@@ -537,6 +538,10 @@ export async function runAutoWorkCycle(
 	const agentHistory = extractAgentHistory(task.body);
 	const historyBlock = agentHistory ? `\n\n## Agent history for this task\n${agentHistory}` : "";
 	const prompt = `Trabaja en T-${task.displayId}: ${task.title}\n\n(contexto completo disponible via GET /api/tasks/${task.id})\n\nEl worktree para esta tarea ya está configurado en \`${worktreePath}\` (rama \`auto-work/t${task.displayId}-${branchSlug}\`). Usa ese directorio para todos los commits y cambios de fichero.${historyBlock}`;
+	// T-94: title the session from its first-turn prompt, matching the
+	// regular-chat auto-title behavior (T-78). Fire-and-forget — never
+	// delays the actual agent turn below.
+	maybeAutoTitleSession(bridge, session, prompt);
 	const timeoutMinutes = resolveAutoWorkTimeoutMinutes(task.priority, config);
 	return await finalizeAutoWorkRun({
 		runId,
