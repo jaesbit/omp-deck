@@ -17,8 +17,6 @@ import type {
 	SetAutoWorkConfigRequest,
 	SetAutoWorkGlobalConfigRequest,
 	NotificationLevel,
-	StartCommand,
-	SessionTitlePromptResponse,
 	TaskPriority,
 	WorkspaceEntry,
 } from "@omp-deck/protocol";
@@ -1069,9 +1067,8 @@ function TaskRewriteModelCard() {
 /**
  * Card within GeneralSection (T-78) — shows the configured model for
  * server-side session-title generation and lets the user pick or clear it.
- * `null` (the default) means the feature is off — the agent-side self-
- * titling instruction in `~/.omp/agent/commands/start.md` remains the sole
- * mechanism, unchanged. Mirrors `TaskRewriteModelCard` above exactly.
+ * `null` (the default) means the feature is off, while the base prelude
+ * remains available to every session. Mirrors `TaskRewriteModelCard` above.
  */
 function InternalTaskModelCard() {
 	const [model, setModel] = useState<ModelRef | null>(null);
@@ -1151,94 +1148,6 @@ function InternalTaskModelCard() {
 	);
 }
 
-function SessionTitlePromptCard() {
-	const [data, setData] = useState<SessionTitlePromptResponse | null>(null);
-	const [draft, setDraft] = useState("");
-	const [loading, setLoading] = useState(true);
-	const [saving, setSaving] = useState(false);
-	const [error, setError] = useState<string | undefined>();
-	const [status, setStatus] = useState<string | undefined>();
-
-	async function refresh(): Promise<void> {
-		try {
-			const next = await api.getSessionTitlePrompt();
-			setData(next);
-			setDraft(next.effective);
-			setError(undefined);
-		} catch (e) {
-			setError(e instanceof Error ? e.message : String(e));
-		} finally {
-			setLoading(false);
-		}
-	}
-
-	useEffect(() => {
-		void refresh();
-	}, []);
-
-	const usingOverride = data ? data.override !== null : false;
-	const dirty = data ? draft !== data.effective : false;
-
-	async function save(): Promise<void> {
-		setSaving(true);
-		try {
-			const next = await api.setSessionTitlePrompt(draft);
-			setData(next);
-			setDraft(next.effective);
-			setStatus("Saved. New titles will use this prompt.");
-			setError(undefined);
-			window.setTimeout(() => setStatus(undefined), 3000);
-		} catch (e) {
-			setError(e instanceof Error ? e.message : String(e));
-		} finally {
-			setSaving(false);
-		}
-	}
-
-	async function resetToDefault(): Promise<void> {
-		setSaving(true);
-		try {
-			const next = await api.setSessionTitlePrompt(null);
-			setData(next);
-			setDraft(next.default);
-			setStatus("Override cleared. New titles will use the bundled default.");
-			setError(undefined);
-			window.setTimeout(() => setStatus(undefined), 3000);
-		} catch (e) {
-			setError(e instanceof Error ? e.message : String(e));
-		} finally {
-			setSaving(false);
-		}
-	}
-
-	return (
-		<div className="overflow-hidden rounded-md border border-line bg-paper">
-			<div className="border-b border-line bg-paper-2 px-3 py-2">
-				<div className="flex items-center gap-2">
-					<div className="meta">Session title prompt</div>
-					{usingOverride ? <Badge tone="accent">override</Badge> : <Badge tone="muted">default</Badge>}
-				</div>
-				<p className="mt-1 text-xs text-ink-3">
-					Sent directly to the selected internal model with the first message. It does not create an agent session or load its system instructions.
-				</p>
-			</div>
-			<div className="space-y-3 p-4">
-				{error ? <div className="rounded-md border border-danger/30 bg-danger/10 px-3 py-2 font-mono text-xs text-danger">{error}</div> : null}
-				{status ? <div className="rounded-md border border-success/30 bg-success/10 px-3 py-2 font-mono text-xs text-success">{status}</div> : null}
-				{loading ? <div className="text-sm text-ink-3">Loading...</div> : (
-					<>
-						<textarea value={draft} onChange={(e) => setDraft(e.target.value)} spellCheck={false} className="block min-h-[200px] w-full resize-y rounded-md border border-line bg-paper-2 px-3 py-2 font-mono text-xs leading-relaxed text-ink" />
-						<div className="flex flex-wrap items-center gap-2">
-							<Button size="sm" onClick={() => void save()} disabled={saving || !dirty}><Save className="h-3.5 w-3.5" />Save</Button>
-							<Button size="sm" variant="outline" onClick={() => void resetToDefault()} disabled={saving || !usingOverride}><RotateCcw className="h-3.5 w-3.5" />Reset to default</Button>
-							{dirty ? <span className="font-mono text-2xs text-warn">Unsaved changes</span> : null}
-						</div>
-					</>
-				)}
-			</div>
-		</div>
-	);
-}
 
 function SettingsModelPickerModal({
 	title,
@@ -2561,12 +2470,10 @@ function InternalPromptsSection() {
 			<div>
 				<h1 className="text-xl font-semibold tracking-tight">Internal prompts</h1>
 				<p className="mt-1 max-w-3xl text-sm text-ink-3">
-					Configure the base prompt, automatic title prompt, startup workflow, and maintenance gate. Changes apply to new sessions or the next matching invocation.
+					Configure the base prompt, automatic title prompt, and maintenance gate. Changes apply to new sessions or the next matching invocation.
 				</p>
 			</div>
 			<PreludeCard />
-			<SessionTitlePromptCard />
-			<StartCommandCard />
 			<MaintenanceGateCard />
 		</div>
 	);
@@ -2639,12 +2546,7 @@ function PreludeCard() {
 					<div className="meta">Prelude</div>
 					{usingOverride ? <Badge tone="accent">override</Badge> : <Badge tone="muted">default</Badge>}
 				</div>
-				<p className="mt-1 text-xs text-ink-3">
-					Prepended to every session&rsquo;s system prompt at{" "}
-					<code className="font-mono">createAgentSession</code>. Imperatives belong
-					in <code className="font-mono">/start</code>, not here&mdash; the prelude
-					is reference material that the orchestrator can rely on.
-				</p>
+				<p className="mt-1 text-xs text-ink-3">Prepended to every session&rsquo;s system prompt at <code className="font-mono">createAgentSession</code>. Operational instructions live here, so every new session can follow them.</p>
 				<div className="mt-1 font-mono text-2xs text-ink-3">
 					{data?.path ?? "..."}
 				</div>
@@ -2695,118 +2597,6 @@ function PreludeCard() {
 	);
 }
 
-function StartCommandCard() {
-	const [data, setData] = useState<StartCommand | null>(null);
-	const [description, setDescription] = useState("");
-	const [body, setBody] = useState("");
-	const [loading, setLoading] = useState(true);
-	const [saving, setSaving] = useState(false);
-	const [error, setError] = useState<string | undefined>();
-	const [status, setStatus] = useState<string | undefined>();
-
-	async function refresh(): Promise<void> {
-		try {
-			const next = await orientationApi.getStartCommand();
-			setData(next);
-			setDescription(next.description);
-			setBody(next.body);
-			setError(undefined);
-		} catch (e) {
-			setError(String(e));
-		} finally {
-			setLoading(false);
-		}
-	}
-
-	useEffect(() => {
-		void refresh();
-	}, []);
-
-	const dirty = data ? description !== data.description || body !== data.body : false;
-
-	async function save(): Promise<void> {
-		setSaving(true);
-		try {
-			const next = await orientationApi.putStartCommand({ description, body });
-			setData(next);
-			setDescription(next.description);
-			setBody(next.body);
-			setStatus("Saved. Next /start invocation will use this body.");
-			setError(undefined);
-			window.setTimeout(() => setStatus(undefined), 3000);
-		} catch (e) {
-			setError(String(e));
-		} finally {
-			setSaving(false);
-		}
-	}
-
-	return (
-		<div className="overflow-hidden rounded-md border border-line bg-paper">
-			<div className="border-b border-line bg-paper-2 px-3 py-2">
-				<div className="flex items-center gap-2">
-					<div className="meta">/start orchestrator</div>
-					{data?.exists ? <Badge tone="default">on disk</Badge> : <Badge tone="warn">missing</Badge>}
-				</div>
-				<p className="mt-1 text-xs text-ink-3">
-					First user message fired on session boot. Re-read every invocation,
-					so saves take effect immediately. Numbered procedures here outrank
-					prelude imperatives by recency&mdash; put DO-THIS instructions in this
-					body, not in the prelude above.
-				</p>
-				<div className="mt-1 font-mono text-2xs text-ink-3">
-					{data?.path ?? "..."}
-				</div>
-			</div>
-			<div className="space-y-3 p-4">
-				{error ? (
-					<div className="rounded-md border border-danger/30 bg-danger/10 px-3 py-2 font-mono text-xs text-danger">
-						{error}
-					</div>
-				) : null}
-				{status ? (
-					<div className="rounded-md border border-success/30 bg-success/10 px-3 py-2 font-mono text-xs text-success">
-						{status}
-					</div>
-				) : null}
-				{loading ? (
-					<div className="text-sm text-ink-3">Loading...</div>
-				) : (
-					<>
-						<label className="block space-y-1">
-							<span className="meta">description</span>
-							<input
-								type="text"
-								value={description}
-								onChange={(e) => setDescription(e.target.value)}
-								placeholder="One-line summary (frontmatter description:)"
-								className="block w-full rounded-md border border-line bg-paper-2 px-3 py-2 font-mono text-xs text-ink"
-							/>
-						</label>
-						<label className="block space-y-1">
-							<span className="meta">body</span>
-							<textarea
-								value={body}
-								onChange={(e) => setBody(e.target.value)}
-								spellCheck={false}
-								className="block min-h-[280px] w-full resize-y rounded-md border border-line bg-paper-2 px-3 py-2 font-mono text-xs leading-relaxed text-ink"
-							/>
-						</label>
-						<div className="flex flex-wrap items-center gap-2">
-							<Button size="sm" onClick={() => void save()} disabled={saving || !dirty}>
-								<Save className="h-3.5 w-3.5" />
-								Save
-							</Button>
-							{dirty ? (
-								<span className="font-mono text-2xs text-warn">Unsaved changes</span>
-							) : null}
-						</div>
-					</>
-				)}
-			</div>
-		</div>
-	);
-}
 
 function MaintenanceGateCard() {
 	const [data, setData] = useState<MaintenanceGateState | null>(null);

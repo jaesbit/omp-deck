@@ -49,8 +49,8 @@ import type { AgentBridge, SessionHandle } from "../bridge/types.ts";
 import { loadConfig } from "../config.ts";
 import { buildSessionUrl } from "../deck-links.ts";
 import { getAutoWorkConfig } from "../db/auto-work.ts";
-import { resolveKbRoot } from "../kb-service.ts";
-import { AUTO_WORK_RULES_BODY, BRANCH_NAMING_RULES_BODY } from "../kb-templates.ts";
+import { resolveIntegrationPrompt, type IntegrationPromptName } from "../integration-prompts.ts";
+import { KbService, resolveKbRoot } from "../kb-service.ts";
 import { completeAutoWorkRun, listAutoWorkRuns, startAutoWorkRun } from "../db/auto-work-runs.ts";
 import { getDeckBaseUrl as getServerDeckBaseUrl } from "../db/server-settings.ts";
 import { findStateByName, getTask, listTasks, moveTask, updateTask } from "../db/tasks.ts";
@@ -378,24 +378,18 @@ export interface RunGlobalAutoWorkCycleOptions extends RunAutoWorkCycleOptions {
 	selectTask?: GlobalTaskSelector;
 }
 
-/**
- * Reads `kb/rules/auto-work.md` off disk (same disk-first, in-process-copy-
- * as-fallback pattern `generateBranchSlugWithModel` below uses for
- * `kb/rules/branch-naming.md`). Passed as `systemPromptAppend` to every
- * auto-work task-execution session — both a fresh `bridge.createSession()`
- * (`runAutoWorkCycle`) and a post-restart `bridge.resumeSession()`
- * (`resolveRunningSessionHandle`) — so the agent actually sees the
- * commit/PR/Validate-column workflow instead of just the normal `kb/system`
- * prelude (T-82).
- */
-function resolveAutoWorkRulesBody(): string {
-	const rulesPath = path.join(resolveKbRoot(), "rules", "auto-work.md");
-	try {
-		return fs.readFileSync(rulesPath, "utf8");
-	} catch {
-		return AUTO_WORK_RULES_BODY;
+let integrationKb: KbService | undefined;
+let integrationKbRoot: string | undefined;
+
+function resolveAutoWorkIntegrationPrompt(name: IntegrationPromptName): Promise<string> {
+	const root = resolveKbRoot();
+	if (!integrationKb || integrationKbRoot !== root) {
+		integrationKb = new KbService({ root });
+		integrationKbRoot = root;
 	}
+	return resolveIntegrationPrompt(integrationKb, name);
 }
+
 
 /**
  * Runs exactly one auto-work cycle for `cwd`: pre-flight checks, task
@@ -520,8 +514,7 @@ export async function runAutoWorkCycle(
 
 	const session = await bridge.createSession({
 		cwd,
-		suppressAutoStart: true,
-		systemPromptAppend: resolveAutoWorkRulesBody(),
+		systemPromptAppend: await resolveAutoWorkIntegrationPrompt("auto-work"),
 		...(model ? { model } : {}),
 	});
 
@@ -558,41 +551,6 @@ export async function runAutoWorkCycle(
 		usageLookup,
 		startPct: subscriptionPctUsed,
 	});
-	activeRunIds.add(runId);
-	try {
-		const autoWorkRulesPath = path.join(resolveKbRoot(), "rules", "auto-work.md");
-		let autoWorkRules: string;
-		try {
-			autoWorkRules = fs.readFileSync(autoWorkRulesPath, "utf8");
-		} catch {
-			autoWorkRules = AUTO_WORK_RULES_BODY;
-		}
-		// `kb/rules/*.md` is not auto-inlined into the session's system prompt
-		// (only `kb/system/*.md` is, per T-70) — prepend it to the prompt text
-		// itself so the workflow rules (commit format, PR convention,
-		// Validate-not-Done) reach the agent alongside the normal prelude.
-		const prompt = `${autoWorkRules}\n\n---\n\nTrabaja en T-${task.displayId}: ${task.title}\n\n(contexto completo disponible via GET /api/tasks/${task.id})\n\nEl worktree para esta tarea ya está configurado en \`${worktreePath}\` (rama \`auto-work/t${task.displayId}-${branchSlug}\`). Usa ese directorio para todos los commits y cambios de fichero.`;
-		await session.prompt(prompt);
-
-		const timeoutMinutes = resolveAutoWorkTimeoutMinutes(task.priority, config);
-		return await finalizeAutoWorkRun({
-			runId,
-			task,
-			session,
-			worktreePath,
-			timeoutMinutes,
-			resolveDeckBaseUrl,
-			createPullRequest,
-			notify,
-		});
-	} catch (err) {
-		const failureReason = `session prompt failed: ${String(err)}`;
-		failAutoWorkRun(runId, task.id, failureReason);
-		await notify({ kind: "task_failed", displayId: task.displayId, reason: failureReason });
-		return { outcome: "failed", taskId: task.id, runId, sessionId: session.sessionId, worktreePath, failureReason };
-	} finally {
-		activeRunIds.delete(runId);
-	}
 }
 
 // ─── Small IO helpers ───────────────────────────────────────────────────────
@@ -840,7 +798,7 @@ async function resolveRunningSessionHandle(
 
 	const persisted = await findPersistedAutoWorkSession(bridge, run);
 	if (!persisted) return undefined;
-	return bridge.resumeSession({ sessionPath: persisted.path, systemPromptAppend: resolveAutoWorkRulesBody() });
+	return bridge.resumeSession({ sessionPath: persisted.path, systemPromptAppend: await resolveAutoWorkIntegrationPrompt("auto-work") });
 }
 
 /**
@@ -1131,16 +1089,11 @@ function slugifyTaskTitle(title: string): string {
 }
 
 /**
- * Ask a short-lived agent session — the global `taskSelectionModel` reused
- * across every internal auto-work decision (T-77) — for a short English
- * kebab-case branch-name slug. The session's system prompt is entirely
- * replaced by `kb/rules/branch-naming.md`'s content (`systemPromptOverride`)
- * instead of the normal `kb/system` prelude, so this stays a narrow, cheap
- * call that runs on every cycle. Any model/session failure or unusable
- * response falls back to `slugifyTaskTitle(task.title)` — the exact naive
- * slug the engine always produced before this existed, so a misconfigured
- * or unreachable model degrades to the old behavior instead of blocking
- * the cycle.
+ * Ask a short-lived internal session for an English kebab-case branch-name slug.
+ * Its system prompt is the `branch-naming` integration, not the normal
+ * `kb/system` prelude. Any model/session failure or unusable response falls
+ * back to `slugifyTaskTitle(task.title)`, preserving the deterministic behavior
+ * that existed before model-backed naming.
  */
 export async function generateBranchSlugWithModel(
 	bridge: AgentBridge,
@@ -1153,17 +1106,10 @@ export async function generateBranchSlugWithModel(
 
 	let session: SessionHandle | undefined;
 	try {
-		const rulesPath = path.join(resolveKbRoot(), "rules", "branch-naming.md");
-		let rules: string;
-		try {
-			rules = fs.readFileSync(rulesPath, "utf8");
-		} catch {
-			rules = BRANCH_NAMING_RULES_BODY;
-		}
 		session = await bridge.createSession({
 			cwd,
-			suppressAutoStart: true,
-			systemPromptOverride: rules,
+			systemPromptOverride: await resolveAutoWorkIntegrationPrompt("branch-naming"),
+			internal: true,
 			...(model ? { model } : {}),
 		});
 		const s = session;
@@ -1511,7 +1457,8 @@ async function selectTaskWithModel(
 	try {
 		session = await bridge.createSession({
 			cwd: candidates[0]!.workspaceCwd,
-			suppressAutoStart: true,
+			systemPromptOverride: await resolveAutoWorkIntegrationPrompt("auto-work-task-selection"),
+			internal: true,
 			...(model ? { model } : {}),
 		});
 		const s = session;
@@ -1585,7 +1532,8 @@ export async function decideSqueezeTiming(
 	try {
 		session = await bridge.createSession({
 			cwd: input.workspaceCwd,
-			suppressAutoStart: true,
+			systemPromptOverride: await resolveAutoWorkIntegrationPrompt("auto-work-squeeze"),
+			internal: true,
 			...(model ? { model } : {}),
 		});
 		const s = session;

@@ -16,12 +16,6 @@ export interface Config {
 	dbPath: string;
 	/** Absolute path to the uploads root (images pasted into task bodies). */
 	uploadsRoot: string;
-	/**
-	 * Prompt to fire automatically on every NEW session once a WS subscriber
-	 * attaches. Empty string or null disables. Default: "/start" (expands to the
-	 * ~/.omp/agent/commands/start.md slash command if present).
-	 */
-	autoStartCommand: string | null;
 }
 
 export function parseInt10(value: string | undefined, fallback: number): number {
@@ -30,15 +24,6 @@ export function parseInt10(value: string | undefined, fallback: number): number 
 	return Number.isFinite(n) ? n : fallback;
 }
 
-export function parseAutoStart(value: string | undefined): string | null {
-	// Default is OFF on a fresh install: a new session lands on an empty
-	// composer waiting for the user's first prompt. Opt-in by setting the env
-	// var (typically to `/start` after creating `~/.omp/agent/commands/start.md`).
-	if (value === undefined) return null;
-	const trimmed = value.trim();
-	if (trimmed === "" || trimmed === "0" || trimmed.toLowerCase() === "false") return null;
-	return trimmed;
-}
 
 export function splitList(value: string | undefined): string[] {
 	if (!value) return [];
@@ -102,8 +87,5 @@ export function loadConfig(): Config {
 					"uploads",
 				),
 		),
-		// Set OMP_DECK_AUTO_START="" or "0" to disable, or to any other prompt
-		// string to override the default "/start" slash-command invocation.
-		autoStartCommand: parseAutoStart(process.env.OMP_DECK_AUTO_START),
 	};
 }

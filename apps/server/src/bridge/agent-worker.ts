@@ -11,7 +11,6 @@ import { InProcessAgentBridge } from "./in-process.ts";
 import { isWorkerRequestFrame } from "./worker-protocol.ts";
 import type {
 	SerializedWorkerError,
-	WorkerBridgeOptions,
 	WorkerOutboundFrame,
 	WorkerRequestFrame,
 	WorkerSessionMetadata,
@@ -73,15 +72,11 @@ export async function runAgentWorker(): Promise<void> {
 	};
 
 	const initialize = async (
-		bridgeOptions: WorkerBridgeOptions,
 		startSession: (workerBridge: InProcessAgentBridge) => Promise<SessionHandle>,
 	): Promise<WorkerSessionMetadata> => {
 		if (bridge || handle) throw new Error("agent worker supports exactly one root session");
 		await prepareRuntime();
-		bridge = new InProcessAgentBridge({
-			idleTimeoutMs: 0,
-			autoStartCommand: bridgeOptions.autoStartCommand ?? "",
-		});
+		bridge = new InProcessAgentBridge({ idleTimeoutMs: 0 });
 		handle = await startSession(bridge);
 		unsubscribeEvents = handle.subscribe((event) => {
 			send({ type: "event", channel: "session", event });
@@ -96,12 +91,12 @@ export async function runAgentWorker(): Promise<void> {
 	const dispatch = async (frame: WorkerRequestFrame): Promise<unknown> => {
 		switch (frame.method) {
 			case "bridge.createSession": {
-				const [opts, bridgeOptions] = frame.args;
-				return initialize(bridgeOptions, (workerBridge) => workerBridge.createSession(opts));
+				const [opts] = frame.args;
+				return initialize((workerBridge) => workerBridge.createSession(opts));
 			}
 			case "bridge.resumeSession": {
-				const [opts, bridgeOptions] = frame.args;
-				return initialize(bridgeOptions, (workerBridge) => workerBridge.resumeSession(opts));
+				const [opts] = frame.args;
+				return initialize((workerBridge) => workerBridge.resumeSession(opts));
 			}
 			case "bridge.listModels":
 				return requireBridge().listModels(frame.args[0]);

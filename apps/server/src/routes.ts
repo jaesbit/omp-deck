@@ -26,6 +26,7 @@ import type { AgentBridge, SessionHandle } from "./bridge/types.ts";
 import { getWorkspacePreference, listWorkspacePreferences, setWorkspacePreference } from "./db/workspace-preferences.ts";
 import { getTask } from "./db/tasks.ts";
 import { getTaskRewriteModel } from "./db/server-settings.ts";
+import { resolveIntegrationPrompt } from "./integration-prompts.ts";
 import { waitForAutoWorkSessionTerminal } from "./auto-work/engine.ts";
 import { getModelCatalogOverlay } from "./model-catalog-overlay.ts";
 import { listSessionMonitor } from "./session-monitor.ts";
@@ -264,7 +265,6 @@ export function buildRouter(
 						cwd,
 						...(resolvedModel ? { model: resolvedModel } : {}),
 						...(body.planMode ? { planMode: true } : {}),
-						...(body.suppressAutoStart ? { suppressAutoStart: true } : {}),
 						...(resolvedThinking ? { thinking: resolvedThinking } : {}),
 					});
 			const resp: CreateSessionResponse = {
@@ -421,7 +421,8 @@ export function buildRouter(
 		try {
 			session = await bridge.createSession({
 				cwd,
-				suppressAutoStart: true,
+				systemPromptOverride: await resolveIntegrationPrompt(kb, "task-rewrite"),
+				internal: true,
 				...(model ? { model } : {}),
 			});
 			const terminal = waitForAutoWorkSessionTerminal(session, 60_000);

@@ -123,12 +123,12 @@ export function computeUsageRollup(messages: AgentMessageJson[]): UsageRollupWir
 /**
  * Builds the `systemPrompt` array handed to the SDK's `createAgentSession`:
  * the prelude (or `systemPromptOverride`), then an optional
- * `systemPromptAppend` block (T-82 — e.g. the auto-work engine's
- * `kb/rules/auto-work.md`), then the SDK's own default blocks. Order is the
- * documented `CreateSessionOpts`/`ResumeSessionOpts` contract:
- * `[prelude, append, ...defaults]`. Extracted to a pure function — as
- * opposed to inlining at both call sites below — so it's directly unit
- * testable without mocking `createAgentSession` itself.
+ * `systemPromptAppend` block (for example the auto-work integration's
+ * `kb/integrations/auto-work.md`), then the SDK's own default blocks. Order is
+ * the documented `CreateSessionOpts`/`ResumeSessionOpts` contract:
+ * `[prelude, append, ...defaults]`. Extracted to a pure function — as opposed
+ * to inlining at both call sites below — so it's directly unit testable without
+ * mocking `createAgentSession` itself.
  */
 export function buildSessionSystemPrompt(preludeOrOverride: string, append: string | undefined, defaults: string[]): string[] {
 	return [preludeOrOverride, ...(append ? [append] : []), ...defaults];
@@ -175,9 +175,6 @@ export class InProcessAgentBridge implements AgentBridge {
 	private reaperTimer: ReturnType<typeof setInterval> | null = null;
 	private idleTimeoutMs: number;
 	private readonly reapIntervalMs: number;
-	private autoStartCommand: string | null;
-	/** Prompts queued to fire as soon as the named session gets its first WS subscriber. */
-	private pendingAutoPrompts = new Map<string, string>();
 	/** Shared SDK model registry, lazily constructed on first session create. */
 	private modelRegistry: ModelRegistry | undefined;
 	private modelRegistryPromise: Promise<ModelRegistry> | undefined;
@@ -185,11 +182,9 @@ export class InProcessAgentBridge implements AgentBridge {
 	constructor(opts: {
 		idleTimeoutMs?: number;
 		reapIntervalMs?: number;
-		autoStartCommand?: string | null;
 	} = {}) {
 		this.idleTimeoutMs = opts.idleTimeoutMs ?? 15 * 60_000; // 15 min default
 		this.reapIntervalMs = opts.reapIntervalMs ?? 60_000; // scan once a minute
-		this.autoStartCommand = opts.autoStartCommand ?? "/start";
 		if (this.idleTimeoutMs > 0) this.startReaper();
 	}
 
@@ -204,11 +199,16 @@ export class InProcessAgentBridge implements AgentBridge {
 			// Skip eval-tool Python warmup on session create. On Windows this otherwise
 			// flashes a python.exe console window each turn-zero; on demand spawn is fine.
 			skipPythonPreflight: true,
+			...(opts.internal
+				? {
+					disableExtensionDiscovery: true,
+					enableMCP: false,
+					enableLsp: false,
+				}
+				: {}),
 			systemPrompt: (defaults) => buildSessionSystemPrompt(opts.systemPromptOverride ?? getEffectivePrelude(), opts.systemPromptAppend, defaults),
-			// Tell the SDK this session has a UI — gates the `ask` tool registration
-			// and any extension that calls `ctx.ui.*`. The actual ExtensionUIContext
-			// is installed via `setToolUIContext(...)` below.
-			hasUI: true,
+			// Backend one-shots never surface or wait on interactive UI.
+			hasUI: !opts.internal,
 			// `opts.model` is a ModelRef ({provider,id}); the SDK's `model` option expects a
 			// fully-shaped Model — resolve via the registry when present.
 			...(opts.model
@@ -230,13 +230,10 @@ export class InProcessAgentBridge implements AgentBridge {
 		if (ext?.extensions?.length) {
 			log.info(`extension paths: ${ext.extensions.map(e => (e as { path?: string }).path ?? "<unknown>").join(" | ")}`);
 		}
-		await this.wireExtensionRunner(session);
-		const handle = await this.attach(session, opts.cwd, sessionManager, result.setToolUIContext);
+		if (!opts.internal) await this.wireExtensionRunner(session);
+		const handle = await this.attach(session, opts.cwd, sessionManager, result.setToolUIContext, !opts.internal);
 		if (opts.planMode) {
 			await handle.setPlanMode(true);
-		}
-		if (!opts.suppressAutoStart && this.autoStartCommand) {
-			this.pendingAutoPrompts.set(handle.sessionId, this.autoStartCommand);
 		}
 		log.info(`created session ${handle.sessionId} cwd=${opts.cwd}`);
 		return handle;
@@ -264,7 +261,7 @@ export class InProcessAgentBridge implements AgentBridge {
 			hasUI: true,
 		});
 		const session = result.session;
-		const handle = await this.attach(session, cwd, sessionManager, result.setToolUIContext);
+		const handle = await this.attach(session, cwd, sessionManager, result.setToolUIContext, true);
 		await this.wireExtensionRunner(session);
 		log.info(`resumed session ${handle.sessionId} from ${opts.sessionPath}`);
 		return handle;
@@ -375,7 +372,6 @@ export class InProcessAgentBridge implements AgentBridge {
 		);
 		await Promise.all(disposals);
 		this.active.clear();
-		this.pendingAutoPrompts.clear();
 	}
 
 	/** Called by the WS hub when a connection subscribes. Pin the session against the reaper. */
@@ -386,20 +382,6 @@ export class InProcessAgentBridge implements AgentBridge {
 		a.subscribers.add(connectionId);
 		a.lastActivityAt = Date.now();
 
-		// First subscriber attached — flush any queued auto-prompt. Defer one
-		// macrotask so the WS layer has flushed the `subscribed` snapshot frame
-		// before the agent starts emitting `agent_start` / `message_*`.
-		if (wasEmpty) {
-			const pending = this.pendingAutoPrompts.get(sessionId);
-			if (pending !== undefined) {
-				this.pendingAutoPrompts.delete(sessionId);
-				setTimeout(() => {
-					a.handle.prompt(pending).catch((err) =>
-						log.warn(`auto-start prompt failed for ${sessionId}`, err),
-					);
-				}, 50);
-			}
-		}
 	}
 
 	/** Called by the WS hub on unsubscribe / connection close. */
@@ -418,10 +400,6 @@ export class InProcessAgentBridge implements AgentBridge {
 	}
 
 	applyEnvUpdate(update: RuntimeEnvUpdate): void {
-		if (update.autoStartCommand !== undefined) {
-			this.autoStartCommand = update.autoStartCommand;
-			log.info(`hot-applied autoStartCommand`, { enabled: Boolean(update.autoStartCommand) });
-		}
 		if (update.idleTimeoutMs !== undefined && update.idleTimeoutMs !== this.idleTimeoutMs) {
 			this.idleTimeoutMs = update.idleTimeoutMs;
 			if (this.reaperTimer) {
@@ -562,13 +540,12 @@ export class InProcessAgentBridge implements AgentBridge {
 		cwd: string,
 		sessionManager: SessionManager,
 		setToolUIContext: CreateAgentSessionResult["setToolUIContext"],
+		hasUI: boolean,
 	): Promise<InProcessSessionHandle> {
 		const sessionId = (session as any).sessionId as string;
 		const uiBridge = new ExtensionUIBridge(sessionId);
-		// Wire the per-session UI context into the SDK's tool-context store so
-		// `AskTool.execute(...)` (and any extension calling `ctx.ui.*`) reaches
-		// the deck UI via WebSocket frames.
-		setToolUIContext(uiBridge, true);
+		// Internal backend sessions expose no interactive UI to SDK tools.
+		setToolUIContext(uiBridge, hasUI);
 
 		const planBridge = new PlanModeBridge({
 			sessionId,
@@ -595,7 +572,6 @@ export class InProcessAgentBridge implements AgentBridge {
 				goalBridge.dispose();
 				planBridge.dispose();
 				this.active.delete(sessionId);
-				this.pendingAutoPrompts.delete(sessionId);
 			},
 		});
 
@@ -1401,7 +1377,7 @@ export class InProcessSessionHandle implements SessionHandle {
 		// and defaults `source` to `"auto"`. Auto-titled names are silently
 		// overwritten the next time the input-controller's title generator fires
 		// (typically after the first agent turn completes), so a user-supplied
-		// rename made before that point would disappear once `/start` finishes.
+		// rename made before that point would disappear when the next title update fires.
 		// Pass `"user"` so the name takes permanent precedence per SDK contract.
 		const s = this.session as unknown as {
 			setSessionName?: (n: string, source?: "auto" | "user") => Promise<boolean> | boolean;

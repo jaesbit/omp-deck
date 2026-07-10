@@ -26,6 +26,7 @@ beforeEach(() => {
 
 	// Seed a small wiki.
 	mkdirSync(path.join(kbRoot, "system"), { recursive: true });
+	mkdirSync(path.join(kbRoot, "integrations"), { recursive: true });
 	mkdirSync(path.join(kbRoot, "tools"), { recursive: true });
 	writeFileSync(
 		path.join(kbRoot, "system", "working-voice.md"),
@@ -38,6 +39,16 @@ beforeEach(() => {
 		"utf8",
 	);
 	writeFileSync(path.join(kbRoot, "tools", "x.md"), "x\n", "utf8");
+	writeFileSync(
+		path.join(kbRoot, "integrations", "auto-work.md"),
+		"## Shared Auto Work\n\nCommit before requesting review.",
+		"utf8",
+	);
+	writeFileSync(
+		path.join(kbRoot, "integrations", "auto-work.user.md"),
+		"## Local Auto Work\n\nUse the staging repository.",
+		"utf8",
+	);
 
 	InternalUrlRouter.resetForTests();
 	router = InternalUrlRouter.instance();
@@ -60,6 +71,18 @@ describe("kb:// resolution", () => {
 		expect(res.contentType).toBe("text/markdown");
 		expect(res.immutable).toBe(true);
 		expect(res.sourcePath?.endsWith(path.join("system", "working-voice.md"))).toBe(true);
+	});
+
+	test("resolves an integration's base instructions followed by its user layer", async () => {
+		const res = await router.resolve("kb://integrations/auto-work.md");
+		expect(res.content).toBe(
+			"## Shared Auto Work\n\nCommit before requesting review.\n\n## Local Auto Work\n\nUse the staging repository.",
+		);
+	});
+
+	test("resolves an explicit integration user layer without re-including the base instructions", async () => {
+		const res = await router.resolve("kb://integrations/auto-work.user.md");
+		expect(res.content).toBe("## Local Auto Work\n\nUse the staging repository.");
 	});
 
 	test("UTF-8 content (em-dash etc.) round-trips byte-exact", async () => {
