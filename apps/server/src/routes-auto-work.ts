@@ -36,10 +36,10 @@ import type { Config } from "./config.ts";
 import { isCwdAllowed } from "./routes-fs.ts";
 import { getAutoWorkConfig, setAutoWorkConfig } from "./db/auto-work.ts";
 import { getAutoWorkGlobalConfig, setAutoWorkGlobalConfig } from "./db/auto-work-global.ts";
-import { getAutoWorkCostEstimate, getAutoWorkRun, listAutoWorkRuns } from "./db/auto-work-runs.ts";
+import { completeAutoWorkRun, getAutoWorkCostEstimate, getAutoWorkRun, listAutoWorkRuns } from "./db/auto-work-runs.ts";
 import { getDeckBaseUrl as getServerDeckBaseUrl } from "./db/server-settings.ts";
 import { getTask, updateTask } from "./db/tasks.ts";
-import { reconcileInactiveAutoWorkRuns, runGlobalAutoWorkCycle, createPullRequestViaGh } from "./auto-work/engine.ts";
+import { appendAgentHistoryEntry, reconcileInactiveAutoWorkRuns, runGlobalAutoWorkCycle, createPullRequestViaGh } from "./auto-work/engine.ts";
 import type { RunAutoWorkCycleOptions } from "./auto-work/engine.ts";
 import { buildSessionUrl } from "./deck-links.ts";
 import { broadcastBus } from "./broadcast-bus.ts";
@@ -50,7 +50,7 @@ import { getModelCatalogOverlay } from "./model-catalog-overlay.ts";
 const log = logger("routes:auto-work");
 
 const TASK_PRIORITIES: TaskPriority[] = ["P0", "P1", "P2", "P3", "P4", "P5"];
-const RUN_STATUSES: AutoWorkRunStatus[] = ["running", "completed", "failed", "timed_out"];
+const RUN_STATUSES: AutoWorkRunStatus[] = ["running", "completed", "completed_pr_failed", "failed", "timed_out"];
 
 export function buildAutoWorkRouter(bridge: AgentBridge, config: Config, cycleOptions: RunAutoWorkCycleOptions = {}): Hono {
 	const app = new Hono();
@@ -146,15 +146,19 @@ export function buildAutoWorkRouter(bridge: AgentBridge, config: Config, cycleOp
 
 	// ─── PR retry ─────────────────────────────────────────────────────────────
 
-	// Retries `gh pr create` for a completed run that ended without a PR.
-	// Replaces the "PR creation failed" marker in the task body if present;
-	// otherwise appends a new PR note. Safe to call when a PR already exists:
-	// gh will fail and the error propagates as a 500 so the UI can display it.
+	// Retries `gh pr create` for a run whose implementation completed but PR
+	// creation failed (`status: "completed_pr_failed"`) — also accepts a
+	// plain `"completed"` run for pre-T-85 historical rows, since `gh` fails
+	// harmlessly if a PR already exists, so this stays safe to call twice.
+	// Success flips the run back to `status: "completed"`, clears
+	// `failureReason`, and appends the outcome to the task's Agent History
+	// section rather than rewriting the original failure note in place, so
+	// the failed attempt stays in the record (T-85).
 	app.post("/auto-work/runs/:id/create-pr", async (c) => {
 		const runId = c.req.param("id");
 		const run = getAutoWorkRun(runId);
 		if (!run) return c.json({ error: "run not found" }, 404);
-		if (run.status !== "completed")
+		if (run.status !== "completed" && run.status !== "completed_pr_failed")
 			return c.json({ error: `run is not completed (status: ${run.status})` }, 400);
 
 		const task = getTask(run.taskId);
@@ -171,13 +175,16 @@ export function buildAutoWorkRouter(bridge: AgentBridge, config: Config, cycleOp
 				body: `Auto Work completed T-${task.displayId}: ${task.title}\n\nSession: ${sessionUrl}`,
 			});
 
-			// Replace the "PR creation failed" marker in the task body, if present.
-			const failedPattern = /·\s*PR creation failed — open manually[^\n]*/;
-			const newNote = `· PR #${pr.number}`;
-			const updatedBody = failedPattern.test(task.body)
-				? task.body.replace(failedPattern, newNote)
-				: `${task.body}\n\n_(PR retry: #${pr.number})_`;
-			updateTask(task.id, { body: updatedBody });
+			completeAutoWorkRun(runId, {
+				status: "completed",
+				inputTokens: run.inputTokens,
+				outputTokens: run.outputTokens,
+				pctConsumed: run.pctConsumed,
+				failureReason: null,
+			});
+			updateTask(task.id, {
+				body: appendAgentHistoryEntry(task.body, runId, new Date().toISOString(), `PR retry succeeded: PR #${pr.number}.`),
+			});
 
 			broadcastBus.broadcast({ type: "tasks_changed" });
 			broadcastBus.broadcast({ type: "auto_work_runs_changed" });
@@ -185,8 +192,9 @@ export function buildAutoWorkRouter(bridge: AgentBridge, config: Config, cycleOp
 			log.info(`run ${runId}: PR retry opened PR #${pr.number} (${pr.url}) for T-${task.displayId}`);
 			return c.json({ number: pr.number, url: pr.url });
 		} catch (err) {
+			const message = err instanceof Error ? err.message : String(err);
 			log.error(`run ${runId}: PR retry failed for T-${task.displayId}`, err);
-			return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+			return c.json({ error: message }, 500);
 		}
 	});
 

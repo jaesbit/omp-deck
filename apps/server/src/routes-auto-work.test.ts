@@ -23,8 +23,8 @@ import type {
 
 import { closeDb, openDb } from "./db/index.ts";
 import { DEFAULT_AUTO_WORK_VALUES, setAutoWorkConfig } from "./db/auto-work.ts";
-import { completeAutoWorkRun, listAutoWorkRuns, startAutoWorkRun } from "./db/auto-work-runs.ts";
-import { createTask, getTask } from "./db/tasks.ts";
+import { completeAutoWorkRun, getAutoWorkRun, listAutoWorkRuns, startAutoWorkRun } from "./db/auto-work-runs.ts";
+import { createTask, deleteTask, getTask } from "./db/tasks.ts";
 import { buildAutoWorkRouter } from "./routes-auto-work.ts";
 import type { AgentBridge, EventListener, SessionHandle } from "./bridge/types.ts";
 import type { Config } from "./config.ts";
@@ -542,6 +542,169 @@ describe("GET /auto-work/cost-estimate", () => {
 		const body = (await res.json()) as AutoWorkCostEstimateResponse;
 		expect(body.sampleSize).toBe(10);
 		expect(body.avgPctConsumed).toBe(7.5);
+	});
+});
+
+describe("POST /auto-work/runs/:id/create-pr", () => {
+	test("404 when the run id does not exist", async () => {
+		const app = buildAutoWorkRouter(fakeBridge([]), fakeConfig());
+		const res = await app.request("/auto-work/runs/awrun_nonexistent/create-pr", { method: "POST" });
+		expect(res.status).toBe(404);
+		expect(await res.json()).toEqual({ error: "run not found" });
+	});
+
+	test("400 when the run status is 'running' (not retryable)", async () => {
+		const task = createTask({ title: "In flight", cwd: "/tmp/wt-running" });
+		const runId = startAutoWorkRun({
+			taskId: task.id,
+			taskPriority: "P2",
+			sessionId: "sess-running",
+			worktreePath: "/tmp/wt-running",
+		});
+
+		const app = buildAutoWorkRouter(fakeBridge([]), fakeConfig());
+		const res = await app.request(`/auto-work/runs/${runId}/create-pr`, { method: "POST" });
+		expect(res.status).toBe(400);
+		const body = (await res.json()) as { error: string };
+		expect(body.error).toBe("run is not completed (status: running)");
+
+		// Not mutated: still running.
+		expect(getAutoWorkRun(runId)?.status).toBe("running");
+	});
+
+	test("400 when the run status is 'failed' (not retryable)", async () => {
+		const task = createTask({ title: "Failed run", cwd: "/tmp/wt-failed" });
+		const runId = startAutoWorkRun({
+			taskId: task.id,
+			taskPriority: "P2",
+			sessionId: "sess-failed",
+			worktreePath: "/tmp/wt-failed",
+		});
+		completeAutoWorkRun(runId, { status: "failed", failureReason: "agent crashed" });
+
+		const app = buildAutoWorkRouter(fakeBridge([]), fakeConfig());
+		const res = await app.request(`/auto-work/runs/${runId}/create-pr`, { method: "POST" });
+		expect(res.status).toBe(400);
+		const body = (await res.json()) as { error: string };
+		expect(body.error).toBe("run is not completed (status: failed)");
+	});
+
+	test("200: retries a completed_pr_failed run, flips it back to completed, and appends (not replaces) Agent History", async () => {
+		const task = createTask({
+			title: "Retry me",
+			body: "## Description\nOriginal task body content that must survive the retry.",
+			cwd: "/tmp/wt-retry",
+		});
+		const runId = startAutoWorkRun({
+			taskId: task.id,
+			taskPriority: "P2",
+			sessionId: "sess-retry",
+			worktreePath: "/tmp/wt-retry",
+		});
+		completeAutoWorkRun(runId, {
+			status: "completed_pr_failed",
+			failureReason: "some prior gh error",
+			inputTokens: 10,
+			outputTokens: 5,
+			pctConsumed: 2,
+		});
+
+		const app = buildAutoWorkRouter(fakeBridge([]), fakeConfig(), {
+			createPullRequest: async () => ({ url: "https://github.com/jaesbit/omp-deck/pull/42", number: 42 }),
+		});
+		const res = await app.request(`/auto-work/runs/${runId}/create-pr`, { method: "POST" });
+		expect(res.status).toBe(200);
+		expect(await res.json()).toEqual({ number: 42, url: "https://github.com/jaesbit/omp-deck/pull/42" });
+
+		const updatedRun = getAutoWorkRun(runId);
+		expect(updatedRun?.status).toBe("completed");
+		expect(updatedRun?.failureReason).toBeNull();
+		expect(updatedRun?.inputTokens).toBe(10);
+		expect(updatedRun?.outputTokens).toBe(5);
+		expect(updatedRun?.pctConsumed).toBe(2);
+
+		const updatedTask = getTask(task.id);
+		expect(updatedTask?.body).toContain("## Description\nOriginal task body content that must survive the retry.");
+		expect(updatedTask?.body).toContain("## Agent History");
+		expect(updatedTask?.body).toMatch(new RegExp(`### .+ — run ${runId}\\nPR retry succeeded: PR #42\\.`));
+	});
+
+	test("200: also accepts a plain 'completed' run (backward-compat path for pre-T-85 rows)", async () => {
+		const task = createTask({ title: "Old-style completed", cwd: "/tmp/wt-old" });
+		const runId = startAutoWorkRun({
+			taskId: task.id,
+			taskPriority: "P3",
+			sessionId: "sess-old",
+			worktreePath: "/tmp/wt-old",
+		});
+		completeAutoWorkRun(runId, { status: "completed", inputTokens: 1, outputTokens: 1, pctConsumed: 0.5 });
+
+		const app = buildAutoWorkRouter(fakeBridge([]), fakeConfig(), {
+			createPullRequest: async () => ({ url: "https://github.com/jaesbit/omp-deck/pull/7", number: 7 }),
+		});
+		const res = await app.request(`/auto-work/runs/${runId}/create-pr`, { method: "POST" });
+		expect(res.status).toBe(200);
+		expect(await res.json()).toEqual({ number: 7, url: "https://github.com/jaesbit/omp-deck/pull/7" });
+
+		const updatedRun = getAutoWorkRun(runId);
+		expect(updatedRun?.status).toBe("completed");
+		expect(updatedRun?.failureReason).toBeNull();
+	});
+
+	test("500 when createPullRequest rejects, and leaves the run status/failureReason unchanged", async () => {
+		const task = createTask({ title: "PR fails again", cwd: "/tmp/wt-boom" });
+		const runId = startAutoWorkRun({
+			taskId: task.id,
+			taskPriority: "P2",
+			sessionId: "sess-boom",
+			worktreePath: "/tmp/wt-boom",
+		});
+		completeAutoWorkRun(runId, {
+			status: "completed_pr_failed",
+			failureReason: "first gh error",
+			inputTokens: 3,
+			outputTokens: 4,
+			pctConsumed: 1,
+		});
+
+		const app = buildAutoWorkRouter(fakeBridge([]), fakeConfig(), {
+			createPullRequest: async () => {
+				throw new Error("boom");
+			},
+		});
+		const res = await app.request(`/auto-work/runs/${runId}/create-pr`, { method: "POST" });
+		expect(res.status).toBe(500);
+		expect(await res.json()).toEqual({ error: "boom" });
+
+		const unchanged = getAutoWorkRun(runId);
+		expect(unchanged?.status).toBe("completed_pr_failed");
+		expect(unchanged?.failureReason).toBe("first gh error");
+		expect(unchanged?.inputTokens).toBe(3);
+		expect(unchanged?.outputTokens).toBe(4);
+		expect(unchanged?.pctConsumed).toBe(1);
+
+		const unchangedTask = getTask(task.id);
+		expect(unchangedTask?.body ?? "").not.toContain("PR retry succeeded");
+	});
+
+	test("404 when the run's taskId no longer resolves to a real task", async () => {
+		const task = createTask({ title: "Deleted after run start", cwd: "/tmp/wt-gone" });
+		const runId = startAutoWorkRun({
+			taskId: task.id,
+			taskPriority: "P2",
+			sessionId: "sess-gone",
+			worktreePath: "/tmp/wt-gone",
+		});
+		completeAutoWorkRun(runId, { status: "completed_pr_failed", failureReason: "err", pctConsumed: 1 });
+		expect(deleteTask(task.id)).toBe(true);
+
+		const app = buildAutoWorkRouter(fakeBridge([]), fakeConfig());
+		const res = await app.request(`/auto-work/runs/${runId}/create-pr`, { method: "POST" });
+		expect(res.status).toBe(404);
+		expect(await res.json()).toEqual({ error: "task not found for run" });
+
+		// Not mutated by the failed lookup.
+		expect(getAutoWorkRun(runId)?.status).toBe("completed_pr_failed");
 	});
 });
 

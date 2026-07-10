@@ -18,10 +18,14 @@
  * pair. There is no separate "auto-work done" event type — turn completion
  * *is* terminal state for a one-shot session.
  *
- * On a successful run (T-66), `finalizeAutoWorkRun` opens a PR from the
- * worktree branch, appends a session-link + PR-reference note to the task
- * body, and moves the task to `validate` (never `done` — every auto-work
- * result is human-reviewed) before closing the run row `status: "completed"`.
+ * On a successful run, `settleAutoWorkRun` opens a PR from the worktree
+ * branch, appends a session-link + PR-reference note to the task body, and
+ * moves the task to `validate` (never `done` — every auto-work result is
+ * human-reviewed) before closing the run row `status: "completed"`. When
+ * `gh pr create` itself fails, the implementation is still complete and the
+ * task still moves to validate, but the run closes as
+ * `status: "completed_pr_failed"` with an actionable `failureReason`
+ * instead — distinct from a real success (T-85).
  *
  * Explicitly out of scope here (later tickets in the stack):
  *  - T-67: notifications. Lifecycle transitions are logged at info/warn so a
@@ -30,6 +34,7 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
+import type { Subprocess } from "bun";
 
 import type {
 	AutoWorkConfig,
@@ -658,26 +663,29 @@ async function settleAutoWorkRun(params: {
 	const sessionUrl = buildSessionUrl(deckBaseUrl, session.sessionId);
 	const shortSessionId = session.sessionId.slice(0, 8);
 
-	let prNote: string;
 	let prNumber: number | undefined;
+	let prFailureReason: string | undefined;
 	try {
 		const pr = await createPullRequest({
 			cwd: worktreePath,
 			title: `feat: T-${task.displayId} ${task.title}`,
 			body: `Auto Work completed T-${task.displayId}: ${task.title}\n\nSession: ${sessionUrl}`,
 		});
-		prNote = `PR #${pr.number}`;
 		prNumber = pr.number;
 		log.info(`run ${runId}: opened PR #${pr.number} (${pr.url}) for T-${task.displayId}`);
 	} catch (err) {
 		const errMsg = (err instanceof Error ? err.message : String(err)).split("\n")[0].trim().slice(0, 120);
-		prNote = `PR creation failed — open manually (${errMsg})`;
+		prFailureReason = errMsg;
 		log.error(`run ${runId}: gh pr create failed for T-${task.displayId}`, err);
 
 		// When gh pr create fails with a "no commits" pattern, the agent
 		// likely produced no work — verify and treat as failure, not completed.
-		// Other errors (auth, rate limit, network) pass through to the existing
-		// fallback path that still moves the task to validate.
+		// Other errors (auth, rate limit, network, no remote, etc.) fall
+		// through: the task still moves to validate since the implementation
+		// genuinely finished, but the run closes with a distinct
+		// "completed_pr_failed" status (not "completed") and this reason, so
+		// the failure is clearly visible instead of looking like a real
+		// success (T-85).
 		if (/no commit|must be on a branch|empty (range|commit)/i.test(errMsg)) {
 			const hasCommits = await branchHasAgentCommits(worktreePath);
 			if (!hasCommits) {
@@ -698,8 +706,14 @@ async function settleAutoWorkRun(params: {
 		}
 	}
 
-	const completeRunNote = `\n\n---\n**Auto Work** — [session ${shortSessionId}](${sessionUrl}) · ${prNote}`;
-	const completeHistorySummary = `Session completed. ${prNote}.`;
+	const completeRunNote =
+		prNumber !== undefined
+			? `\n\n---\n**Auto Work** — [session ${shortSessionId}](${sessionUrl}) · PR #${prNumber}`
+			: `\n\n---\n**Auto Work — implementation complete, PR creation failed**\n[session ${shortSessionId}](${sessionUrl}) · run \`${runId}\`\n\n**Error:** ${prFailureReason}\n\nRetry with \`POST /auto-work/runs/${runId}/create-pr\`, or run \`gh pr create\` manually from \`${worktreePath}\`.`;
+	const completeHistorySummary =
+		prNumber !== undefined
+			? `Session completed. PR #${prNumber}.`
+			: `Session completed. PR creation failed: ${prFailureReason}.`;
 	updateTask(task.id, {
 		body: appendAgentHistoryEntry(task.body + completeRunNote, runId, new Date().toISOString(), completeHistorySummary),
 	});
@@ -708,16 +722,24 @@ async function settleAutoWorkRun(params: {
 	if (validateState) moveTask(task.id, validateState.id, 0);
 	else log.error(`run ${runId}: "validate" task state not found — T-${task.displayId} left in its current state`);
 
-	completeAutoWorkRun(runId, { status: "completed", inputTokens, outputTokens, pctConsumed });
+	completeAutoWorkRun(runId, {
+		status: prNumber !== undefined ? "completed" : "completed_pr_failed",
+		inputTokens,
+		outputTokens,
+		pctConsumed,
+		failureReason: prFailureReason ?? null,
+	});
 	broadcastBus.broadcast({ type: "tasks_changed" });
 	broadcastBus.broadcast({ type: "auto_work_runs_changed" });
-	log.info(`run ${runId} completed for T-${task.displayId} — moved to validate`);
-	// Only announces completion once a PR actually exists — a fallback
-	// "open manually" note (PR creation failure, above) isn't a state the
-	// user needs paged about; it's already surfaced loudly in the task body
-	// and the logs.
+	log.info(`run ${runId} completed for T-${task.displayId} — moved to validate${prNumber === undefined ? " (PR creation failed)" : ""}`);
+	// A real PR announces success; a PR-creation failure still gets its own
+	// (quieter) notification kind so it's visible without being confused
+	// with a genuine completion (T-85) — unlike the no-commits case above,
+	// this task DID complete, it just needs a manual/retried PR.
 	if (prNumber !== undefined) {
 		await notify({ kind: "task_completed", displayId: task.displayId, prNumber });
+	} else if (prFailureReason !== undefined) {
+		await notify({ kind: "task_completed_pr_failed", displayId: task.displayId, reason: prFailureReason });
 	}
 	return { outcome: "completed", taskId: task.id, runId, sessionId: session.sessionId, worktreePath };
 }
@@ -1185,6 +1207,26 @@ async function resolveDefaultBranch(repoCwd: string): Promise<string> {
 }
 
 /**
+ * Maps common `gh pr create` stderr patterns to a short, actionable
+ * description (T-85) — raw `gh` stderr for auth expiry, a missing remote,
+ * or a rate limit is cryptic on its own. Always falls back to a generic
+ * description when nothing recognized matches; the caller still appends
+ * the raw stderr so no detail is lost, and the "no commits" case keeps the
+ * exact substring `branchHasAgentCommits`'s caller regex-matches on.
+ */
+function describeGhFailure(stderr: string): string {
+	const s = stderr.toLowerCase();
+	if (s.includes("gh auth login") || s.includes("not logged into") || s.includes("bad credentials") || s.includes("401"))
+		return "GitHub authentication expired or missing — run `gh auth login` (or `gh auth refresh`) on the deck host";
+	if (s.includes("rate limit")) return "GitHub API rate limit exceeded — retry once the limit resets";
+	if (s.includes("no such remote") || s.includes("no git remotes") || s.includes("not a git repository"))
+		return "no GitHub remote configured for this repository";
+	if (s.includes("already exists") && s.includes("pull request")) return "a pull request for this branch already exists";
+	if (/no commit|must be on a branch|empty (range|commit)/.test(s)) return "branch has no commits ahead of the base branch";
+	return "gh pr create failed";
+}
+
+/**
  * `gh pr create --base <default-branch> --title <title> --body <body>`, run
  * from the worktree directory so `gh` infers the PR head from the branch
  * already checked out there (see `createAutoWorkWorktree`). Follows the same
@@ -1193,20 +1235,29 @@ async function resolveDefaultBranch(repoCwd: string): Promise<string> {
  * `gh pr create` prints on stdout (e.g. `https://github.com/o/r/pull/123`).
  * The base branch is resolved dynamically from the remote rather than
  * hardcoded, so repos whose default branch is not `main` work correctly.
+ * Thrown errors lead with `describeGhFailure`'s actionable summary rather
+ * than raw `gh` stderr (T-85), with the raw text still appended for
+ * debugging.
  */
 export async function createPullRequestViaGh(params: CreatePullRequestParams): Promise<CreatePullRequestResult> {
 	const baseBranch = await resolveDefaultBranch(params.cwd);
-	const proc = Bun.spawn(
-		["gh", "pr", "create", "--base", baseBranch, "--title", params.title, "--body", params.body],
-		{ cwd: params.cwd, stdin: "ignore", stdout: "pipe", stderr: "pipe", windowsHide: true },
-	);
+	let proc: Subprocess<"ignore", "pipe", "pipe">;
+	try {
+		proc = Bun.spawn(
+			["gh", "pr", "create", "--base", baseBranch, "--title", params.title, "--body", params.body],
+			{ cwd: params.cwd, stdin: "ignore", stdout: "pipe", stderr: "pipe", windowsHide: true },
+		);
+	} catch (err) {
+		const cause = err instanceof Error ? err.message : String(err);
+		throw new Error(`gh CLI not found on the deck host — install it and run "gh auth login" (${cause})`);
+	}
 	const [stdout, stderr, exitCode] = await Promise.all([
 		new Response(proc.stdout).text(),
 		new Response(proc.stderr).text(),
 		proc.exited,
 	]);
 	if (exitCode !== 0) {
-		throw new Error(`gh pr create failed (exit ${exitCode}): ${stderr.trim()}`);
+		throw new Error(`${describeGhFailure(stderr)} (gh pr create exited ${exitCode}): ${stderr.trim()}`);
 	}
 	const url = stdout.trim().split("\n").pop() ?? "";
 	const match = url.match(/\/pull\/(\d+)\/?$/);
