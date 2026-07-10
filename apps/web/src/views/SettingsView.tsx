@@ -18,6 +18,7 @@ import type {
 	SetAutoWorkGlobalConfigRequest,
 	NotificationLevel,
 	StartCommand,
+	SessionTitlePromptResponse,
 	TaskPriority,
 	WorkspaceEntry,
 } from "@omp-deck/protocol";
@@ -45,7 +46,7 @@ const SECTIONS = [
 	{ id: "env", label: "Env", description: "Process and deck-managed variables" },
 	{ id: "providers", label: "Providers", description: "OAuth sign-in and API-key state" },
 	{ id: "messaging", label: "Messaging", description: "Telegram and future chat bridges" },
-	{ id: "orientation", label: "Orientation", description: "Prelude, /start, maintenance gate" },
+	{ id: "orientation", label: "Internal prompts", description: "System prompts and session lifecycle" },
 	{ id: "appearance", label: "Appearance", description: "Themes, colors, fonts" },
 	{ id: "workspaces", label: "Workspaces", description: "Pinned roots and display names" },
 	{ id: "autowork", label: "Auto Work", description: "Unattended runs — enable, model, window, limits" },
@@ -104,7 +105,7 @@ export function SettingsView() {
 							) : selected === "messaging" ? (
 								<MessagingSection />
 							) : selected === "orientation" ? (
-								<OrientationSection />
+								<InternalPromptsSection />
 							) : selected === "appearance" ? (
 								<AppearanceSection />
 							) : selected === "notifications" ? (
@@ -1147,6 +1148,95 @@ function InternalTaskModelCard() {
 				onPicked={(m) => void onPicked(m)}
 			/>
 		</>
+	);
+}
+
+function SessionTitlePromptCard() {
+	const [data, setData] = useState<SessionTitlePromptResponse | null>(null);
+	const [draft, setDraft] = useState("");
+	const [loading, setLoading] = useState(true);
+	const [saving, setSaving] = useState(false);
+	const [error, setError] = useState<string | undefined>();
+	const [status, setStatus] = useState<string | undefined>();
+
+	async function refresh(): Promise<void> {
+		try {
+			const next = await api.getSessionTitlePrompt();
+			setData(next);
+			setDraft(next.effective);
+			setError(undefined);
+		} catch (e) {
+			setError(e instanceof Error ? e.message : String(e));
+		} finally {
+			setLoading(false);
+		}
+	}
+
+	useEffect(() => {
+		void refresh();
+	}, []);
+
+	const usingOverride = data ? data.override !== null : false;
+	const dirty = data ? draft !== data.effective : false;
+
+	async function save(): Promise<void> {
+		setSaving(true);
+		try {
+			const next = await api.setSessionTitlePrompt(draft);
+			setData(next);
+			setDraft(next.effective);
+			setStatus("Saved. New titles will use this prompt.");
+			setError(undefined);
+			window.setTimeout(() => setStatus(undefined), 3000);
+		} catch (e) {
+			setError(e instanceof Error ? e.message : String(e));
+		} finally {
+			setSaving(false);
+		}
+	}
+
+	async function resetToDefault(): Promise<void> {
+		setSaving(true);
+		try {
+			const next = await api.setSessionTitlePrompt(null);
+			setData(next);
+			setDraft(next.default);
+			setStatus("Override cleared. New titles will use the bundled default.");
+			setError(undefined);
+			window.setTimeout(() => setStatus(undefined), 3000);
+		} catch (e) {
+			setError(e instanceof Error ? e.message : String(e));
+		} finally {
+			setSaving(false);
+		}
+	}
+
+	return (
+		<div className="overflow-hidden rounded-md border border-line bg-paper">
+			<div className="border-b border-line bg-paper-2 px-3 py-2">
+				<div className="flex items-center gap-2">
+					<div className="meta">Session title prompt</div>
+					{usingOverride ? <Badge tone="accent">override</Badge> : <Badge tone="muted">default</Badge>}
+				</div>
+				<p className="mt-1 text-xs text-ink-3">
+					Sent directly to the selected internal model with the first message. It does not create an agent session or load its system instructions.
+				</p>
+			</div>
+			<div className="space-y-3 p-4">
+				{error ? <div className="rounded-md border border-danger/30 bg-danger/10 px-3 py-2 font-mono text-xs text-danger">{error}</div> : null}
+				{status ? <div className="rounded-md border border-success/30 bg-success/10 px-3 py-2 font-mono text-xs text-success">{status}</div> : null}
+				{loading ? <div className="text-sm text-ink-3">Loading...</div> : (
+					<>
+						<textarea value={draft} onChange={(e) => setDraft(e.target.value)} spellCheck={false} className="block min-h-[200px] w-full resize-y rounded-md border border-line bg-paper-2 px-3 py-2 font-mono text-xs leading-relaxed text-ink" />
+						<div className="flex flex-wrap items-center gap-2">
+							<Button size="sm" onClick={() => void save()} disabled={saving || !dirty}><Save className="h-3.5 w-3.5" />Save</Button>
+							<Button size="sm" variant="outline" onClick={() => void resetToDefault()} disabled={saving || !usingOverride}><RotateCcw className="h-3.5 w-3.5" />Reset to default</Button>
+							{dirty ? <span className="font-mono text-2xs text-warn">Unsaved changes</span> : null}
+						</div>
+					</>
+				)}
+			</div>
+		</div>
 	);
 }
 
@@ -2463,26 +2553,19 @@ function ThemeSwatchStrip({ definition }: { definition: (typeof THEMES)[number] 
 }
 
 /**
- * Orientation section — surfaces the three artifacts that shape every deck
- * session so non-developer users can view and tweak them without touching
- * server source. See kb://system/imperatives-belong-in-orchestrator-not-prelude
- * for the prelude-vs-orchestrator architecture that motivated this surface.
+ * Internal prompts and lifecycle controls that shape deck-created sessions.
  */
-function OrientationSection() {
+function InternalPromptsSection() {
 	return (
 		<div className="mx-auto max-w-5xl space-y-6">
 			<div>
-				<h1 className="text-xl font-semibold tracking-tight">Orientation</h1>
+				<h1 className="text-xl font-semibold tracking-tight">Internal prompts</h1>
 				<p className="mt-1 max-w-3xl text-sm text-ink-3">
-					Three artifacts shape every deck session: the system-prompt prelude,
-					the <code className="font-mono text-xs">/start</code> orchestrator
-					fired on boot, and the maintenance-gate extension that nudges the
-					agent to capture work mid-session. Edit each in place; changes
-					take effect on the next session create (prelude) or the next slash
-					invocation (start) or the next gate evaluation (maintenance).
+					Configure the base prompt, automatic title prompt, startup workflow, and maintenance gate. Changes apply to new sessions or the next matching invocation.
 				</p>
 			</div>
 			<PreludeCard />
+			<SessionTitlePromptCard />
 			<StartCommandCard />
 			<MaintenanceGateCard />
 		</div>

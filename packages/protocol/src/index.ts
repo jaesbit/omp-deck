@@ -2149,6 +2149,22 @@ export interface SetInternalTaskModelRequest {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Session-title prompt — configurable override for the bundled title prompt.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** `GET /api/settings/session-title-prompt` response. */
+export interface SessionTitlePromptResponse {
+	default: string;
+	override: string | null;
+	effective: string;
+}
+
+/** `PUT /api/settings/session-title-prompt` body. Pass null to restore the bundled default. */
+export interface SetSessionTitlePromptRequest {
+	value: string | null;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Auto Work run history and cost tracking (T-62)
 // ─────────────────────────────────────────────────────────────────────────────
 
