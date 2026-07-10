@@ -161,7 +161,7 @@ export function Chat() {
 						{queuedPrompts.map((q) => (
 							<QueuedMessage key={q.id} msg={q} />
 						))}
-						{session.pendingPlanApproval ? (
+						{session.pendingPlanApproval || session.pendingPlanExecution ? (
 							<PlanApproval session={session} />
 						) : null}
 					</div>

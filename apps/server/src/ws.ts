@@ -162,6 +162,9 @@ export class WsHub {
 			case "plan_response":
 				await this.handlePlanResponse(ws, frame);
 				return;
+			case "plan_execution_action":
+				await this.handlePlanExecutionAction(ws, frame);
+				return;
 			case "goal_action":
 				await this.handleGoalAction(ws, frame);
 				return;
@@ -548,12 +551,13 @@ export class WsHub {
 		// bump activity to keep the reaper away while the user is mid-
 		// decision and during the renaming/synthetic-prompt phase.
 		this.bridge.bumpActivity(frame.sessionId);
-		const { approved, finalPath, editedContent, proposalId, sessionId } = frame;
+		const { approved, finalPath, editedContent, executionStrategy, proposalId, sessionId } = frame;
 		try {
 			const outcome = await this.bridge.respondToPlanApproval(sessionId, proposalId, {
 				approved,
 				...(finalPath !== undefined ? { finalPath } : {}),
 				...(editedContent !== undefined ? { editedContent } : {}),
+				...(executionStrategy !== undefined ? { executionStrategy } : {}),
 			});
 			if (outcome === "unknown") {
 				// 409-equivalent: stale/double-click. The client rolls back its
@@ -574,6 +578,30 @@ export class WsHub {
 			});
 		}
 	}
+	private async handlePlanExecutionAction(
+		ws: ServerWebSocket<ConnectionData>,
+		frame: Extract<ClientFrame, { type: "plan_execution_action" }>,
+	): Promise<void> {
+		this.bridge.bumpActivity(frame.sessionId);
+		try {
+			const outcome = await this.bridge.actOnPendingPlanExecution(frame.sessionId, frame.proposalId);
+			if (outcome === "unknown") {
+				send(ws, {
+					type: "error",
+					sessionId: frame.sessionId,
+					error: `plan_execution_action: proposal ${frame.proposalId} already resolved or unknown`,
+				});
+			}
+		} catch (err) {
+			log.warn(`actOnPendingPlanExecution threw`, err);
+			send(ws, {
+				type: "error",
+				sessionId: frame.sessionId,
+				error: `plan_execution_action failed: ${String((err as Error).message ?? err)}`,
+			});
+		}
+	}
+
 }
 
 function send(ws: ServerWebSocket<ConnectionData>, frame: ServerFrame): void {

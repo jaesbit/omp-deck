@@ -864,6 +864,16 @@ export interface PendingPlanApprovalWire {
 	suggestedFinalPath: string;
 }
 
+/** Approved plan awaiting manual recovery after compaction was cancelled or failed. */
+export interface PendingPlanExecutionWire {
+	proposalId: string;
+	planFilePath: string;
+	status: "compacting" | "dispatching" | "compact_cancelled" | "compact_failed";
+	error?: string;
+}
+
+export type PlanExecutionStrategy = "keep_context" | "compact_context";
+
 /** Snapshot delivered when a client subscribes to an existing session. */
 export interface SessionSnapshot {
 	sessionId: string;
@@ -914,6 +924,8 @@ export interface SessionSnapshot {
 	 * page reload re-renders the PlanApproval inline component.
 	 */
 	pendingPlanApproval?: PendingPlanApprovalWire;
+	/** Recovery state when compacting an approved plan's context did not finish. */
+	pendingPlanExecution?: PendingPlanExecutionWire;
 	/** Goal-mode state, present for active and paused goals. */
 	goalMode?: GoalModeContextWire;
 	/**
@@ -1061,7 +1073,11 @@ export type ClientFrame =
 			approved: boolean;
 			finalPath?: string;
 			editedContent?: string;
+			/** Defaults to `keep_context` for clients predating compact-before-execute. */
+			executionStrategy?: PlanExecutionStrategy;
 	  }
+	/** Recover an approved plan whose requested compaction did not complete. */
+	| { type: "plan_execution_action"; sessionId: string; proposalId: string; action: "execute" }
 	/** Create, pause, resume, cancel, or budget a session Goal Mode objective. */
 	| {
 			type: "goal_action";
@@ -1240,6 +1256,15 @@ export type ServerFrame =
 			sessionId: string;
 			proposalId: string;
 			outcome: "approved" | "rejected" | "resolved_elsewhere" | "expired";
+	  }
+	/** Compact-before-execute progress. Terminal failures remain recoverable. */
+	| {
+			type: "plan_execution_changed";
+			sessionId: string;
+			proposalId: string;
+			planFilePath: string;
+			status: "compacting" | "dispatching" | "compact_cancelled" | "compact_failed" | "dispatched";
+			error?: string;
 	  }
 	/**
 	 * Server liveness heartbeat. Broadcast on a fixed interval (default 5s).

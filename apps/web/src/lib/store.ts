@@ -328,7 +328,9 @@ interface StoreState {
 		approved: boolean;
 		finalPath?: string;
 		editedContent?: string;
+		executionStrategy?: "keep_context" | "compact_context";
 	}): void;
+	actOnPendingPlanExecution(sessionId: string, proposalId: string): void;
 	/** Mark a notification as delivered to the OS so the renderer only fires once. */
 	markNotificationDelivered(id: string): void;
 	/** Hide an in-app toast for a notification (does not affect an already-delivered OS notif). */
@@ -745,7 +747,7 @@ export const useStore = create<StoreState>()(
 			get().ws?.send({ type: "goal_action", sessionId, action, ...options });
 		},
 
-		respondToPlanApproval({ sessionId, proposalId, approved, finalPath, editedContent }) {
+		respondToPlanApproval({ sessionId, proposalId, approved, finalPath, editedContent, executionStrategy }) {
 			// Optimistically clear the local approval card so the UI hides
 			// immediately. Server emits `plan_proposal_resolved`; if the
 			// proposalId is stale (sibling tab won the race), the bridge's
@@ -769,7 +771,12 @@ export const useStore = create<StoreState>()(
 				approved,
 				...(finalPath !== undefined ? { finalPath } : {}),
 				...(editedContent !== undefined ? { editedContent } : {}),
+				...(executionStrategy !== undefined ? { executionStrategy } : {}),
 			});
+		},
+
+		actOnPendingPlanExecution(sessionId, proposalId) {
+			get().ws?.send({ type: "plan_execution_action", sessionId, proposalId, action: "execute" });
 		},
 
 		markNotificationDelivered(id) {
@@ -928,6 +935,31 @@ function handleFrame(
 					sessionsById: {
 						...s.sessionsById,
 						[frame.sessionId]: { ...prev, pendingPlanApproval: pending },
+					},
+				};
+			});
+			return;
+
+		case "plan_execution_changed":
+			set((s) => {
+				const prev = s.sessionsById[frame.sessionId];
+				if (!prev) return {};
+				const existing = prev.pendingPlanExecution;
+				if (frame.status === "dispatched" && existing?.proposalId !== frame.proposalId) return {};
+				return {
+					sessionsById: {
+						...s.sessionsById,
+						[frame.sessionId]: {
+							...prev,
+							pendingPlanExecution: frame.status === "dispatched"
+								? undefined
+								: {
+									proposalId: frame.proposalId,
+									planFilePath: frame.planFilePath,
+									status: frame.status,
+									...(frame.error ? { error: frame.error } : {}),
+								},
+						},
 					},
 				};
 			});

@@ -34,6 +34,7 @@ export function PlanApproval({ session }: { session: SessionUi }) {
 	const [title, setTitle] = useState<string>(approval?.suggestedTitle ?? "");
 	const [editing, setEditing] = useState(false);
 	const [editedContent, setEditedContent] = useState<string>(approval?.planContent ?? "");
+	const [executionStrategy, setExecutionStrategy] = useState<"keep_context" | "compact_context">("keep_context");
 
 	// Reset local state whenever a new proposal lands (proposalId is the key).
 	useEffect(() => {
@@ -41,10 +42,13 @@ export function PlanApproval({ session }: { session: SessionUi }) {
 		setTitle(approval.suggestedTitle);
 		setEditedContent(approval.planContent);
 		setEditing(false);
+		setExecutionStrategy("keep_context");
 	}, [approval?.proposalId, approval?.suggestedTitle, approval?.planContent]);
 
 	// Cheap guard so the early-return below narrows for the closures.
-	if (!approval) return null;
+	if (!approval) {
+		return session.pendingPlanExecution ? <PlanExecutionRecovery session={session} /> : null;
+	}
 	const a = approval;
 	const sessionId = session.sessionId;
 
@@ -65,6 +69,7 @@ export function PlanApproval({ session }: { session: SessionUi }) {
 			approved: true,
 			...(titleChanged ? { finalPath } : {}),
 			...(opts.withEdits && editedContent !== a.planContent ? { editedContent } : {}),
+			executionStrategy,
 		});
 	}
 
@@ -116,6 +121,21 @@ export function PlanApproval({ session }: { session: SessionUi }) {
 					<Markdown>{a.planContent}</Markdown>
 				</div>
 			)}
+
+			<label className="mb-3 block">
+				<span className="meta mb-1 block">Execution context</span>
+				<select
+					value={executionStrategy}
+					onChange={(e) => setExecutionStrategy(e.target.value as "keep_context" | "compact_context")}
+					className="w-full rounded border border-line bg-paper px-2 py-1 text-[13px] text-ink focus:border-accent-plan/60 focus:outline-none"
+				>
+					<option value="keep_context">Approve and execute, keep context</option>
+					<option value="compact_context">Approve and compact context</option>
+				</select>
+				<span className="meta mt-1 block text-ink-4">
+					Compacting preserves the approved plan reference before execution.
+				</span>
+			</label>
 
 			<div className="flex flex-wrap items-center gap-2">
 				<button
@@ -173,6 +193,44 @@ export function PlanApproval({ session }: { session: SessionUi }) {
 					</>
 				)}
 			</div>
+		</section>
+	);
+}
+
+
+function PlanExecutionRecovery({ session }: { session: SessionUi }) {
+	const pending = session.pendingPlanExecution;
+	const act = useStore((s) => s.actOnPendingPlanExecution);
+	if (!pending) return null;
+	const isWaiting = pending.status === "compacting" || pending.status === "dispatching";
+	const cancelled = pending.status === "compact_cancelled";
+	return (
+		<section aria-label="Plan execution recovery" className="rounded-lg border border-accent-plan/40 bg-accent-plan/[0.04] p-4 shadow-sm">
+			<header className="mb-2 flex items-center gap-2">
+				<span className="rounded border border-accent-plan/40 bg-accent-plan/10 px-1.5 py-0.5 font-mono text-2xs uppercase tracking-meta text-accent-plan">
+					Approved plan
+				</span>
+				<span className="truncate font-mono text-2xs text-ink-3">→ {pending.planFilePath}</span>
+			</header>
+			<p className="mb-3 text-sm text-ink-2">
+				{isWaiting
+					? pending.status === "compacting"
+						? "Compacting the planning context before execution."
+						: "Dispatching the approved plan."
+					: cancelled
+						? "Compaction was cancelled. Execution has not started."
+						: `Preparation for execution failed. Execution has not started.${pending.error ? ` ${pending.error}` : ""}`}
+			</p>
+			{!isWaiting ? (
+				<button
+					type="button"
+					onClick={() => act(session.sessionId, pending.proposalId)}
+					className="inline-flex items-center gap-1 rounded border border-accent-plan/60 bg-accent-plan/15 px-2.5 py-1 text-xs text-accent-plan hover:bg-accent-plan/25"
+				>
+					<Check className="h-3.5 w-3.5" />
+					Execute with current context
+				</button>
+			) : null}
 		</section>
 	);
 }
