@@ -33,6 +33,8 @@ export interface SessionSummary {
 	createdAt: string;
 	updatedAt: string;
 	messageCount: number;
+	/** Elapsed ms between createdAt and updatedAt — a proxy for session duration. */
+	durationMs?: number;
 }
 
 export interface WorkspaceEntry {

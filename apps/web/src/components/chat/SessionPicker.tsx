@@ -5,7 +5,7 @@ import type { SessionSummary } from "@omp-deck/protocol";
 import { SessionLaunchModal, type SessionLaunchOpts } from "@/components/chat/SessionLaunchModal";
 import { launchSession } from "@/lib/first-prompt";
 import { selectActiveSession, useStore } from "@/lib/store";
-import { shortPath } from "@/lib/utils";
+import { formatDurationMs, formatTimestamp, shortPath } from "@/lib/utils";
 
 /**
  * Rendered as the chat main pane when there is no active session selected.
@@ -133,10 +133,11 @@ export function SessionPicker() {
 											{s.title || formatSessionId(s.id)}
 										</span>
 										<span className="font-mono text-2xs text-ink-4">
-											{shortPath(s.cwd, 24)} · {s.messageCount}m
+											{shortPath(s.cwd, 24)}
+											{s.durationMs != null ? ` · ${formatDurationMs(s.durationMs)}` : ""}
 										</span>
 										<span className="font-mono text-2xs text-ink-4">
-											{formatRelative(s.updatedAt || s.createdAt)}
+											{formatTimestamp(s.createdAt)}
 										</span>
 									</button>
 								</li>
@@ -163,29 +164,6 @@ function formatSessionId(id: string): string {
 	return id.length <= 12 ? id : `${id.slice(0, 6)}…${id.slice(-4)}`;
 }
 
-const REL: Array<[number, string]> = [
-	[60_000, "just now"],
-	[3_600_000, "m"],
-	[86_400_000, "h"],
-	[2_592_000_000, "d"],
-];
-
-function formatRelative(ts: string): string {
-	if (!ts) return "";
-	const d = new Date(ts);
-	if (Number.isNaN(d.getTime())) return ts;
-	const diff = Date.now() - d.getTime();
-	if (diff < 0) return d.toLocaleDateString();
-	const first = REL[0];
-	if (!first || diff < first[0]) return "just now";
-	for (let i = 1; i < REL.length; i++) {
-		const cur = REL[i];
-		const prev = REL[i - 1];
-		if (!cur || !prev) continue;
-		if (diff < cur[0]) return `${Math.floor(diff / prev[0])}${cur[1]} ago`;
-	}
-	return d.toLocaleDateString();
-}
 
 // ─── Onboarding follow-up tiles ─────────────────────────────────────────────
 

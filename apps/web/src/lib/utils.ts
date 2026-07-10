@@ -35,6 +35,25 @@ export function formatDurationMs(ms: number): string {
 	return `${m}m ${s}s`;
 }
 
+/** Format an ISO timestamp to a compact absolute time.
+ * Today → "14:30", this year → "Jul 10, 14:30", older → "Jul 10 2025, 14:30". */
+export function formatTimestamp(iso: string): string {
+	if (!iso) return "";
+	const d = new Date(iso);
+	if (Number.isNaN(d.getTime())) return iso;
+	const now = new Date();
+	const time = d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+	const sameDay =
+		d.getFullYear() === now.getFullYear() &&
+		d.getMonth() === now.getMonth() &&
+		d.getDate() === now.getDate();
+	if (sameDay) return time;
+	const monthDay = d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+	if (d.getFullYear() === now.getFullYear()) return `${monthDay}, ${time}`;
+	return `${monthDay} ${d.getFullYear()}, ${time}`;
+}
+
+
 export function shortPath(p: string | undefined, max = 64): string {
 	if (!p) return "";
 	if (p.length <= max) return p;
