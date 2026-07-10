@@ -1217,6 +1217,22 @@ function runGit(args: string[], cwd: string): void {
 	}
 }
 
+async function withProjectBasePolicy<T>(baseBranch: string, run: () => Promise<T>): Promise<T> {
+	const savedKbRoot = process.env.OMP_DECK_KB_ROOT;
+	const kbRoot = fs.mkdtempSync(path.join(os.tmpdir(), "omp-deck-auto-work-policy-kb-"));
+	const policyPath = path.join(kbRoot, "projects", "workspace.md");
+	fs.mkdirSync(path.dirname(policyPath), { recursive: true });
+	fs.writeFileSync(policyPath, `---\nprojectRoot: ${repoCwd}\nbaseBranch: ${baseBranch}\n---\n# Workspace policy\n`, "utf8");
+	process.env.OMP_DECK_KB_ROOT = kbRoot;
+	try {
+		return await run();
+	} finally {
+		if (savedKbRoot === undefined) delete process.env.OMP_DECK_KB_ROOT;
+		else process.env.OMP_DECK_KB_ROOT = savedKbRoot;
+		fs.rmSync(kbRoot, { recursive: true, force: true });
+	}
+}
+
 beforeEach(() => {
 	dbDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-deck-auto-work-engine-db-"));
 	openDb({ path: path.join(dbDir, "deck.db") });
@@ -1242,6 +1258,9 @@ beforeEach(() => {
 	runGit(["init", "--bare", "-q"], originDir);
 	runGit(["remote", "add", "origin", originDir], repoCwd);
 	runGit(["push", "origin", "HEAD:main"], repoCwd);
+	runGit(["symbolic-ref", "HEAD", "refs/heads/main"], originDir);
+	runGit(["fetch", "-q", "origin"], repoCwd);
+	runGit(["remote", "set-head", "origin", "-a"], repoCwd);
 });
 
 afterEach(() => {
@@ -1343,6 +1362,7 @@ function fakeGhFailure(stderrText: string, exitCode = 1): FakeGhSubprocess {
 	};
 }
 
+
 function withFakeGhSpawn(handler: (cmd: string[]) => FakeGhSubprocess): () => void {
 	const realSpawn = Bun.spawn;
 	// @ts-expect-error test-only monkeypatch — narrower signature than Bun.spawn's real overloads
@@ -1414,6 +1434,29 @@ describe("createPullRequestViaGh", () => {
 			restore();
 		}
 	});
+
+	test("opens a pull request against the matching KB policy instead of origin/HEAD", async () => {
+		const restore = withFakeGhSpawn((cmd) => {
+			const baseIndex = cmd.indexOf("--base");
+			if (cmd[baseIndex + 1] === "devel") {
+				return {
+					stdout: new Blob(["https://github.com/jaesbit/omp-deck/pull/808\n"]).stream(),
+					stderr: new Blob([""]).stream(),
+					exited: Promise.resolve(0),
+				};
+			}
+			return fakeGhFailure(`unexpected PR base ${cmd[baseIndex + 1]}`);
+		});
+		try {
+			const result = await withProjectBasePolicy("devel", () =>
+				createPullRequestViaGh({ cwd: repoCwd, title: "Policy branch", body: "Uses the configured branch." }),
+			);
+
+			expect(result).toEqual({ url: "https://github.com/jaesbit/omp-deck/pull/808", number: 808 });
+		} finally {
+			restore();
+		}
+	});
 });
 
 describe("runAutoWorkCycle", () => {
@@ -1448,6 +1491,28 @@ describe("runAutoWorkCycle", () => {
 		expect(runs[0]?.status).toBe("completed");
 		expect(runs[0]?.sessionId).toBe("sess_1");
 		expect(runs[0]?.worktreePath).toBe(result.worktreePath);
+	});
+
+	test("creates an Auto Work worktree from the matching KB branch rather than origin/HEAD", async () => {
+		runGit(["checkout", "-q", "-b", "devel"], repoCwd);
+		fs.writeFileSync(path.join(repoCwd, "devel-only.txt"), "from devel\n");
+		runGit(["add", "devel-only.txt"], repoCwd);
+		runGit(["commit", "-q", "-m", "devel base"], repoCwd);
+		runGit(["push", "-q", "--set-upstream", "origin", "devel"], repoCwd);
+
+		setAutoWorkConfig(repoCwd, { ...DEFAULT_AUTO_WORK_VALUES, enabled: true });
+		const task = createTask({ title: "Use configured base", cwd: repoCwd, priority: "P5", autoWork: true });
+
+		const result = await withProjectBasePolicy("devel", () =>
+			runAutoWorkCycle(repoCwd, fakeBridge(new FakeSessionHandle("sess_policy_base", 10)), {
+				getSubscriptionUsage: async () => ({ available: true, weeklyPct: 5 }),
+				createPullRequest: stubCreatePullRequest,
+			}),
+		);
+
+		expect(result.outcome).toBe("completed");
+		if (result.outcome !== "completed") throw new Error("expected completed");
+		expect(fs.readFileSync(path.join(result.worktreePath, "devel-only.txt"), "utf8")).toBe("from devel\n");
 	});
 
 	test("creates Auto Work sessions without legacy startup options", async () => {
@@ -1724,6 +1789,37 @@ describe("runAutoWorkCycle", () => {
 
 		expect(calls).toContainEqual(
 			expect.objectContaining({ kind: "task_failed", displayId: task.displayId, reason: expect.stringContaining("produced no commits") }),
+		);
+	});
+
+	test("settles the normal PR-failed lifecycle when no-commits verification cannot resolve a base branch", async () => {
+		setAutoWorkConfig(repoCwd, { ...DEFAULT_AUTO_WORK_VALUES, enabled: true });
+		const task = createTask({ title: "No-commits resolver unavailable", cwd: repoCwd, priority: "P5", autoWork: true });
+		const prFailureMessage = "gh pr create failed (exit 1): No commits between main and main";
+
+		const result = await runAutoWorkCycle(repoCwd, fakeBridge(new FakeSessionHandle("sess_no_base_branch", 10)), {
+			getSubscriptionUsage: async () => ({ available: true, weeklyPct: 5 }),
+			getDeckBaseUrl: () => "https://deck.example.com",
+			createPullRequest: async () => {
+				// Worktree creation has already used origin/main. Remove every base
+				// resolver source before the no-commits safety check runs.
+				runGit(["remote", "remove", "origin"], repoCwd);
+				runGit(["update-ref", "-d", "refs/remotes/origin/HEAD"], repoCwd);
+				throw new Error(prFailureMessage);
+			},
+		});
+
+		expect(result.outcome).toBe("completed");
+		if (result.outcome !== "completed") throw new Error("expected completed");
+
+		const updated = getTask(task.id);
+		expect(updated?.stateId).toBe("s_validate");
+		expect(updated?.body).toContain("**Auto Work — implementation complete, PR creation failed**");
+		expect(updated?.body).toContain(`**Error:** ${prFailureMessage}`);
+
+		const runs = listAutoWorkRuns({ taskId: task.id });
+		expect(runs[0]).toEqual(
+			expect.objectContaining({ status: "completed_pr_failed", failureReason: prFailureMessage }),
 		);
 	});
 
@@ -2051,6 +2147,9 @@ describe("runGlobalAutoWorkCycle", () => {
 		runGit(["init", "--bare", "-q"], otherOriginDir);
 		runGit(["remote", "add", "origin", otherOriginDir], otherRepoCwd);
 		runGit(["push", "origin", "HEAD:main"], otherRepoCwd);
+		runGit(["symbolic-ref", "HEAD", "refs/heads/main"], otherOriginDir);
+		runGit(["fetch", "-q", "origin"], otherRepoCwd);
+		runGit(["remote", "set-head", "origin", "-a"], otherRepoCwd);
 
 		setAutoWorkConfig(repoCwd, { ...DEFAULT_AUTO_WORK_VALUES, enabled: true });
 		setAutoWorkConfig(otherRepoCwd, { ...DEFAULT_AUTO_WORK_VALUES, enabled: true });

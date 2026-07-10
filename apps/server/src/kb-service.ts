@@ -1161,6 +1161,102 @@ function renderStarterReadme(today: string): string {
 	].join("\n");
 }
 
+/** A validated branch policy declared by a markdown file under `kb://projects/`. */
+export interface ProjectBranchPolicy {
+	projectRoot: string;
+	baseBranch: string;
+	sourcePath: string;
+}
+
+/**
+ * Resolves the branch policy for a workspace from parseable project markdown
+ * frontmatter. A child worktree inherits its enclosing project policy. Invalid,
+ * unreadable, or malformed entries are ignored so callers can use their normal
+ * remote-default resolution when the KB cannot provide a policy.
+ */
+export async function resolveProjectBranchPolicy(
+	workspacePath: string,
+	kbRoot = resolveKbRoot(),
+): Promise<ProjectBranchPolicy | undefined> {
+	const workspaceRoot = path.resolve(workspacePath);
+	const projectsRoot = path.resolve(kbRoot, "projects");
+	const matches: ProjectBranchPolicy[] = [];
+
+	for (const sourcePath of await listProjectPolicyMarkdownFiles(projectsRoot)) {
+		try {
+			const { frontmatter, frontmatterError } = parseFrontmatter(await readFile(sourcePath, "utf8"));
+			if (frontmatterError) continue;
+			const projectRootValue = frontmatter.projectRoot;
+			const baseBranchValue = frontmatter.baseBranch;
+			if (typeof projectRootValue !== "string" || typeof baseBranchValue !== "string") continue;
+
+			const projectRootCandidate = projectRootValue.trim();
+			if (!projectRootCandidate || !path.isAbsolute(projectRootCandidate)) continue;
+			const projectRoot = path.resolve(projectRootCandidate);
+			const baseBranch = normalizeBaseBranch(baseBranchValue);
+			const relativeToProjectRoot = path.relative(projectRoot, workspaceRoot);
+			const containsWorkspace =
+				relativeToProjectRoot === "" ||
+				(!relativeToProjectRoot.startsWith(`..${path.sep}`) &&
+					relativeToProjectRoot !== ".." &&
+					!path.isAbsolute(relativeToProjectRoot));
+			if (!baseBranch || !containsWorkspace) continue;
+			matches.push({ projectRoot, baseBranch, sourcePath });
+		} catch {
+			// Project policy is optional. A single unreadable note must not block
+			// remote-default resolution for every workspace.
+		}
+	}
+
+	// The deepest enclosing root wins. The source-path tie-breaker keeps an
+	// accidental duplicate policy deterministic rather than depending on readdir.
+	matches.sort((a, b) => b.projectRoot.length - a.projectRoot.length || a.sourcePath.localeCompare(b.sourcePath));
+	return matches[0];
+}
+
+async function listProjectPolicyMarkdownFiles(dir: string): Promise<string[]> {
+	let entries;
+	try {
+		entries = await readdir(dir, { withFileTypes: true });
+	} catch {
+		return [];
+	}
+
+	const files: string[] = [];
+	for (const entry of entries) {
+		const entryPath = path.join(dir, entry.name);
+		if (entry.isDirectory()) {
+			files.push(...(await listProjectPolicyMarkdownFiles(entryPath)));
+		} else if (entry.isFile() && entry.name.toLowerCase().endsWith(".md")) {
+			files.push(entryPath);
+		}
+	}
+	return files;
+}
+
+
+function normalizeBaseBranch(value: string): string | undefined {
+	const branch = value.trim();
+	if (
+		!branch ||
+		branch === "@" ||
+		branch.startsWith("-") ||
+		branch.startsWith("refs/") ||
+		branch.startsWith("/") ||
+		branch.endsWith("/") ||
+		branch.endsWith(".") ||
+		branch.includes("..") ||
+		branch.includes("@{") ||
+		branch.includes("//") ||
+		branch.split("/").some((component) => component.startsWith(".") || component.endsWith(".") || component.endsWith(".lock")) ||
+		/[\u0000-\u0020~^:?*\[\\]/.test(branch)
+	) {
+		return undefined;
+	}
+	return branch;
+}
+
+
 export function resolveKbRoot(): string {
 	const fromEnv = process.env.OMP_DECK_KB_ROOT;
 	if (fromEnv && fromEnv.trim().length > 0) return path.resolve(fromEnv.trim());
