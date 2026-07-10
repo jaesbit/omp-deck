@@ -14,6 +14,7 @@ import type {
 	ModelInfo,
 	ModelRef,
 	PreludeResponse,
+	PlanModelResponse,
 	SetAutoWorkConfigRequest,
 	SetAutoWorkGlobalConfigRequest,
 	NotificationLevel,
@@ -983,6 +984,7 @@ function GeneralSection() {
 
 			<TaskRewriteModelCard />
 			<InternalTaskModelCard />
+			<PlanModelCard />
 		</div>
 	);
 }
@@ -1149,6 +1151,240 @@ function InternalTaskModelCard() {
 				onPicked={(m) => void onPicked(m)}
 			/>
 		</>
+	);
+}
+
+/**
+ * Card within GeneralSection (T-30) — the plan-role model + thinking level the
+ * deck temporarily switches to while a session is in Plan Mode, restoring the
+ * session's own model on exit. Off by default: when unset, Plan Mode keeps the
+ * session's current model. Mirrors the model cards above.
+ */
+function PlanModelCard() {
+	const [data, setData] = useState<PlanModelResponse | null>(null);
+	const [loading, setLoading] = useState(true);
+	const [pickerOpen, setPickerOpen] = useState(false);
+	const [error, setError] = useState<string | undefined>();
+
+	useEffect(() => {
+		let cancelled = false;
+		void api.getPlanModel()
+			.then((r) => { if (!cancelled) { setData(r); setLoading(false); } })
+			.catch((e) => { if (!cancelled) { setError(e instanceof Error ? e.message : String(e)); setLoading(false); } });
+		return () => { cancelled = true; };
+	}, []);
+
+	async function clearModel(): Promise<void> {
+		setError(undefined);
+		try {
+			setData(await api.setPlanModel(null));
+		} catch (e) {
+			setError(e instanceof Error ? e.message : String(e));
+		}
+	}
+
+	async function onPicked(model: ModelRef, thinking: string | null): Promise<void> {
+		setPickerOpen(false);
+		setError(undefined);
+		try {
+			setData(await api.setPlanModel(model, thinking));
+		} catch (e) {
+			setError(e instanceof Error ? e.message : String(e));
+		}
+	}
+
+	const model = data?.model ?? null;
+	return (
+		<>
+			<div className="rounded-md border border-line bg-paper-2 p-4">
+				<div className="meta mb-1">Plan mode model</div>
+				<p className="mb-3 text-xs text-ink-3">
+					Model (and optional thinking level) the deck switches to while a session is
+					in Plan Mode, restoring the session's own model on exit. Off by default:
+					leave unset and Plan Mode keeps the current model.
+				</p>
+				{error ? (
+					<div className="mb-3 rounded-md border border-danger/30 bg-danger/10 px-3 py-2 font-mono text-xs text-danger">
+						{error}
+					</div>
+				) : null}
+				{loading ? (
+					<div className="py-2 text-sm text-ink-3">Loading…</div>
+				) : (
+					<div className="flex items-center gap-2">
+						<span className="flex-1 font-mono text-xs text-ink-2">
+							{model
+								? `${model.provider} / ${model.id}${data?.thinking ? ` · thinking ${data.thinking}` : ""}`
+								: "(off)"}
+						</span>
+						<Button size="sm" variant="ghost" onClick={() => setPickerOpen(true)}>
+							Change
+						</Button>
+						{model ? (
+							<Button size="sm" variant="ghost" onClick={() => void clearModel()}>
+								Clear
+							</Button>
+						) : null}
+					</div>
+				)}
+			</div>
+			<PlanModelPickerModal
+				open={pickerOpen}
+				current={model}
+				onClose={() => setPickerOpen(false)}
+				onPicked={(m, t) => void onPicked(m, t)}
+			/>
+		</>
+	);
+}
+
+function PlanModelPickerModal({
+	open,
+	current,
+	onClose,
+	onPicked,
+}: {
+	open: boolean;
+	current: ModelRef | null;
+	onClose: () => void;
+	onPicked: (model: ModelRef, thinking: string | null) => void;
+}) {
+	const { loading, error: catalogError, query, setQuery, grouped } = useModelCatalog(undefined, open);
+	const [selectedModel, setSelectedModel] = useState<ModelInfo | undefined>();
+	const [selectedThinking, setSelectedThinking] = useState<string | undefined>();
+
+	useEffect(() => {
+		if (!open) return;
+		setQuery("");
+		setSelectedModel(undefined);
+		setSelectedThinking(undefined);
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, [open]);
+
+	// When the selected model changes, clear thinking if it doesn't support it.
+	useEffect(() => {
+		if (!selectedModel?.thinkingLevels?.length) {
+			setSelectedThinking(undefined);
+		}
+	}, [selectedModel]);
+
+	const thinkingLevels = selectedModel?.thinkingLevels;
+
+	return (
+		<Modal open={open} onClose={onClose} widthClass="max-w-xl">
+			<div className="flex h-11 items-center gap-2 border-b border-line px-3">
+				<div className="meta">Plan mode model</div>
+			</div>
+			<div className="border-b border-line px-3 py-2">
+				<input
+					value={query}
+					onChange={(e) => setQuery(e.target.value)}
+					placeholder="Filter by name, id, or provider"
+					className="field h-8 w-full px-2 text-sm"
+				/>
+			</div>
+			{catalogError ? (
+				<div className="mx-3 my-2 rounded-md border border-danger/30 bg-danger/10 px-3 py-2 font-mono text-xs text-danger">
+					{catalogError}
+				</div>
+			) : null}
+			<div className="max-h-[40vh] overflow-y-auto">
+				{loading ? <div className="px-3 py-6 text-center text-sm text-ink-3">Loading…</div> : null}
+				{grouped.map((g) => (
+					<div key={g.provider}>
+						<div className="border-b border-line bg-paper-2 px-3 py-1 font-mono text-2xs uppercase tracking-meta text-ink-3">
+							{g.provider}
+						</div>
+						{g.items.map((m) => {
+							const active = selectedModel
+								? selectedModel.provider === m.provider && selectedModel.id === m.id
+								: current?.provider === m.provider && current?.id === m.id;
+							return (
+								<button
+									key={`${m.provider}/${m.id}`}
+									type="button"
+									onClick={() => setSelectedModel(active && selectedModel ? undefined : m)}
+									className={cn(
+										"flex w-full items-center gap-2 border-b border-line px-3 py-2 text-left text-sm last:border-b-0 transition-colors",
+										active ? "bg-accent-soft/40 text-accent" : "hover:bg-paper-3/60",
+									)}
+								>
+									<span className="min-w-0 flex-1 truncate">{m.label}</span>
+									{m.thinkingLevels?.length ? (
+										<span className="shrink-0 font-mono text-2xs text-thinking/70">thinking</span>
+									) : null}
+									<span className="shrink-0 font-mono text-2xs text-ink-3">{m.id}</span>
+								</button>
+							);
+						})}
+					</div>
+				))}
+			</div>
+			{thinkingLevels && thinkingLevels.length > 0 ? (
+				<div className="border-t border-line px-3 py-2">
+					<div className="mb-1.5 font-mono text-2xs text-ink-3 uppercase tracking-meta">
+						Thinking level
+					</div>
+					<div className="flex flex-wrap gap-1">
+						<button
+							type="button"
+							onClick={() => setSelectedThinking(undefined)}
+							className={cn(
+								"rounded border px-2 py-0.5 font-mono text-2xs transition-colors",
+								selectedThinking === undefined
+									? "border-accent bg-accent-soft text-accent"
+									: "border-line text-ink-3 hover:border-line-strong hover:text-ink-2",
+							)}
+						>
+							default
+						</button>
+						<button
+							type="button"
+							onClick={() => setSelectedThinking("off")}
+							className={cn(
+								"rounded border px-2 py-0.5 font-mono text-2xs transition-colors",
+								selectedThinking === "off"
+									? "border-accent bg-accent-soft text-accent"
+									: "border-line text-ink-3 hover:border-line-strong hover:text-ink-2",
+							)}
+						>
+							off
+						</button>
+						{thinkingLevels.map((level) => (
+							<button
+								key={level}
+								type="button"
+								onClick={() => setSelectedThinking(level)}
+								className={cn(
+									"rounded border px-2 py-0.5 font-mono text-2xs transition-colors",
+									selectedThinking === level
+										? "border-accent bg-accent-soft text-accent"
+										: "border-line text-ink-3 hover:border-line-strong hover:text-ink-2",
+								)}
+							>
+								{level}
+							</button>
+						))}
+					</div>
+				</div>
+			) : null}
+			<div className="flex items-center justify-end gap-2 border-t border-line bg-paper-2/60 px-3 py-2">
+				<button type="button" onClick={onClose} className="btn-ghost h-8 px-3 text-xs">
+					Cancel
+				</button>
+				<button
+					type="button"
+					onClick={() =>
+						selectedModel &&
+						onPicked({ provider: selectedModel.provider, id: selectedModel.id }, selectedThinking ?? null)
+					}
+					disabled={!selectedModel}
+					className={cn("btn-primary h-8 px-3 text-xs", !selectedModel && "opacity-60")}
+				>
+					Save
+				</button>
+			</div>
+		</Modal>
 	);
 }
 

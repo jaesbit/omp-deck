@@ -6,6 +6,7 @@ import type {
 	EnvEntry,
 	EnvValueSource,
 	InternalTaskModelResponse,
+	PlanModelResponse,
 	ListEnvSettingsResponse,
 	PatchEnvSettingsRequest,
 	PatchEnvSettingsResponse,
@@ -13,6 +14,7 @@ import type {
 	RevealEnvValueResponse,
 	SetDeckBaseUrlRequest,
 	SetInternalTaskModelRequest,
+	SetPlanModelRequest,
 	SetTaskRewriteModelRequest,
 	TaskRewriteModelResponse,
 } from "@omp-deck/protocol";
@@ -29,7 +31,7 @@ import {
 	readManagedEnvFile,
 	writeManagedEnvUpdates,
 } from "./env-store.ts";
-import { getDeckBaseUrl, getInternalTaskModel, getTaskRewriteModel, setDeckBaseUrl, setInternalTaskModel, setTaskRewriteModel } from "./db/server-settings.ts";
+import { getDeckBaseUrl, getInternalTaskModel, getPlanModel, getTaskRewriteModel, setDeckBaseUrl, setInternalTaskModel, setPlanModel, setTaskRewriteModel } from "./db/server-settings.ts";
 import { setLogLevel } from "./log.ts";
 import type { AgentBridge } from "./bridge/types.ts";
 
@@ -177,6 +179,42 @@ export function buildSettingsRouter(
 		return c.json(resp);
 	});
 
+	app.get("/settings/plan-model", (c) => {
+		const cfg = getPlanModel();
+		const body: PlanModelResponse = cfg
+			? { model: { provider: cfg.provider, id: cfg.id }, thinking: cfg.thinking ?? null }
+			: { model: null, thinking: null };
+		return c.json(body);
+	});
+
+	app.put("/settings/plan-model", async (c) => {
+		let body: SetPlanModelRequest;
+		try {
+			body = (await c.req.json()) as SetPlanModelRequest;
+		} catch {
+			return c.json({ error: "invalid json body" }, 400);
+		}
+		if (body.model !== null && (typeof body.model !== "object" || typeof body.model.provider !== "string" || typeof body.model.id !== "string")) {
+			return c.json({ error: "model must be {provider: string, id: string} or null" }, 400);
+		}
+		if (body.thinking != null && typeof body.thinking !== "string") {
+			return c.json({ error: "thinking must be a string or null" }, 400);
+		}
+		if (body.model !== null) {
+			const catalog = await bridge.listModels();
+			const known = catalog.some((m) => m.provider === body.model!.provider && m.id === body.model!.id);
+			if (!known) return c.json({ error: `model ${body.model.provider}/${body.model.id} is not in the available catalog` }, 400);
+		}
+		const cfg = setPlanModel(
+			body.model === null
+				? null
+				: { provider: body.model.provider, id: body.model.id, ...(body.thinking ? { thinking: body.thinking } : {}) },
+		);
+		const resp: PlanModelResponse = cfg
+			? { model: { provider: cfg.provider, id: cfg.id }, thinking: cfg.thinking ?? null }
+			: { model: null, thinking: null };
+		return c.json(resp);
+	});
 
 	return app;
 }
