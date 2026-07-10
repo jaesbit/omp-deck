@@ -29,6 +29,7 @@ import { Button } from "@/components/ui/Button";
 import { Modal } from "@/components/ui/Modal";
 import { OAuthFlowModal } from "@/components/settings/OAuthFlowModal";
 import { DelegationSection } from "@/components/settings/DelegationSection";
+import { AdvisorsSection } from "@/components/settings/AdvisorsSection";
 import { api } from "@/lib/api";
 import { bridgesApi } from "@/lib/bridges-api";
 import { settingsApi } from "@/lib/settings-api";
@@ -43,6 +44,7 @@ import { cn } from "@/lib/utils";
 
 const SECTIONS = [
 	{ id: "general", label: "General", description: "Deck base URL for session links" },
+	{ id: "advisors", label: "Advisors", description: "Second-opinion review for new sessions" },
 	{ id: "env", label: "Env", description: "Process and deck-managed variables" },
 	{ id: "providers", label: "Providers", description: "OAuth sign-in and API-key state" },
 	{ id: "messaging", label: "Messaging", description: "Telegram and future chat bridges" },
@@ -99,6 +101,8 @@ export function SettingsView() {
 						<section className="min-h-0 overflow-auto p-4">
 						{selected === "general" ? (
 								<GeneralSection />
+							) : selected === "advisors" ? (
+								<AdvisorsSection />
 							) : selected === "env" ? (
 								<EnvSection />
 							) : selected === "providers" ? (

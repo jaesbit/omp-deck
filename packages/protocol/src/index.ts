@@ -2134,6 +2134,22 @@ export interface SetDeckBaseUrlRequest {
 	deckBaseUrl: string | null;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Advisors — OMP's second-opinion runtime, globally configured by Deck
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** `GET /api/advisors/settings`. The Deck enables advisors by default until a user chooses otherwise. */
+export interface AdvisorSettingsResponse {
+	enabled: boolean;
+	/** Whether the current value has been persisted explicitly in OMP's config file. */
+	configured: boolean;
+}
+
+/** `PUT /api/advisors/settings`. */
+export interface SetAdvisorSettingsRequest {
+	enabled: boolean;
+}
+
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Task rewrite (T-76) — AI-assisted task body/title improvement

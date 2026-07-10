@@ -1,6 +1,7 @@
 import type {
 	ApplyDelegationArtifactRequest,
 	ApplyDelegationArtifactResponse,
+	AdvisorSettingsResponse,
 	AutoWorkConfig,
 	AutoWorkCycleResult,
 	AutoWorkGlobalConfig,
@@ -37,6 +38,7 @@ import type {
 	PlanModelResponse,
 	SetPlanModelRequest,
 	SetTaskRewriteModelRequest,
+	SetAdvisorSettingsRequest,
 	SubscriptionUsageResponse,
 	TaskPriority,
 	TaskRewriteModelResponse,
@@ -157,6 +159,15 @@ export const api = {
 		return request<DeckBaseUrlResponse>("/settings/deck-base-url", {
 			method: "PUT",
 			body: JSON.stringify({ deckBaseUrl } satisfies SetDeckBaseUrlRequest),
+		});
+	},
+	getAdvisorSettings(): Promise<AdvisorSettingsResponse> {
+		return request<AdvisorSettingsResponse>("/advisors/settings");
+	},
+	setAdvisorEnabled(enabled: boolean): Promise<AdvisorSettingsResponse> {
+		return request<AdvisorSettingsResponse>("/advisors/settings", {
+			method: "PUT",
+			body: JSON.stringify({ enabled } satisfies SetAdvisorSettingsRequest),
 		});
 	},
 	listAutoWorkRuns(filter: {

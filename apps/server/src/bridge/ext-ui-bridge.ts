@@ -20,6 +20,7 @@
  *   - `@oh-my-pi/pi-coding-agent/src/modes/acp/acp-agent.ts` (ACP bridge)
  */
 import type {
+	AutocompleteProviderFactory,
 	ExtensionUIContext,
 	ExtensionUIDialogOptions,
 	ExtensionUiComponentFactory,
@@ -199,6 +200,9 @@ export class ExtensionUIBridge implements ExtensionUIContext {
 	onTerminalInput(_handler: TerminalInputHandler): () => void {
 		return () => {};
 	}
+
+	/** The browser composer has no TUI autocomplete pipeline, so headless extensions are accepted and ignored. */
+	addAutocompleteProvider(_factory: AutocompleteProviderFactory): void {}
 
 	setStatus(_key: string, _text: string | undefined): void {}
 
