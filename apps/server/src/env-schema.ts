@@ -66,14 +66,6 @@ export const ENV_SCHEMA: EnvSchemaEntry[] = [
 		description: "Milliseconds before unsubscribed idle sessions are reaped. 0 disables reaping.",
 	},
 	{
-		key: "OMP_DECK_AUTO_START",
-		valueType: "string",
-		sensitive: false,
-		restartRequired: false,
-		hotApply: true,
-		description: "Prompt fired automatically when a new session opens. Set to `/start` after creating `~/.omp/agent/commands/start.md`. Leave empty to disable (default).",
-	},
-	{
 		key: "OMP_DECK_WEB_DIST",
 		valueType: "path",
 		sensitive: false,

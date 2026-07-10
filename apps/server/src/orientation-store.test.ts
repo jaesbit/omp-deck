@@ -10,10 +10,8 @@ import {
 	getPreludeFilePath,
 	readMaintenanceGateState,
 	readPreludeOverride,
-	readStartCommand,
 	renderMaintenanceReminder,
 	writePreludeOverride,
-	writeStartCommand,
 } from "./orientation-store.ts";
 
 const ENV_KEYS = [
@@ -35,14 +33,6 @@ beforeEach(() => {
 	tmpDataDir = mkdtempSync(path.join(os.tmpdir(), "omp-deck-orient-data-"));
 	tmpHomeDir = mkdtempSync(path.join(os.tmpdir(), "omp-deck-orient-home-"));
 	process.env.OMP_DECK_DATA_DIR = tmpDataDir;
-	// Bun's os.homedir() reads the real OS user record and ignores a JS-side
-	// process.env.HOME/USERPROFILE reassignment at runtime (confirmed against
-	// Bun 1.3.14) — unlike Node, which re-checks the env var on every call.
-	// Relying on the env-var override here silently no-ops and lets
-	// getStartCommandPath() fall through to the real `~/.omp/agent/commands/
-	// start.md`, clobbering the user's actual file with test fixtures. Stub
-	// the function itself instead so every orientation-store call under test
-	// resolves against the sandboxed tmp dir regardless of runtime env quirks.
 	homedirSpy = spyOn(os, "homedir").mockReturnValue(tmpHomeDir);
 	for (const k of ENV_KEYS) {
 		if (k !== "OMP_DECK_DATA_DIR") delete process.env[k];
@@ -93,36 +83,54 @@ describe("buildDefaultPrelude", () => {
 		expect(buildDefaultPrelude()).toBe(DEFAULT_PRELUDE);
 	});
 
+	test("includes task lookup and direct greeting instructions without slash start", () => {
+		const result = buildDefaultPrelude();
+		expect(result).toContain("GET /api/tasks?cwd=<url-encoded session cwd>");
+        expect(result).toContain("Greet the user directly");
+		expect(result).not.toContain("/start");
+	});
+    test("uses the configured API port and keeps personal system notes out of the scaffold", () => {
+        const configuredPort = Number.parseInt(process.env.OMP_DECK_PORT?.trim() ?? "", 10);
+        const expectedPort = Number.isFinite(configuredPort) ? configuredPort : 8787;
+        expect(DEFAULT_PRELUDE).toContain(`Local API base: http://127.0.0.1:${expectedPort}/api`);
+        for (const personalHeading of ["# Working voice", "# Active projects", "# Org system hub", "# Rules index", "# Search performance"]) {
+            expect(DEFAULT_PRELUDE).not.toContain(personalHeading);
+        }
+    });
 	test("inlines every top-level Markdown file in deterministic filename order", () => {
 		const kbSystemDir = path.join(tmpHomeDir, "kb", "system");
 		mkdirSync(kbSystemDir, { recursive: true });
-		// Deliberately create these out of filename order. The arbitrary filename
-		// proves discovery is not limited to a predefined set of system files.
-		const files = [
-			["working-voice.md", "# Voice\nvoice-content\n"],
-			["projects-hub.md", "# Projects\nprojects-content\n"],
-			["arbitrary-guidance.md", "---\ntype: k\n---\n# Arbitrary\narbitrary-content\n"],
-			["org-system-hub.md", "# Org\norg-content\n"],
-			["deck-orientation.md", "# Deck\ndeck-content\n"],
-		] as const;
+        // Deliberately create these out of filename order. The custom filename
+        // proves discovery is not limited to a predefined set of system files.
+        const files = [
+            ["working-voice.md", "# Voice\nvoice-content\n"],
+            ["projects-hub.md", "# Projects\nprojects-content\n"],
+            ["custom.md", "---\ntype: k\n---\n# Custom\ncustom-content\n"],
+            ["org-system-hub.md", "# Org\norg-content\n"],
+            ["deck-orientation.md", "# Deck\ndeck-content\n"],
+            ["rules-index.md", "# Rules\nrules-index-content\n"],
+            ["search-performance.md", "# Search\nsearch-performance-content\n"],
+        ] as const;
 		for (const [filename, content] of files) {
 			writeFileSync(path.join(kbSystemDir, filename), content);
 		}
 
 		const result = buildDefaultPrelude();
-		expect(result).toContain("# Arbitrary\narbitrary-content");
-		expect(result).not.toContain("---\ntype: k\n---");
-		expect(result).toBe(
-			[
-				"# Arbitrary\narbitrary-content\n",
-				"# Deck\ndeck-content\n",
-				"# Org\norg-content\n",
-				"# Projects\nprojects-content\n",
-				"# Voice\nvoice-content\n",
-			].join("\n") +
-				"\n" +
-				DEFAULT_PRELUDE,
-		);
+        expect(result).toContain("# Custom\ncustom-content");
+        expect(result).not.toContain("---\ntype: k\n---");
+        expect(result).toBe(
+            [
+                "# Custom\ncustom-content\n",
+                "# Deck\ndeck-content\n",
+                "# Org\norg-content\n",
+                "# Projects\nprojects-content\n",
+                "# Rules\nrules-index-content\n",
+                "# Search\nsearch-performance-content\n",
+                "# Voice\nvoice-content\n",
+            ].join("\n") +
+                "\n" +
+                DEFAULT_PRELUDE,
+        );
 	});
 
 	test("ignores non-Markdown files and Markdown files below subdirectories", () => {
@@ -147,15 +155,18 @@ describe("buildDefaultPrelude", () => {
 		expect(buildDefaultPrelude()).toBe("# Voice\nvoice-content\n\n" + DEFAULT_PRELUDE);
 	});
 
-	test("getEffectivePrelude returns buildDefaultPrelude output when no override", () => {
-		const kbSystemDir = path.join(tmpHomeDir, "kb", "system");
-		mkdirSync(kbSystemDir, { recursive: true });
-		writeFileSync(path.join(kbSystemDir, "working-voice.md"), "# Voice\nvoice-content\n");
+    test("injects a newly added top-level system document without code changes", () => {
+        const kbSystemDir = path.join(tmpHomeDir, "kb", "system");
+        mkdirSync(kbSystemDir, { recursive: true });
+        writeFileSync(path.join(kbSystemDir, "custom.md"), "# Custom system rule\ncustom-injection-content\n");
 
-		const result = getEffectivePrelude();
-		expect(result).toContain("voice-content");
-		expect(result).toContain(DEFAULT_PRELUDE);
-	});
+        const result = getEffectivePrelude();
+
+        expect(result).toContain("Every top-level file under `kb://system/` is injected as a hard system rule.");
+        expect(result).toContain("### custom");
+        expect(result).toContain("# Custom system rule\ncustom-injection-content");
+        expect(result).toContain(DEFAULT_PRELUDE);
+    });
 
 	test("getEffectivePrelude prefers override over KB content", () => {
 		const kbSystemDir = path.join(tmpHomeDir, "kb", "system");
@@ -167,61 +178,6 @@ describe("buildDefaultPrelude", () => {
 	});
 });
 
-describe("start command", () => {
-	test("missing file returns exists=false with empty fields", () => {
-		const cmd = readStartCommand();
-		expect(cmd.exists).toBe(false);
-		expect(cmd.description).toBe("");
-		expect(cmd.body).toBe("");
-		expect(cmd.path.endsWith(path.join(".omp", "agent", "commands", "start.md"))).toBe(true);
-	});
-
-	test("write + read round-trips description and body verbatim", () => {
-		const desc = "Orient — load context, then list";
-		const body = "Line 1\nLine 2 with — em-dash\n";
-		writeStartCommand(desc, body);
-		const cmd = readStartCommand();
-		expect(cmd.exists).toBe(true);
-		expect(cmd.description).toBe(desc);
-		expect(cmd.body).toBe(body);
-	});
-
-	test("empty description omits the frontmatter block", () => {
-		writeStartCommand("", "just body content\n");
-		const onDisk = readFileSync(readStartCommand().path, "utf8");
-		expect(onDisk.startsWith("---")).toBe(false);
-		expect(onDisk).toBe("just body content\n");
-		const cmd = readStartCommand();
-		expect(cmd.description).toBe("");
-		expect(cmd.body).toBe("just body content\n");
-	});
-
-	test("reads existing frontmatter without description as empty", () => {
-		const target = readStartCommand().path;
-		const dir = path.dirname(target);
-		mkdirSync(dir, { recursive: true });
-		writeFileSync(
-			target,
-			`---\nargs: ["x"]\n---\nbody here\n`,
-			{ encoding: "utf8", flag: "w" },
-		);
-		expect(existsSync(dir)).toBe(true);
-		const cmd = readStartCommand();
-		expect(cmd.description).toBe("");
-		expect(cmd.body).toBe("body here\n");
-	});
-
-	test("strips surrounding quotes from a quoted description", () => {
-		const target = readStartCommand().path;
-		mkdirSync(path.dirname(target), { recursive: true });
-		writeFileSync(
-			target,
-			`---\ndescription: "Quoted summary"\n---\nbody\n`,
-			{ encoding: "utf8", flag: "w" },
-		);
-		expect(readStartCommand().description).toBe("Quoted summary");
-	});
-});
 
 describe("maintenance gate state", () => {
 	test("defaults to enabled with all knobs at compiled defaults", () => {

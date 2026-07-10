@@ -87,7 +87,6 @@ export interface ProcessAgentBridgeOptions {
 	workerEntryPath: string;
 	idleTimeoutMs?: number;
 	reapIntervalMs?: number;
-	autoStartCommand?: string | null;
 	/** Test seam; production always uses the Bun worker factory when omitted. */
 	spawnWorker?: AgentWorkerSpawn;
 }
@@ -97,14 +96,12 @@ export class ProcessAgentBridge implements AgentBridge {
 	private readonly spawnWorker: AgentWorkerSpawn;
 	private readonly sessionlessBridge = new InProcessAgentBridge({
 		idleTimeoutMs: 0,
-		autoStartCommand: "",
 	});
 	private readonly active = new Map<string, ActiveProcess>();
 	private readonly processes = new Set<ActiveProcess>();
 	private readonly pendingResumes = new Map<string, Promise<ProcessSessionHandle>>();
 	private idleTimeoutMs: number;
 	private readonly reapIntervalMs: number;
-	private autoStartCommand: string | null;
 	private reaperTimer: ReturnType<typeof setInterval> | undefined;
 	private disposed = false;
 	private disposePromise: Promise<void> | undefined;
@@ -116,15 +113,11 @@ export class ProcessAgentBridge implements AgentBridge {
 			((onMessage) => spawnAgentWorker(this.workerEntryPath, onMessage));
 		this.idleTimeoutMs = options.idleTimeoutMs ?? 15 * 60_000;
 		this.reapIntervalMs = options.reapIntervalMs ?? 60_000;
-		this.autoStartCommand = options.autoStartCommand === undefined ? "/start" : options.autoStartCommand;
 		if (this.idleTimeoutMs > 0) this.startReaper();
 	}
 
 	async createSession(opts: CreateSessionOpts): Promise<SessionHandle> {
-		return this.spawnSession("bridge.createSession", [
-			opts,
-			{ autoStartCommand: this.autoStartCommand },
-		]);
+		return this.spawnSession("bridge.createSession", [opts]);
 	}
 
 	resumeSession(opts: ResumeSessionOpts): Promise<SessionHandle> {
@@ -138,10 +131,7 @@ export class ProcessAgentBridge implements AgentBridge {
 
 		const pending = this.pendingResumes.get(sessionPath);
 		if (pending) return pending;
-		const resume = this.spawnSession("bridge.resumeSession", [
-			opts,
-			{ autoStartCommand: this.autoStartCommand },
-		]).finally(() => {
+		const resume = this.spawnSession("bridge.resumeSession", [opts]).finally(() => {
 			if (this.pendingResumes.get(sessionPath) === resume) this.pendingResumes.delete(sessionPath);
 		});
 		this.pendingResumes.set(sessionPath, resume);
@@ -193,7 +183,6 @@ export class ProcessAgentBridge implements AgentBridge {
 	}
 
 	applyEnvUpdate(update: RuntimeEnvUpdate): void {
-		if (update.autoStartCommand !== undefined) this.autoStartCommand = update.autoStartCommand;
 		if (update.idleTimeoutMs !== undefined && update.idleTimeoutMs !== this.idleTimeoutMs) {
 			this.idleTimeoutMs = update.idleTimeoutMs;
 			if (this.reaperTimer) {

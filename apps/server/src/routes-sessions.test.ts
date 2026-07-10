@@ -16,6 +16,8 @@ import * as path from "node:path";
 
 import type { Config } from "./config.ts";
 import { closeDb, openDb } from "./db/index.ts";
+import { createTask } from "./db/tasks.ts";
+import { KbService } from "./kb-service.ts";
 import { buildRouter } from "./routes.ts";
 import type { AgentBridge, CreateSessionOpts, SessionHandle } from "./bridge/types.ts";
 import { broadcastBus, type BroadcastFrame } from "./broadcast-bus.ts";
@@ -77,13 +79,12 @@ function fakeConfig(defaultCwd: string): Config {
 		idleTimeoutMs: 0,
 		dbPath: ":memory:",
 		uploadsRoot: path.join(os.tmpdir(), "omp-deck-uploads-test"),
-		autoStartCommand: null,
 	};
 }
 
 const noopService = {} as never;
 
-function buildTestApp(bridge: AgentBridge, cwd: string) {
+function buildTestApp(bridge: AgentBridge, cwd: string, kb: KbService = noopService) {
 	return buildRouter(
 		bridge,
 		fakeConfig(cwd),
@@ -91,7 +92,7 @@ function buildTestApp(bridge: AgentBridge, cwd: string) {
 		noopService,
 		noopService,
 		noopService,
-		noopService,
+		kb,
 	);
 }
 
@@ -448,5 +449,71 @@ describe("GET /sessions/monitor", () => {
 			],
 		})
 		expect(listCalls).toEqual([{ cwd }])
+	})
+})
+
+describe("POST /tasks/:id/rewrite", () => {
+	test("returns the rewrite while running in the task-rewrite integration, not the session prelude", async () => {
+		const cwd = "/workspaces/rewrite"
+		const task = createTask({ title: "Deploy release", body: "Document the rollback plan.", cwd })
+		const kbRoot = fs.mkdtempSync(path.join(os.tmpdir(), "omp-deck-rewrite-kb-"))
+		const basePrompt = "## Shared rewrite policy\n\nKeep the requested scope."
+		const userPrompt = "## Local rewrite policy\n\nKeep release terminology."
+		fs.mkdirSync(path.join(kbRoot, "integrations"), { recursive: true })
+		fs.writeFileSync(path.join(kbRoot, "integrations", "task-rewrite.md"), basePrompt, "utf8")
+		fs.writeFileSync(path.join(kbRoot, "integrations", "task-rewrite.user.md"), userPrompt, "utf8")
+
+		let terminalListener: ((event: unknown) => void) | undefined
+		const rewriteSession = {
+			sessionId: "rewrite-session",
+			sessionFile: undefined,
+			cwd,
+			subscribe(listener: (event: unknown) => void) {
+				terminalListener = listener
+				return () => {}
+			},
+			async prompt() {
+				terminalListener?.({ type: "turn_end", message: { stopReason: "end_turn" } })
+			},
+			snapshot() {
+				return {
+					messages: [
+						{ role: "assistant", content: '{"title":"Clarify release deployment","body":"Document the rollback plan and deploy steps."}' },
+					],
+				}
+			},
+		} as unknown as SessionHandle
+		const rewriteCalls: CreateSessionOpts[] = []
+		const bridge: AgentBridge = {
+			...fakeBridge([]),
+			async createSession(opts: CreateSessionOpts) {
+				rewriteCalls.push(opts)
+				return rewriteSession
+			},
+			async deleteSession() {
+				return { deleted: true }
+			},
+		}
+
+		try {
+			const res = await buildTestApp(bridge, cwd, new KbService({ root: kbRoot })).request(`/tasks/${task.id}/rewrite`, {
+				method: "POST",
+			})
+
+			expect(res.status).toBe(200)
+			expect(await res.json()).toEqual({
+				title: "Clarify release deployment",
+				body: "Document the rollback plan and deploy steps.",
+			})
+			expect(rewriteCalls).toEqual([
+				{
+					cwd,
+					internal: true,
+					systemPromptOverride: `${basePrompt}\n\n${userPrompt}`,
+				},
+			])
+		} finally {
+			fs.rmSync(kbRoot, { recursive: true, force: true })
+		}
 	})
 })

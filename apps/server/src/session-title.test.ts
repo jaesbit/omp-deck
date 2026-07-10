@@ -1,7 +1,7 @@
 /**
  * Tests the observable title-generation boundary. The title service reads its
- * model and editable prompt from the real settings DB, then delegates one
- * direct request to the bridge without creating an auxiliary session.
+ * model from the real settings DB and its prompt from the composed KB
+ * integration, then delegates one direct request to the bridge.
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
@@ -12,7 +12,7 @@ import type { ModelRef } from "@omp-deck/protocol";
 
 import type { AgentBridge } from "./bridge/types.ts";
 import { closeDb, openDb } from "./db/index.ts";
-import { setInternalTaskModel, setSessionTitlePrompt } from "./db/server-settings.ts";
+import { setInternalTaskModel } from "./db/server-settings.ts";
 import { createTask } from "./db/tasks.ts";
 import { generateSessionTitle } from "./session-title.ts";
 
@@ -74,9 +74,29 @@ describe("generateSessionTitle", () => {
 		expect(result).toBe("Fix the login flow");
 	});
 
-	test("uses the configured model and effective prompt, including linked task context", async () => {
+	test("uses only the base session-title integration plus its user sidecar", async () => {
+		const savedKbRoot = process.env.OMP_DECK_KB_ROOT;
+		const kbRoot = fs.mkdtempSync(path.join(os.tmpdir(), "omp-deck-session-title-kb-"));
+		fs.mkdirSync(path.join(kbRoot, "integrations"), { recursive: true });
+		fs.writeFileSync(path.join(kbRoot, "integrations", "session-title.md"), "Base title instructions.", "utf8");
+		fs.writeFileSync(path.join(kbRoot, "integrations", "session-title.user.md"), "User title addition.", "utf8");
+		process.env.OMP_DECK_KB_ROOT = kbRoot;
+		setInternalTaskModel({ provider: "anthropic", id: "claude-good" });
+		const calls: GenerateTitleRequest[] = [];
+
+		try {
+			await generateSessionTitle(fakeBridge("Title", calls), { sessionId: "session-1", firstMessage: "Hi" });
+			expect(calls).toHaveLength(1);
+			expect(calls[0]?.systemPrompt).toBe("Base title instructions.\n\nUser title addition.");
+		} finally {
+			if (savedKbRoot === undefined) delete process.env.OMP_DECK_KB_ROOT;
+			else process.env.OMP_DECK_KB_ROOT = savedKbRoot;
+			fs.rmSync(kbRoot, { recursive: true, force: true });
+		}
+	});
+
+	test("includes a linked task's title and body in the title generation request", async () => {
 		setInternalTaskModel({ provider: "openai", id: "gpt-title" });
-		setSessionTitlePrompt("Produce an operational title only.");
 		const task = createTask({ title: "Fix the login flow", body: "Steps to repro..." });
 		const calls: GenerateTitleRequest[] = [];
 
@@ -85,14 +105,7 @@ describe("generateSessionTitle", () => {
 			firstMessage: `Please look at GET /api/tasks/${task.id} and fix it`,
 		});
 
-		expect(calls).toEqual([
-			{
-				sessionId: "session-target-42",
-				model: { provider: "openai", id: "gpt-title" },
-				systemPrompt: "Produce an operational title only.",
-				userMessage: expect.stringContaining(`Linked kanban task: T-${task.displayId}: Fix the login flow`),
-			},
-		]);
+		expect(calls[0]?.userMessage).toContain(`Linked kanban task: T-${task.displayId}: Fix the login flow`);
 		expect(calls[0]?.userMessage).toContain("Steps to repro...");
 	});
 

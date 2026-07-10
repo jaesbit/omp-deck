@@ -1,19 +1,14 @@
 /**
- * Exercises the real Hono router for internal task model and session-title
- * prompt settings. Each assertion covers a persisted API contract rather than
- * the router's internal storage wiring.
+ * Exercises the real Hono router for the internal task model setting. Each
+ * assertion covers a persisted API contract rather than the router's internal
+ * storage wiring.
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-import type {
-	InternalTaskModelResponse,
-	ModelInfo,
-	SessionTitlePromptResponse,
-	SetSessionTitlePromptRequest,
-} from "@omp-deck/protocol";
+import type { InternalTaskModelResponse, ModelInfo } from "@omp-deck/protocol";
 
 import { closeDb, openDb } from "./db/index.ts";
 import { buildSettingsRouter } from "./routes-settings.ts";
@@ -133,69 +128,4 @@ describe("PUT /settings/internal-task-model", () => {
 		const res = await app.request("/settings/internal-task-model", { method: "PUT", body: "not json" });
 		expect(res.status).toBe(400);
 	});
-});
-
-describe("GET /settings/session-title-prompt", () => {
-	test("resolves the effective prompt to the default when no override is stored", async () => {
-		const app = buildSettingsRouter(fakeBridge(), fakeConfig());
-		const res = await app.request("/settings/session-title-prompt");
-
-		expect(res.status).toBe(200);
-		const body = (await res.json()) as SessionTitlePromptResponse;
-		expect(body.override).toBeNull();
-		expect(body.effective).toBe(body.default);
-	});
-});
-
-describe("PUT /settings/session-title-prompt", () => {
-	test("persists an override and exposes it as the effective prompt", async () => {
-		const app = buildSettingsRouter(fakeBridge(), fakeConfig());
-		const override = "Write a concise Spanish title.";
-		const request: SetSessionTitlePromptRequest = { value: override };
-		const putRes = await app.request("/settings/session-title-prompt", {
-			method: "PUT",
-			body: JSON.stringify(request),
-		});
-
-		expect(putRes.status).toBe(200);
-		const putBody = (await putRes.json()) as SessionTitlePromptResponse;
-		expect(putBody.override).toBe(override);
-		expect(putBody.effective).toBe(override);
-
-		const getRes = await app.request("/settings/session-title-prompt");
-		expect((await getRes.json()) as SessionTitlePromptResponse).toEqual(putBody);
-	});
-
-	test("null removes an override and restores the default resolution", async () => {
-		const app = buildSettingsRouter(fakeBridge(), fakeConfig());
-		await app.request("/settings/session-title-prompt", {
-			method: "PUT",
-			body: JSON.stringify({ value: "A temporary title instruction." } satisfies SetSessionTitlePromptRequest),
-		});
-
-		const clearRes = await app.request("/settings/session-title-prompt", {
-			method: "PUT",
-			body: JSON.stringify({ value: null } satisfies SetSessionTitlePromptRequest),
-		});
-
-		expect(clearRes.status).toBe(200);
-		const clearBody = (await clearRes.json()) as SessionTitlePromptResponse;
-		expect(clearBody.override).toBeNull();
-		expect(clearBody.effective).toBe(clearBody.default);
-
-		const getRes = await app.request("/settings/session-title-prompt");
-		expect((await getRes.json()) as SessionTitlePromptResponse).toEqual(clearBody);
-	});
-
-	for (const [name, body] of [
-		["invalid json", "not json"],
-		["non-string, non-null value", JSON.stringify({ value: 42 })],
-	] as const) {
-		test(`rejects ${name}`, async () => {
-			const app = buildSettingsRouter(fakeBridge(), fakeConfig());
-			const res = await app.request("/settings/session-title-prompt", { method: "PUT", body });
-
-			expect(res.status).toBe(400);
-		});
-	}
 });

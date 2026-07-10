@@ -154,7 +154,6 @@ function createHarness(holdOnSpawn?: WorkerMethod): Harness {
 	const bridge = new ProcessAgentBridge({
 		workerEntryPath: "/never-executed/agent-worker.ts",
 		idleTimeoutMs: 0,
-		autoStartCommand: null,
 		spawnWorker: (onMessage) => {
 			const worker = new FakeAgentWorker(workers.length + 1, onMessage);
 			if (holdOnSpawn) worker.holdNext(holdOnSpawn);
@@ -168,11 +167,10 @@ function createHarness(holdOnSpawn?: WorkerMethod): Harness {
 
 async function createTwoSessions(harness: Harness) {
 	return Promise.all([
-		harness.bridge.createSession({ cwd: "/same-workspace", suppressAutoStart: true }),
-		harness.bridge.createSession({ cwd: "/same-workspace", suppressAutoStart: true }),
+		harness.bridge.createSession({ cwd: "/same-workspace" }),
+		harness.bridge.createSession({ cwd: "/same-workspace" }),
 	]);
 }
-
 describe("ProcessAgentBridge worker isolation", () => {
 	test("simultaneous root sessions use distinct workers even when process-local child ids collide", async () => {
 		const harness = createHarness();
@@ -204,7 +202,6 @@ describe("ProcessAgentBridge worker isolation", () => {
 		const harness = createHarness();
 		const handle = await harness.bridge.createSession({
 			cwd: "/same-workspace",
-			suppressAutoStart: true,
 		});
 		const worker = harness.workers[0]!;
 		worker.holdNext("session.cancelQueuedById", 2);
@@ -288,7 +285,6 @@ describe("ProcessAgentBridge worker isolation", () => {
 		const harness = createHarness();
 		const handle = await harness.bridge.createSession({
 			cwd: "/same-workspace",
-			suppressAutoStart: true,
 		});
 		const broadcastFrames: BroadcastFrame[] = [];
 		const sessionEvents: AgentSessionEventJson[] = [];
@@ -346,7 +342,6 @@ describe("ProcessAgentBridge worker isolation", () => {
 		const harness = createHarness();
 		const handle = await harness.bridge.createSession({
 			cwd: "/same-workspace",
-			suppressAutoStart: true,
 		});
 		const worker = harness.workers[0]!;
 
