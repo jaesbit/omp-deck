@@ -1,4 +1,6 @@
 import type {
+	ApplyDelegationArtifactRequest,
+	ApplyDelegationArtifactResponse,
 	AutoWorkConfig,
 	AutoWorkCycleResult,
 	AutoWorkGlobalConfig,
@@ -7,6 +9,10 @@ import type {
 	CreateSessionRequest,
 	CreateSessionResponse,
 	DeckBaseUrlResponse,
+	DelegationArtifactResponse,
+	DiscardDelegationArtifactRequest,
+	DiscardDelegationArtifactResponse,
+	GetDelegationSettingsResponse,
 	InternalTaskModelResponse,
 	ListAutoWorkRunsResponse,
 	ListDirResponse,
@@ -19,6 +25,8 @@ import type {
 	ListWorkspacePreferencesResponse,
 	ListWorkspacesResponse,
 	ModelRef,
+	PatchDelegationSettingsRequest,
+	PatchDelegationSettingsResponse,
 	RewriteTaskRequest,
 	RewriteTaskResponse,
 	SessionHistoryResponse,
@@ -224,6 +232,30 @@ export const api = {
 		return request<SessionTitlePromptResponse>("/settings/session-title-prompt", {
 			method: "PUT",
 			body: JSON.stringify({ value } satisfies SetSessionTitlePromptRequest),
+		});
+	},
+	getDelegationSettings(): Promise<GetDelegationSettingsResponse> {
+		return request<GetDelegationSettingsResponse>("/delegation/settings");
+	},
+	patchDelegationSettings(body: PatchDelegationSettingsRequest): Promise<PatchDelegationSettingsResponse> {
+		return request<PatchDelegationSettingsResponse>("/delegation/settings", {
+			method: "PATCH",
+			body: JSON.stringify(body),
+		});
+	},
+	getDelegationArtifact(path: string): Promise<DelegationArtifactResponse> {
+		return request<DelegationArtifactResponse>(`/delegation/artifact?path=${encodeURIComponent(path)}`);
+	},
+	applyDelegationArtifact(body: ApplyDelegationArtifactRequest): Promise<ApplyDelegationArtifactResponse> {
+		return request<ApplyDelegationArtifactResponse>("/delegation/artifact/apply", {
+			method: "POST",
+			body: JSON.stringify(body),
+		});
+	},
+	discardDelegationArtifact(body: DiscardDelegationArtifactRequest): Promise<DiscardDelegationArtifactResponse> {
+		return request<DiscardDelegationArtifactResponse>("/delegation/artifact/discard", {
+			method: "POST",
+			body: JSON.stringify(body),
 		});
 	},
 };
