@@ -777,6 +777,38 @@ describe("waitForAutoWorkSessionTerminal", () => {
 		handle.emit({ type: "turn_end", message: { stopReason: "end_turn" } });
 		expect(await terminal).toBe("completed");
 	});
+
+	test.each(["toolUse", "tool_use"])("ignores an intermediate %s turn_end until the terminal turn completes", async (stopReason) => {
+		const handle = new FakeSessionHandle("sess_tool_continuation", null);
+		const terminal = waitForAutoWorkSessionTerminal(handle as unknown as SessionHandle, 60_000, () => handle.prompt("go"));
+
+		handle.emit({ type: "turn_end", message: { stopReason } });
+		handle.emit({ type: "turn_end", message: { stopReason: "end_turn" } });
+
+		expect(await terminal).toBe("completed");
+	});
+
+	test("preserves a real terminal failure after an intermediate tool-use round", async () => {
+		const handle = new FakeSessionHandle("sess_tool_then_failure", null);
+		const terminal = waitForAutoWorkSessionTerminal(handle as unknown as SessionHandle, 60_000, () => handle.prompt("go"));
+
+		handle.emit({ type: "turn_end", message: { stopReason: "toolUse" } });
+		handle.emit({ type: "turn_end", message: { stopReason: "error" } });
+
+		expect(await terminal).toBe("failed");
+	});
+
+	test("uses the final agent_end message to classify the complete agent loop", async () => {
+		const handle = new FakeSessionHandle("sess_agent_end", null);
+		const terminal = waitForAutoWorkSessionTerminal(handle as unknown as SessionHandle, 60_000);
+
+		handle.emit({
+			type: "agent_end",
+			messages: [{ stopReason: "toolUse" }, { stopReason: "end_turn" }],
+		});
+
+		expect(await terminal).toBe("completed");
+	});
 });
 
 describe("decideSqueezeTiming", () => {
@@ -1332,6 +1364,31 @@ describe("reconcileInactiveAutoWorkRuns", () => {
 		expect(listAutoWorkRuns({ taskId: task.id })[0]).toEqual(expect.objectContaining({ id: runId, status: "running" }));
 		expect(getTask(task.id)?.stateId).toBe("s_active");
 	});
+
+	test("keeps an expired running row when a transient bridge liveness check throws", async () => {
+		const task = createTask({ title: "Transient liveness error", cwd: repoCwd, priority: "P5", autoWork: true });
+		moveTask(task.id, "s_active", 0);
+		const runId = startAutoWorkRun({
+			taskId: task.id,
+			taskPriority: "P5",
+			sessionId: "sess_sync_error",
+			worktreePath: path.join(repoCwd, ".worktrees", "aw-sync-error"),
+		});
+		const startedAt = listAutoWorkRuns({ taskId: task.id })[0]?.startedAt;
+		if (!startedAt) throw new Error("expected persisted Auto Work run");
+
+		const bridge = {
+			...fakeBridge(new FakeSessionHandle("sess_unused", null)),
+			getSession() {
+				throw new Error("temporary worker RPC failure");
+			},
+		} as AgentBridge;
+		const reconciled = await reconcileInactiveAutoWorkRuns(bridge, Date.parse(startedAt) + 60_001);
+
+		expect(reconciled).toBe(0);
+		expect(listAutoWorkRuns({ taskId: task.id })[0]).toEqual(expect.objectContaining({ id: runId, status: "running" }));
+		expect(getTask(task.id)?.stateId).toBe("s_active");
+	});
 });
 
 // ─── createPullRequestViaGh / describeGhFailure (T-85) ─────────────────────
@@ -1654,6 +1711,32 @@ describe("runAutoWorkCycle", () => {
 
 		expect(result.outcome).toBe("completed");
 		expect(getTask(task.id)?.stateId).toBe("s_validate");
+		expect(listAutoWorkRuns({ taskId: task.id })[0]?.status).toBe("completed");
+	});
+
+	test("keeps the run mutex through an intermediate tool round and rejects a concurrent global cycle", async () => {
+		setAutoWorkConfig(repoCwd, { ...DEFAULT_AUTO_WORK_VALUES, enabled: true });
+		const task = createTask({ title: "Multi-tool task", cwd: repoCwd, priority: "P5", autoWork: true });
+		const handle = new FakeSessionHandle("sess_multi_tool", null);
+		const bridge = fakeBridge(handle);
+		const cycle = runAutoWorkCycle(repoCwd, bridge, {
+			getSubscriptionUsage: async () => ({ available: true, weeklyPct: 5 }),
+			createPullRequest: stubCreatePullRequest,
+		});
+		await handle.subscriptionStarted;
+
+		handle.emit({ type: "turn_end", message: { stopReason: "toolUse" } });
+		expect(listAutoWorkRuns({ taskId: task.id })[0]?.status).toBe("running");
+		expect(getTask(task.id)?.stateId).toBe("s_active");
+
+		const concurrent = await runGlobalAutoWorkCycle(bridge, {
+			getSubscriptionUsage: async () => ({ available: true, weeklyPct: 5 }),
+		});
+		expect(concurrent).toEqual({ outcome: "skipped", reason: "another auto-work run is already active" });
+		expect(listAutoWorkRuns({ taskId: task.id })).toHaveLength(1);
+
+		handle.emit({ type: "turn_end", message: { stopReason: "end_turn" } });
+		expect((await cycle).outcome).toBe("completed");
 		expect(listAutoWorkRuns({ taskId: task.id })[0]?.status).toBe("completed");
 	});
 
