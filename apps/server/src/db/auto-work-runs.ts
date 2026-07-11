@@ -148,6 +148,28 @@ export function listAutoWorkRuns(filter: {
 }
 
 /**
+ * Consecutive failed/timed-out runs for `taskId` since its last successful
+ * run (`completed` / `completed_pr_failed`); a success resets the streak.
+ * Drives the auto-retry budget (T-100): the engine stops re-running a task
+ * once this reaches `MAX_AUTO_WORK_TASK_ATTEMPTS`.
+ */
+export function countConsecutiveAutoWorkFailures(taskId: string): number {
+	const row = getDb()
+		.query<{ n: number }, [string, string]>(
+			`SELECT COUNT(*) AS n
+			 FROM auto_work_runs
+			 WHERE task_id = ?
+			   AND status IN ('failed', 'timed_out')
+			   AND started_at > COALESCE((
+			     SELECT MAX(started_at) FROM auto_work_runs
+			     WHERE task_id = ? AND status IN ('completed', 'completed_pr_failed')
+			   ), '')`,
+		)
+		.get(taskId, taskId);
+	return row?.n ?? 0;
+}
+
+/**
  * Rolling average of `pctConsumed` over the last `COST_ESTIMATE_SAMPLE_SIZE`
  * completed runs at `priority`. Returns `{ avgPctConsumed: null, sampleSize: 0 }`
  * when no completed history exists yet for that priority.
