@@ -24,7 +24,7 @@ import type {
 import { closeDb, openDb } from "./db/index.ts";
 import { DEFAULT_AUTO_WORK_VALUES, setAutoWorkConfig } from "./db/auto-work.ts";
 import { completeAutoWorkRun, getAutoWorkRun, listAutoWorkRuns, startAutoWorkRun } from "./db/auto-work-runs.ts";
-import { createTask, deleteTask, getTask } from "./db/tasks.ts";
+import { createTask, deleteTask, findStateByName, getTask } from "./db/tasks.ts";
 import { buildAutoWorkRouter } from "./routes-auto-work.ts";
 import type { AgentBridge, EventListener, SessionHandle } from "./bridge/types.ts";
 import type { Config } from "./config.ts";
@@ -55,6 +55,17 @@ function fakeBridge(models: ModelInfo[]): AgentBridge {
 	return {
 		async listModels() {
 			return models;
+		},
+	} as unknown as AgentBridge;
+}
+
+function fakeBridgeWithSession(sessionId: string, handle: { abort: () => Promise<void> } | undefined): AgentBridge {
+	return {
+		async listModels() {
+			return [];
+		},
+		getSession(id: string) {
+			return id === sessionId ? (handle as unknown as SessionHandle) : undefined;
 		},
 	} as unknown as AgentBridge;
 }
@@ -706,6 +717,153 @@ describe("POST /auto-work/runs/:id/create-pr", () => {
 		// Not mutated by the failed lookup.
 		expect(getAutoWorkRun(runId)?.status).toBe("completed_pr_failed");
 	});
+});
+
+describe("POST /auto-work/runs/:id/stop", () => {
+	test("404 when the run id does not exist", async () => {
+		const app = buildAutoWorkRouter(fakeBridge([]), fakeConfig());
+		const res = await app.request("/auto-work/runs/awrun_nonexistent/stop", { method: "POST" });
+		expect(res.status).toBe(404);
+		expect(await res.json()).toEqual({ error: "run not found" });
+	});
+
+	test("400 when the run is not running", async () => {
+		const task = createTask({ title: "Already completed", cwd: "/tmp/wt-stop-not-running" });
+		const runId = startAutoWorkRun({
+			taskId: task.id,
+			taskPriority: "P2",
+			sessionId: "sess-stop-not-running",
+			worktreePath: "/tmp/wt-stop-not-running",
+		});
+		completeAutoWorkRun(runId, { status: "completed", pctConsumed: 1 });
+
+		const app = buildAutoWorkRouter(fakeBridge([]), fakeConfig());
+		const res = await app.request(`/auto-work/runs/${runId}/stop`, { method: "POST" });
+		expect(res.status).toBe(400);
+		expect(await res.json()).toEqual({ error: "run is not running (status: completed)" });
+	});
+
+	test("200: aborts a live session handle and leaves the row untouched (settlement owned elsewhere)", async () => {
+		const task = createTask({ title: "Live session stop", cwd: "/tmp/wt-stop-live" });
+		const runId = startAutoWorkRun({
+			taskId: task.id,
+			taskPriority: "P2",
+			sessionId: "sess-stop-live",
+			worktreePath: "/tmp/wt-stop-live",
+		});
+
+		let abortCalls = 0;
+		const handle = {
+			abort: async () => {
+				abortCalls += 1;
+			},
+		};
+		const app = buildAutoWorkRouter(fakeBridgeWithSession("sess-stop-live", handle), fakeConfig());
+		const res = await app.request(`/auto-work/runs/${runId}/stop`, { method: "POST" });
+		expect(res.status).toBe(200);
+		expect(await res.json()).toEqual({ ok: true });
+		expect(abortCalls).toBe(1);
+
+		// Nothing else settles the run in this isolated route test: production
+		// settlement happens inside the in-flight runAutoWorkCycle/settleAutoWorkRun,
+		// not this route, so the row is still "running" right after a successful stop.
+		expect(getAutoWorkRun(runId)?.status).toBe("running");
+	});
+
+	test("500 when handle.abort() rejects, and leaves the row untouched", async () => {
+		const task = createTask({ title: "Abort rejects", cwd: "/tmp/wt-stop-abort-fails" });
+		const runId = startAutoWorkRun({
+			taskId: task.id,
+			taskPriority: "P2",
+			sessionId: "sess-stop-abort-fails",
+			worktreePath: "/tmp/wt-stop-abort-fails",
+		});
+
+		const handle = {
+			abort: async () => {
+				throw new Error("abort boom");
+			},
+		};
+		const app = buildAutoWorkRouter(fakeBridgeWithSession("sess-stop-abort-fails", handle), fakeConfig());
+		const res = await app.request(`/auto-work/runs/${runId}/stop`, { method: "POST" });
+		expect(res.status).toBe(500);
+		expect(await res.json()).toEqual({ error: "Error: abort boom" });
+
+		expect(getAutoWorkRun(runId)?.status).toBe("running");
+	});
+
+	test("200: no live session handle settles the run as failed and moves the task to backlog", async () => {
+		const task = createTask({ title: "Stale row stop", cwd: "/tmp/wt-stop-stale", stateId: "s_active" });
+		const runId = startAutoWorkRun({
+			taskId: task.id,
+			taskPriority: "P2",
+			sessionId: "sess-stop-stale",
+			worktreePath: "/tmp/wt-stop-stale",
+		});
+
+		const app = buildAutoWorkRouter(fakeBridgeWithSession("sess-stop-stale", undefined), fakeConfig());
+		const res = await app.request(`/auto-work/runs/${runId}/stop`, { method: "POST" });
+		expect(res.status).toBe(200);
+		expect(await res.json()).toEqual({ ok: true });
+
+		const settled = getAutoWorkRun(runId);
+		expect(settled?.status).toBe("failed");
+		expect(settled?.failureReason).toBe("stopped by user (no active session)");
+
+		const updatedTask = getTask(task.id);
+		expect(updatedTask?.stateId).toBe(findStateByName("backlog")?.id);
+	});
+});
+
+describe("DELETE /auto-work/runs/:id", () => {
+	test("404 when the run id does not exist", async () => {
+		const app = buildAutoWorkRouter(fakeBridge([]), fakeConfig());
+		const res = await app.request("/auto-work/runs/awrun_nonexistent", { method: "DELETE" });
+		expect(res.status).toBe(404);
+		expect(await res.json()).toEqual({ error: "run not found" });
+	});
+
+	test("409 when the run is still running, and leaves the row untouched", async () => {
+		const task = createTask({ title: "Still running delete", cwd: "/tmp/wt-delete-running" });
+		const runId = startAutoWorkRun({
+			taskId: task.id,
+			taskPriority: "P2",
+			sessionId: "sess-delete-running",
+			worktreePath: "/tmp/wt-delete-running",
+		});
+
+		const app = buildAutoWorkRouter(fakeBridge([]), fakeConfig());
+		const res = await app.request(`/auto-work/runs/${runId}`, { method: "DELETE" });
+		expect(res.status).toBe(409);
+		expect(await res.json()).toEqual({ error: "run is still running; stop it before deleting" });
+
+		expect(getAutoWorkRun(runId)?.status).toBe("running");
+	});
+
+	test.each(["completed", "failed", "timed_out", "completed_pr_failed"] as const)(
+		"200: deletes a %s run and removes the row",
+		async (status) => {
+			const task = createTask({ title: `Deletable ${status}`, cwd: `/tmp/wt-delete-${status}` });
+			const runId = startAutoWorkRun({
+				taskId: task.id,
+				taskPriority: "P2",
+				sessionId: `sess-delete-${status}`,
+				worktreePath: `/tmp/wt-delete-${status}`,
+			});
+			completeAutoWorkRun(runId, {
+				status,
+				failureReason: status === "completed" ? null : "some reason",
+				pctConsumed: 1,
+			});
+
+			const app = buildAutoWorkRouter(fakeBridge([]), fakeConfig());
+			const res = await app.request(`/auto-work/runs/${runId}`, { method: "DELETE" });
+			expect(res.status).toBe(200);
+			expect(await res.json()).toEqual({ ok: true });
+
+			expect(getAutoWorkRun(runId)).toBeUndefined();
+		},
+	);
 });
 
 /**

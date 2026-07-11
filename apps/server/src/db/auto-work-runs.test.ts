@@ -11,6 +11,7 @@ import * as path from "node:path";
 import { closeDb, openDb } from "./index.ts";
 import {
 	completeAutoWorkRun,
+	deleteAutoWorkRun,
 	getAutoWorkCostEstimate,
 	listAutoWorkRuns,
 	startAutoWorkRun,
@@ -188,5 +189,46 @@ describe("auto-work runs", () => {
 		// average would be 20 instead of 25 -> this fails against `status = 'completed'` only.
 		expect(estimate.sampleSize).toBe(4);
 		expect(estimate.avgPctConsumed).toBe(25);
+	});
+
+	test("deleteAutoWorkRun deletes an existing row and returns true", () => {
+		bootDb();
+		const runId = startAutoWorkRun({
+			taskId: "task-del",
+			taskPriority: "P2",
+			sessionId: "session-del",
+			worktreePath: "/tmp/wt-del",
+		});
+
+		expect(deleteAutoWorkRun(runId)).toBe(true);
+		expect(listAutoWorkRuns({ taskId: "task-del" })).toEqual([]);
+	});
+
+	test("deleteAutoWorkRun returns false for a non-existent id", () => {
+		bootDb();
+		expect(deleteAutoWorkRun("awrun_does_not_exist")).toBe(false);
+	});
+
+	test("deleteAutoWorkRun leaves an unrelated run row untouched", () => {
+		bootDb();
+		const keepId = startAutoWorkRun({
+			taskId: "task-keep",
+			taskPriority: "P2",
+			sessionId: "session-keep",
+			worktreePath: "/tmp/wt-keep",
+		});
+		const deleteId = startAutoWorkRun({
+			taskId: "task-gone",
+			taskPriority: "P3",
+			sessionId: "session-gone",
+			worktreePath: "/tmp/wt-gone",
+		});
+
+		expect(deleteAutoWorkRun(deleteId)).toBe(true);
+
+		const [kept] = listAutoWorkRuns({ taskId: "task-keep" });
+		expect(kept).toBeDefined();
+		expect(kept!.id).toBe(keepId);
+		expect(listAutoWorkRuns({ taskId: "task-gone" })).toEqual([]);
 	});
 });

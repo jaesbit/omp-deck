@@ -107,6 +107,12 @@ export function getAutoWorkRun(runId: string): AutoWorkRun | undefined {
 	return row ? rowToRun(row) : undefined;
 }
 
+/** Delete a run row. Returns whether a row was actually removed. */
+export function deleteAutoWorkRun(runId: string): boolean {
+	const r = getDb().prepare<unknown, [string]>("DELETE FROM auto_work_runs WHERE id = ?").run(runId);
+	return Number(r.changes ?? 0) > 0;
+}
+
 /** List runs, most recent first, with optional filters. */
 export function listAutoWorkRuns(filter: {
 	limit?: number;

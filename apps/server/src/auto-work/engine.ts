@@ -575,7 +575,16 @@ export async function runAutoWorkCycle(
  * opened by hand — surfacing that loudly in the body and the logs beats
  * silently discarding a completed session behind an unrelated `gh` error.
  */
-function failAutoWorkRun(runId: string, taskId: string, failureReason: string): void {
+/**
+ * Marks a `running` run as failed without waiting on an in-flight
+ * `settleAutoWorkRun` — used by `reconcileInactiveAutoWorkRuns` for a stale
+ * row whose session is gone, and by the `/auto-work/runs/:id/stop` route
+ * (T-95) for the same "nothing left to abort" case. A run with a live
+ * session handle must go through `handle.abort()` instead so the already
+ * in-flight `settleAutoWorkRun` owns the single DB write — calling this on
+ * a still-live run would race it.
+ */
+export function failAutoWorkRun(runId: string, taskId: string, failureReason: string): void {
 	completeAutoWorkRun(runId, { status: "failed", failureReason });
 	const backlogState = findStateByName("backlog");
 	if (backlogState) moveTask(taskId, backlogState.id, 0);
