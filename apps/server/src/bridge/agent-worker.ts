@@ -199,6 +199,8 @@ export async function runAgentWorker(): Promise<void> {
 				return requireHandle().compact(frame.args[0]);
 			case "session.setModel":
 				return requireHandle().setModel(frame.args[0]);
+			case "session.setThinkingLevel":
+				return requireHandle().setThinkingLevel(frame.args[0]);
 			case "session.dispatchSlashCommand":
 				return requireHandle().dispatchSlashCommand(frame.args[0]);
 			case "session.dispatchDeckSlashCommand":

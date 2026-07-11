@@ -7,6 +7,8 @@ import { cn, shortPath } from "@/lib/utils";
 import { ContextIndicator } from "./ContextIndicator";
 import { ModelPickerModal } from "./ModelPickerModal";
 import { SessionLaunchModal, type SessionLaunchOpts } from "./SessionLaunchModal";
+import type { ModelInfo } from "@omp-deck/protocol";
+import { api } from "@/lib/api";
 
 /**
  * Sticky header row above the chat scroll area when a session is selected.
@@ -20,6 +22,24 @@ export function ChatHeader() {
 	const session = useStore(selectActiveSession);
 	if (!session) return null;
 	return <Inner session={session} />;
+}
+
+/** Fetches the selected session model's full ModelInfo for its thinking levels. */
+function useCurrentModelInfo(
+	sessionId: string,
+	provider: string | undefined,
+	modelId: string | undefined,
+): ModelInfo | undefined {
+	const [info, setInfo] = useState<ModelInfo | undefined>();
+	useEffect(() => {
+		let cancelled = false;
+		setInfo(undefined);
+		api.listModels(sessionId).then((res) => {
+			if (!cancelled) setInfo(res.models.find((model) => model.provider === provider && model.id === modelId));
+		}).catch(() => {});
+		return () => { cancelled = true; };
+	}, [sessionId, provider, modelId]);
+	return info;
 }
 
 function Inner({ session }: { session: SessionUi }) {
@@ -39,6 +59,12 @@ function Inner({ session }: { session: SessionUi }) {
 	const [modelOpen, setModelOpen] = useState(false);
 	const [launchOpen, setLaunchOpen] = useState(false);
 	const switcherRef = useRef<HTMLDivElement>(null);
+	const currentModelInfo = useCurrentModelInfo(session.sessionId, session.model?.provider, session.model?.id);
+	const thinkingLevels = currentModelInfo?.thinkingLevels ?? [];
+	const thinkingToggleBlocked = session.status !== "idle" || Boolean(session.planMode?.modelOverride);
+	const lastNonOffLevelRef = useRef<string | undefined>(undefined);
+	const [thinkingBusy, setThinkingBusy] = useState(false);
+	const [thinkingError, setThinkingError] = useState<string | undefined>(undefined);
 
 	useEffect(() => {
 		setDraft(session.sessionName ?? "");
@@ -53,6 +79,20 @@ function Inner({ session }: { session: SessionUi }) {
 		document.addEventListener("mousedown", onDocClick);
 		return () => document.removeEventListener("mousedown", onDocClick);
 	}, [switcherOpen]);
+
+	// Seed lastNonOffLevelRef from the snapshot on session change, then keep it
+	// updated so toggling ON restores the most-recent explicitly-set level.
+	useEffect(() => {
+		lastNonOffLevelRef.current =
+			session.thinkingLevel && session.thinkingLevel !== "off"
+				? session.thinkingLevel
+				: undefined;
+	}, [session.sessionId]);
+	useEffect(() => {
+		if (session.thinkingLevel && session.thinkingLevel !== "off") {
+			lastNonOffLevelRef.current = session.thinkingLevel;
+		}
+	}, [session.thinkingLevel]);
 
 	function commit(): void {
 		const trimmed = draft.trim();
@@ -77,6 +117,23 @@ function Inner({ session }: { session: SessionUi }) {
 				setRenameError(compact || "Rename failed");
 			},
 		);
+	}
+
+	async function toggleThinking(): Promise<void> {
+		if (thinkingBusy || thinkingToggleBlocked || thinkingLevels.length === 0) return;
+		const next =
+			session.thinkingLevel === "off"
+				? (lastNonOffLevelRef.current ?? thinkingLevels[0] as string)
+				: "off";
+		setThinkingBusy(true);
+		setThinkingError(undefined);
+		try {
+			await api.setSessionThinking(session.sessionId, next);
+		} catch (err) {
+			setThinkingError(String((err as Error).message ?? err));
+		} finally {
+			setThinkingBusy(false);
+		}
 	}
 
 	const otherSessions = Object.values(sessionsById).filter((s) => s.sessionId !== session.sessionId);
@@ -179,6 +236,36 @@ function Inner({ session }: { session: SessionUi }) {
 					<span className="truncate max-w-[180px]">{session.model.id}</span>
 					<ChevronDown className="h-3 w-3" />
 				</button>
+			) : null}
+			{thinkingLevels.length > 0 ? (
+				<button
+					type="button"
+					onClick={() => void toggleThinking()}
+					disabled={thinkingBusy || thinkingToggleBlocked}
+					title={
+						session.planMode?.modelOverride
+							? "Thinking cannot change while Plan Mode overrides the model"
+							: session.status !== "idle"
+								? "Thinking can change when the session is idle"
+								: session.thinkingLevel === "off"
+									? "Enable thinking"
+									: `Thinking: ${session.thinkingLevel ?? "default"} — click to disable`
+					}
+					className={cn(
+						"hidden h-6 items-center rounded-md border px-2 font-mono text-2xs uppercase tracking-meta sm:flex",
+						session.thinkingLevel === "off"
+							? "border-line bg-paper-2/60 text-ink-4 hover:border-ink/30 hover:text-ink"
+							: "border-thinking/40 bg-thinking/10 text-thinking hover:border-thinking/60",
+						(thinkingBusy || thinkingToggleBlocked) && "cursor-not-allowed opacity-50",
+					)}
+				>
+					{session.thinkingLevel === "off" ? "think" : (session.thinkingLevel ?? "think")}
+				</button>
+			) : null}
+			{thinkingError ? (
+				<span role="alert" title={thinkingError} className="hidden max-w-48 truncate font-mono text-2xs text-danger sm:inline">
+					{thinkingError}
+				</span>
 			) : null}
 			{session.planMode?.modelOverride ? (
 				<span

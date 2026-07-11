@@ -1171,6 +1171,25 @@ export class InProcessSessionHandle implements SessionHandle {
 		this.emit({ type: "session_updated", snapshot: this.snapshot() } as unknown as AgentSessionEventJson);
 	}
 
+	async setThinkingLevel(level: string): Promise<void> {
+		if (this.planBridge.getPlanModeContext()?.modelOverride) {
+			throw new Error("thinking cannot change while Plan Mode overrides the model");
+		}
+		if (this.isStreamingNow()) {
+			throw new Error("thinking cannot change while a turn is streaming");
+		}
+		const parsed = parseConfiguredThinkingLevel(level);
+		if (!parsed) throw new Error(`invalid thinking level: ${level}`);
+		const s = this.session as unknown as {
+			setThinkingLevel?: (level: typeof parsed) => void;
+		};
+		if (typeof s.setThinkingLevel !== "function") {
+			throw new Error("session.setThinkingLevel is not available on this SDK build");
+		}
+		s.setThinkingLevel(parsed);
+		this.emit({ type: "session_updated", snapshot: this.snapshot() } as unknown as AgentSessionEventJson);
+	}
+
 	async dispatchDeckSlashCommand(text: string): Promise<SlashDispatchResult> {
 		if (!text.startsWith("/")) return { kind: "fallthrough" };
 		let result: DeckSlashResult | "fallthrough";

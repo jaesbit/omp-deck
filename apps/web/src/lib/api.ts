@@ -111,6 +111,12 @@ export const api = {
 			body: JSON.stringify({ model }),
 		});
 	},
+	setSessionThinking(id: string, thinking: string): Promise<{ ok: true; sessionId: string }> {
+		return request(`/sessions/${encodeURIComponent(id)}`, {
+			method: "PATCH",
+			body: JSON.stringify({ thinking }),
+		});
+	},
 	compactSession(id: string, focus?: string): Promise<{ ok: true }> {
 		const body = focus && focus.trim().length > 0 ? JSON.stringify({ focus: focus.trim() }) : "";
 		const init: RequestInit = { method: "POST" };

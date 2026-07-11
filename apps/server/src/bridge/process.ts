@@ -617,6 +617,10 @@ export class ProcessSessionHandle implements SessionHandle {
 		return this.call("session.setModel", [ref]);
 	}
 
+	setThinkingLevel(level: string): Promise<void> {
+		return this.call("session.setThinkingLevel", [level]);
+	}
+
 	dispatchSlashCommand(text: string): Promise<SlashDispatchResult> {
 		return this.call("session.dispatchSlashCommand", [text]);
 	}
