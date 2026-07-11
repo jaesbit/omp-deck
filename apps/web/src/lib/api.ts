@@ -191,6 +191,12 @@ export const api = {
 			{ method: "POST" },
 		);
 	},
+	stopAutoWorkRun(runId: string): Promise<{ ok: true }> {
+		return request<{ ok: true }>(`/auto-work/runs/${encodeURIComponent(runId)}/stop`, { method: "POST" });
+	},
+	deleteAutoWorkRun(runId: string): Promise<{ ok: true }> {
+		return request<{ ok: true }>(`/auto-work/runs/${encodeURIComponent(runId)}`, { method: "DELETE" });
+	},
 	triggerAutoWork(): Promise<AutoWorkCycleResult> {
 		return request<AutoWorkCycleResult>(`/auto-work/trigger`, { method: "POST" });
 	},
