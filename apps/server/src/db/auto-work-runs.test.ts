@@ -8,10 +8,11 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-import { closeDb, openDb } from "./index.ts";
+import { closeDb, getDb, openDb } from "./index.ts";
 import {
 	completeAutoWorkRun,
-	deleteAutoWorkRun,
+deleteAutoWorkRun,
+	countConsecutiveAutoWorkFailures,
 	getAutoWorkCostEstimate,
 	listAutoWorkRuns,
 	startAutoWorkRun,
@@ -230,5 +231,85 @@ describe("auto-work runs", () => {
 		expect(kept).toBeDefined();
 		expect(kept!.id).toBe(keepId);
 		expect(listAutoWorkRuns({ taskId: "task-gone" })).toEqual([]);
+	});
+});
+
+describe("countConsecutiveAutoWorkFailures (T-100)", () => {
+	let seedSeq = 0;
+
+	/**
+	 * Seeds a closed run and backdates its `started_at` to `minutesAgo`, so
+	 * chronology is explicit and deterministic — `startAutoWorkRun` stamps
+	 * real millisecond timestamps, and back-to-back inserts can otherwise
+	 * collide on the same millisecond.
+	 */
+	function seedRun(
+		taskId: string,
+		status: "completed" | "completed_pr_failed" | "failed" | "timed_out",
+		minutesAgo: number,
+	): string {
+		seedSeq += 1;
+		const runId = startAutoWorkRun({
+			taskId,
+			taskPriority: "P2",
+			sessionId: `seed-${seedSeq}`,
+			worktreePath: `/tmp/wt-seed-${seedSeq}`,
+		});
+		completeAutoWorkRun(runId, {
+			status,
+			failureReason: status === "failed" || status === "timed_out" ? "boom" : undefined,
+		});
+		const startedAt = new Date(Date.now() - minutesAgo * 60_000).toISOString();
+		getDb().prepare("UPDATE auto_work_runs SET started_at = ? WHERE id = ?").run(startedAt, runId);
+		return runId;
+	}
+
+	test("returns 0 for a task with no runs", () => {
+		bootDb();
+		expect(countConsecutiveAutoWorkFailures("task-none")).toBe(0);
+	});
+
+	test("counts both failed and timed_out runs when the task never succeeded, ignoring open runs", () => {
+		bootDb();
+		seedRun("task-streak", "failed", 30);
+		seedRun("task-streak", "timed_out", 20);
+		// A still-running row is neither a failure nor a success — never counted.
+		startAutoWorkRun({ taskId: "task-streak", taskPriority: "P2", sessionId: "still-open", worktreePath: "/tmp/open" });
+		expect(countConsecutiveAutoWorkFailures("task-streak")).toBe(2);
+	});
+
+	test("a completed run resets the streak; later failures start a new one", () => {
+		bootDb();
+		seedRun("task-reset", "failed", 40);
+		seedRun("task-reset", "failed", 30);
+		expect(countConsecutiveAutoWorkFailures("task-reset")).toBe(2);
+
+		seedRun("task-reset", "completed", 20);
+		expect(countConsecutiveAutoWorkFailures("task-reset")).toBe(0);
+
+		seedRun("task-reset", "failed", 10);
+		expect(countConsecutiveAutoWorkFailures("task-reset")).toBe(1);
+	});
+
+	test("completed_pr_failed counts as a success and resets the streak", () => {
+		bootDb();
+		seedRun("task-prfail", "timed_out", 40);
+		seedRun("task-prfail", "completed_pr_failed", 30);
+		expect(countConsecutiveAutoWorkFailures("task-prfail")).toBe(0);
+
+		seedRun("task-prfail", "failed", 20);
+		seedRun("task-prfail", "timed_out", 10);
+		expect(countConsecutiveAutoWorkFailures("task-prfail")).toBe(2);
+	});
+
+	test("runs from other tasks never affect the count", () => {
+		bootDb();
+		seedRun("task-other", "failed", 50);
+		seedRun("task-other", "failed", 40);
+		seedRun("task-other", "failed", 30);
+		seedRun("task-mine", "completed", 20);
+		seedRun("task-mine", "failed", 10);
+		expect(countConsecutiveAutoWorkFailures("task-mine")).toBe(1);
+		expect(countConsecutiveAutoWorkFailures("task-other")).toBe(3);
 	});
 });

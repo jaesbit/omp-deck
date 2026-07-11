@@ -97,7 +97,13 @@ export function sliceHistoryPage(
 
 
 /**
- * Sum token/cost usage across every assistant message in `messages`.
+ * Sum token/cost usage across every assistant message in `messages`, plus
+ * aggregated sub-agent usage from successful `task` tool-result messages
+ * (T-97). The task tool stores the cross-subagent total in
+ * `toolResult.details.usage`; including it here keeps the snapshot
+ * `usageRollup` consistent with the live reducer's `rollupUsage` path
+ * so the CostStrip remains correct after a reconnect or page refresh.
+ *
  * Mirrors the web reducer's `extractUsage`/`rollupUsage` semantics so a
  * tail-sliced snapshot can seed the client's cost strip with full-history
  * totals.
@@ -105,19 +111,43 @@ export function sliceHistoryPage(
 export function computeUsageRollup(messages: AgentMessageJson[]): UsageRollupWire {
 	const rollup: UsageRollupWire = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: 0 };
 	for (const msg of messages) {
-		if (!msg || msg.role !== "assistant") continue;
-		const usage = (msg as Record<string, unknown>).usage;
-		if (!usage || typeof usage !== "object") continue;
-		const u = usage as Record<string, unknown>;
-		rollup.input += Number(u.input ?? 0) || 0;
-		rollup.output += Number(u.output ?? 0) || 0;
-		rollup.cacheRead += Number(u.cacheRead ?? 0) || 0;
-		rollup.cacheWrite += Number(u.cacheWrite ?? 0) || 0;
-		rollup.totalTokens += Number(u.totalTokens ?? 0) || 0;
-		const cost = u.cost && typeof u.cost === "object" ? Number((u.cost as Record<string, unknown>).total ?? 0) : 0;
-		rollup.cost += Number.isFinite(cost) ? cost : 0;
-		if (typeof u.reasoningTokens === "number") {
-			rollup.reasoningTokens = (rollup.reasoningTokens ?? 0) + u.reasoningTokens;
+		if (!msg) continue;
+		const m = msg as Record<string, unknown>;
+
+		if (msg.role === "assistant") {
+			const usage = m.usage;
+			if (!usage || typeof usage !== "object") continue;
+			const u = usage as Record<string, unknown>;
+			rollup.input += Number(u.input ?? 0) || 0;
+			rollup.output += Number(u.output ?? 0) || 0;
+			rollup.cacheRead += Number(u.cacheRead ?? 0) || 0;
+			rollup.cacheWrite += Number(u.cacheWrite ?? 0) || 0;
+			rollup.totalTokens += Number(u.totalTokens ?? 0) || 0;
+			const cost = u.cost && typeof u.cost === "object" ? Number((u.cost as Record<string, unknown>).total ?? 0) : 0;
+			rollup.cost += Number.isFinite(cost) ? cost : 0;
+			if (typeof u.reasoningTokens === "number") {
+				rollup.reasoningTokens = (rollup.reasoningTokens ?? 0) + u.reasoningTokens;
+			}
+			continue;
+		}
+
+		// T-97: roll up aggregated sub-agent usage from successful task tool calls.
+		// `ToolResultMessage.details.usage` carries the cross-subagent total that
+		// the task tool accumulates in-process — the same value the live reducer
+		// rolls up via the `tool_execution_end` handler.
+		if (msg.role === "toolResult" && m.toolName === "task" && !m.isError) {
+			const details = m.details;
+			if (!details || typeof details !== "object") continue;
+			const usage = (details as Record<string, unknown>).usage;
+			if (!usage || typeof usage !== "object") continue;
+			const u = usage as Record<string, unknown>;
+			rollup.input += Number(u.input ?? 0) || 0;
+			rollup.output += Number(u.output ?? 0) || 0;
+			rollup.cacheRead += Number(u.cacheRead ?? 0) || 0;
+			rollup.cacheWrite += Number(u.cacheWrite ?? 0) || 0;
+			rollup.totalTokens += Number(u.totalTokens ?? 0) || 0;
+			const cost = u.cost && typeof u.cost === "object" ? Number((u.cost as Record<string, unknown>).total ?? 0) : 0;
+			rollup.cost += Number.isFinite(cost) ? cost : 0;
 		}
 	}
 	return rollup;

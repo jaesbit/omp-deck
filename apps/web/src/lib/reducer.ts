@@ -261,7 +261,18 @@ export function applyEvent(state: SessionUi, event: AgentSessionEventJson): Sess
 						startedAt: Date.now(),
 						endedAt: Date.now(),
 					};
-			return { ...state, toolCalls: { ...state.toolCalls, [id]: next } };
+			const nextState = { ...state, toolCalls: { ...state.toolCalls, [id]: next } };
+			// T-97: roll up sub-agent usage into the parent CostStrip when the
+			// task tool completes successfully. The SDK places the aggregated
+			// usage in `result.details.usage`, `rollupUsage` handles the
+			// `{ cost: { total } }` object shape via `extractUsage`.
+			if (!isError && next.name === "task" && result && typeof result === "object") {
+				const details = (result as Record<string, unknown>).details;
+				if (details && typeof details === "object") {
+					rollupUsage(nextState, (details as Record<string, unknown>).usage);
+				}
+			}
+			return nextState;
 		}
 
 		// ─── Todos ─────────────────────────────────────────────────────────
