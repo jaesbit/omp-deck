@@ -320,11 +320,40 @@ export function buildRouter(
 		const id = c.req.param("id");
 		const handle = bridge.getSession(id);
 		if (!handle) return c.json({ error: "session not found or not active" }, 404);
-		let body: { name?: string; model?: { provider?: unknown; id?: unknown } };
+		let body: { name?: string; model?: { provider?: unknown; id?: unknown }; thinking?: unknown };
 		try {
-			body = (await c.req.json()) as { name?: string; model?: { provider?: unknown; id?: unknown } };
+			body = (await c.req.json()) as { name?: string; model?: { provider?: unknown; id?: unknown }; thinking?: unknown };
 		} catch {
 			return c.json({ error: "invalid json" }, 400);
+		}
+		if (body.model !== undefined && body.thinking !== undefined) {
+			return c.json({ error: "model and thinking must change in separate requests" }, 400);
+		}
+		let thinking: string | undefined;
+		if (body.thinking !== undefined) {
+			if (typeof body.thinking !== "string" || !body.thinking.trim()) {
+				return c.json({ error: "thinking must be a non-empty string" }, 400);
+			}
+			thinking = body.thinking.trim();
+			const snapshot = await handle.snapshot();
+			if (snapshot.planMode?.modelOverride) {
+				return c.json({ error: "thinking cannot change while Plan Mode overrides the model" }, 409);
+			}
+			if (await handle.isStreamingNow()) {
+				return c.json({ error: "thinking cannot change while a turn is streaming" }, 409);
+			}
+			if (!snapshot.model) {
+				return c.json({ error: "session has no active model" }, 409);
+			}
+			const model = (await bridge.listModels({ sessionId: id })).find(
+				(candidate) => candidate.provider === snapshot.model?.provider && candidate.id === snapshot.model?.id,
+			);
+			if (!model?.thinkingLevels?.length) {
+				return c.json({ error: "active model does not support thinking" }, 400);
+			}
+			if (thinking !== "off" && !model.thinkingLevels.includes(thinking)) {
+				return c.json({ error: "thinking level is not supported by the active model" }, 400);
+			}
 		}
 		try {
 			let changed = false;
@@ -341,11 +370,19 @@ export function buildRouter(
 				await handle.setModel({ provider, id: modelId });
 				changed = true;
 			}
+			if (thinking !== undefined) {
+				await handle.setThinkingLevel(thinking);
+				changed = true;
+			}
 			if (changed) broadcastBus.broadcast({ type: "sessions_changed" });
 			return c.json({ ok: true, sessionId: id });
 		} catch (err) {
+			const message = String((err as Error).message ?? err);
+			if (message.startsWith("thinking cannot change while")) {
+				return c.json({ error: message }, 409);
+			}
 			log.error(`patch session failed`, err);
-			return c.json({ error: String((err as Error).message ?? err) }, 500);
+			return c.json({ error: message }, 500);
 		}
 	});
 

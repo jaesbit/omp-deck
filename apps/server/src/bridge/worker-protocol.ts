@@ -85,6 +85,7 @@ export interface WorkerMethodMap {
 	"session.setName": WorkerRequestSpec<[name: string], void>;
 	"session.compact": WorkerRequestSpec<[focus?: string], void>;
 	"session.setModel": WorkerRequestSpec<[ref: ModelRef], void>;
+	"session.setThinkingLevel": WorkerRequestSpec<[level: string], void>;
 	"session.dispatchSlashCommand": WorkerRequestSpec<[text: string], SlashDispatchResult>;
 	"session.dispatchDeckSlashCommand": WorkerRequestSpec<[text: string], SlashDispatchResult>;
 	"session.getContextUsage": WorkerRequestSpec<[], ContextUsage | undefined>;

@@ -30,6 +30,7 @@ class StubSession {
 	model = undefined;
 	thinkingLevel = undefined;
 	messages: unknown[] = [];
+	setThinkingLevelCalls: unknown[] = [];
 
 	#steering: QueueEntry[] = [];
 	#followUp: QueueEntry[] = [];
@@ -76,6 +77,10 @@ class StubSession {
 	}
 
 	async dispose(): Promise<void> {}
+
+	setThinkingLevel(level: unknown): void {
+		this.setThinkingLevelCalls.push(level);
+	}
 }
 
 function makeHandle(branch: unknown[] = []): { handle: InProcessSessionHandle; session: StubSession; emitted: unknown[] } {
@@ -235,5 +240,14 @@ describe("InProcessSessionHandle queue shadow", () => {
 		expect(handle.snapshot().todoPhases).toEqual([
 			{ name: "Done", tasks: [{ content: "Ship it", status: "completed" }] },
 		]);
+	});
+
+	test("setThinkingLevel rejects a streaming turn before invoking the SDK setter", async () => {
+		const { handle, session, emitted } = makeHandle();
+
+		await expect(handle.setThinkingLevel("low")).rejects.toThrow("thinking cannot change while a turn is streaming");
+
+		expect(session.setThinkingLevelCalls).toEqual([]);
+		expect(emitted).toHaveLength(0);
 	});
 });
