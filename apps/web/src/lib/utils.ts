@@ -66,3 +66,20 @@ export function truncate(text: string, max: number): string {
 	if (!text || text.length <= max) return text ?? "";
 	return `${text.slice(0, max - 1)}…`;
 }
+
+/**
+ * Normalise the `cost` field from a SDK sub-agent result payload.
+ *
+ * The SDK's `accumulatedUsage.cost` is an object
+ * `{ input, output, cacheRead, cacheWrite, total }`, but callers may also
+ * pass a plain number (legacy shape). Returns `undefined` when the value is
+ * absent or not a recognised shape so the UI can gate on presence.
+ */
+export function extractSubagentCost(cost: unknown): number | undefined {
+	if (typeof cost === "number") return cost;
+	if (cost !== null && typeof cost === "object" && "total" in cost) {
+		const total = cost.total;
+		if (typeof total === "number") return total;
+	}
+	return undefined;
+}
