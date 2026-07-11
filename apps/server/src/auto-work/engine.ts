@@ -599,7 +599,7 @@ function describeRetryDecision(routing: FailedRunRouting): string {
 		: `${MAX_AUTO_WORK_TASK_ATTEMPTS - routing.attempts} automatic retry attempt(s) remaining`;
 }
 
-function failAutoWorkRun(runId: string, taskId: string, failureReason: string): FailedRunRouting {
+export function failAutoWorkRun(runId: string, taskId: string, failureReason: string): FailedRunRouting {
 	completeAutoWorkRun(runId, { status: "failed", failureReason });
 	const routing = routeTaskAfterFailedRun(taskId);
 	broadcastBus.broadcast({ type: "tasks_changed" });

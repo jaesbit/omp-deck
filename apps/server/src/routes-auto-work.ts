@@ -36,10 +36,10 @@ import type { Config } from "./config.ts";
 import { isCwdAllowed } from "./routes-fs.ts";
 import { getAutoWorkConfig, setAutoWorkConfig } from "./db/auto-work.ts";
 import { getAutoWorkGlobalConfig, setAutoWorkGlobalConfig } from "./db/auto-work-global.ts";
-import { completeAutoWorkRun, getAutoWorkCostEstimate, getAutoWorkRun, listAutoWorkRuns } from "./db/auto-work-runs.ts";
+import { completeAutoWorkRun, deleteAutoWorkRun, getAutoWorkCostEstimate, getAutoWorkRun, listAutoWorkRuns } from "./db/auto-work-runs.ts";
 import { getDeckBaseUrl as getServerDeckBaseUrl } from "./db/server-settings.ts";
 import { getTask, updateTask } from "./db/tasks.ts";
-import { appendAgentHistoryEntry, reconcileInactiveAutoWorkRuns, runGlobalAutoWorkCycle, createPullRequestViaGh } from "./auto-work/engine.ts";
+import { appendAgentHistoryEntry, failAutoWorkRun, reconcileInactiveAutoWorkRuns, runGlobalAutoWorkCycle, createPullRequestViaGh } from "./auto-work/engine.ts";
 import type { RunAutoWorkCycleOptions } from "./auto-work/engine.ts";
 import { buildSessionUrl } from "./deck-links.ts";
 import { broadcastBus } from "./broadcast-bus.ts";
@@ -142,6 +142,51 @@ export function buildAutoWorkRouter(bridge: AgentBridge, config: Config, cycleOp
 		await reconcileInactiveAutoWorkRuns(bridge);
 		const response: ListAutoWorkRunsResponse = { runs: listAutoWorkRuns({ limit, taskId, priority, status }) };
 		return c.json(response);
+	});
+
+	// ─── Stop / delete ─────────────────────────────────────────────────────────
+
+	// Aborts a running run (T-95). When a live session handle exists, only
+	// aborts it — the in-flight `runAutoWorkCycle` call is already awaiting
+	// the resulting terminal event and owns closing out the DB row (see
+	// `settleAutoWorkRun`); writing the row here too would race it. When no
+	// live handle exists (e.g. a stale row left `running` by a server
+	// restart), there is nothing in-flight to own the settlement, so this
+	// fails the row directly via the same helper `reconcileInactiveAutoWorkRuns`
+	// uses for that case.
+	app.post("/auto-work/runs/:id/stop", async (c) => {
+		const runId = c.req.param("id");
+		const run = getAutoWorkRun(runId);
+		if (!run) return c.json({ error: "run not found" }, 404);
+		if (run.status !== "running") return c.json({ error: `run is not running (status: ${run.status})` }, 400);
+
+		const handle = bridge.getSession(run.sessionId);
+		if (handle) {
+			try {
+				await handle.abort();
+			} catch (err) {
+				log.error(`run ${runId}: stop failed`, err);
+				return c.json({ error: String(err) }, 500);
+			}
+			return c.json({ ok: true });
+		}
+
+		failAutoWorkRun(run.id, run.taskId, "stopped by user (no active session)");
+		log.info(`run ${runId}: stopped by user (no live session handle)`);
+		return c.json({ ok: true });
+	});
+
+	// Deletes a run's history row (T-95). Running runs must be stopped first
+	// so the in-flight cycle never writes to a row that no longer exists.
+	app.delete("/auto-work/runs/:id", (c) => {
+		const runId = c.req.param("id");
+		const run = getAutoWorkRun(runId);
+		if (!run) return c.json({ error: "run not found" }, 404);
+		if (run.status === "running") return c.json({ error: "run is still running; stop it before deleting" }, 409);
+
+		deleteAutoWorkRun(runId);
+		broadcastBus.broadcast({ type: "auto_work_runs_changed" });
+		return c.json({ ok: true });
 	});
 
 	// ─── PR retry ─────────────────────────────────────────────────────────────
