@@ -2109,6 +2109,30 @@ describe("runAutoWorkCycle", () => {
 		expect(fs.existsSync(worktreePath)).toBe(true);
 	});
 
+	test("strips a repo-local git identity override so commits fall back to the global config", async () => {
+		setAutoWorkConfig(repoCwd, { ...DEFAULT_AUTO_WORK_VALUES, enabled: true });
+		const task = createTask({ title: "Identity leak guard", cwd: repoCwd, priority: "P5", autoWork: true });
+
+		// Simulate the exact poisoned state found in production: a repo-local
+		// override shared by every worktree (extensions.worktreeConfig is not
+		// enabled), masking the real committer identity.
+		runGit(["config", "--local", "user.name", "agent"], repoCwd);
+		runGit(["config", "--local", "user.email", "agent@omp-deck.local"], repoCwd);
+
+		const handle = new FakeSessionHandle("sess_identity_guard", 10);
+		const result = await runAutoWorkCycle(repoCwd, fakeBridge(handle), {
+			getSubscriptionUsage: async () => ({ available: true, weeklyPct: 5 }),
+			createPullRequest: stubCreatePullRequest,
+		});
+
+		expect(result.outcome).toBe("completed");
+
+		const nameCheck = Bun.spawnSync({ cmd: ["git", "config", "--local", "--get", "user.name"], cwd: repoCwd });
+		const emailCheck = Bun.spawnSync({ cmd: ["git", "config", "--local", "--get", "user.email"], cwd: repoCwd });
+		expect(nameCheck.exitCode).not.toBe(0);
+		expect(emailCheck.exitCode).not.toBe(0);
+	});
+
 	test("uses the injected generateBranchSlug for the worktree/branch name, without an extra bridge.createSession call for it", async () => {
 		setAutoWorkConfig(repoCwd, { ...DEFAULT_AUTO_WORK_VALUES, enabled: true });
 		const task = createTask({ title: "Arreglar el login roto", cwd: repoCwd, priority: "P5", autoWork: true });
