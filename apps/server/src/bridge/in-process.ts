@@ -59,6 +59,7 @@ import type { GoalAction, GoalModeSessionSurface, GoalModeState } from "./goal-m
 import { PlanModeBridge } from "./plan-mode-bridge.ts";
 import type { PlanModelController, PlanModeSessionSurface } from "./plan-mode-bridge.ts";
 import { getPlanModel } from "../db/server-settings.ts";
+import { summarizeSession } from "./session-normalizer.ts";
 import type {
 	AgentBridge,
 	CreateSessionOpts,
@@ -308,7 +309,7 @@ export class InProcessAgentBridge implements AgentBridge {
 		const raw = opts.cwd
 			? await SessionManager.list(opts.cwd)
 			: await SessionManager.listAll();
-		return raw.map((r: any) => summarize(r));
+		return raw.map(r => summarizeSession(r));
 	}
 
 	/**
@@ -1560,47 +1561,6 @@ export class InProcessSessionHandle implements SessionHandle {
 		}
 		this.onDisposeCallback();
 	}
-}
-
-
-/** Compute elapsed ms between two ISO timestamps. Returns undefined when either
- * is invalid or updatedAt is not after createdAt (stale / corrupted records). */
-function computeDurationMs(createdAt: string, updatedAt: string): number | undefined {
-	if (!createdAt || !updatedAt) return undefined;
-	const c = new Date(createdAt).getTime();
-	const u = new Date(updatedAt).getTime();
-	if (Number.isNaN(c) || Number.isNaN(u)) return undefined;
-	const diff = u - c;
-	return diff > 0 ? diff : undefined;
-}
-
-/** Normalize a SessionManager.list / listAll record into our SessionSummary. */
-function summarize(raw: any): SessionSummary {
-	// omp's list returns objects like:
-	//   { id, path, cwd, title?, timestamp, messageCount?, modifiedAt? }
-	const id = String(raw.id ?? raw.sessionId ?? raw.header?.id ?? "");
-	const filePath = String(raw.path ?? raw.file ?? raw.sessionFile ?? "");
-	const cwd = String(raw.cwd ?? raw.header?.cwd ?? "");
-	const title =
-		typeof raw.title === "string"
-			? raw.title
-			: typeof raw.header?.title === "string"
-				? raw.header.title
-				: undefined;
-	const createdAt = String(raw.timestamp ?? raw.createdAt ?? raw.header?.timestamp ?? "");
-	const updatedAt = String(raw.modifiedAt ?? raw.updatedAt ?? createdAt);
-	const messageCount = Number(raw.messageCount ?? raw.count ?? 0);
-	const durationMs = computeDurationMs(createdAt, updatedAt);
-	return {
-		id,
-		path: filePath,
-		cwd,
-		title,
-		createdAt,
-		updatedAt,
-		messageCount,
-		durationMs,
-	};
 }
 
 /**
