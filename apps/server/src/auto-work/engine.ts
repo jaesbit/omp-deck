@@ -51,7 +51,7 @@ import { buildSessionUrl } from "../deck-links.ts";
 import { getAutoWorkConfig } from "../db/auto-work.ts";
 import { resolveIntegrationPrompt, type IntegrationPromptName } from "../integration-prompts.ts";
 import { KbService, resolveKbRoot, resolveProjectBranchPolicy } from "../kb-service.ts";
-import { completeAutoWorkRun, listAutoWorkRuns, startAutoWorkRun } from "../db/auto-work-runs.ts";
+import { completeAutoWorkRun, countConsecutiveAutoWorkFailures, listAutoWorkRuns, startAutoWorkRun } from "../db/auto-work-runs.ts";
 import { getDeckBaseUrl as getServerDeckBaseUrl } from "../db/server-settings.ts";
 import { findStateByName, getTask, listTasks, moveTask, updateTask } from "../db/tasks.ts";
 import { getWorkspacePreference } from "../db/workspace-preferences.ts";
@@ -561,6 +561,53 @@ export async function runAutoWorkCycle(
 // ─── Small IO helpers ───────────────────────────────────────────────────────
 
 /**
+ * Max consecutive failed/timed-out runs (first attempt included) before Auto
+ * Work stops re-queuing a task (T-100). A successful run resets the streak.
+ * Once exhausted the task parks in `blocked` with a MAX_RETRIES_EXCEEDED
+ * marker; a human moving it back to `backlog` explicitly grants one more
+ * attempt — the engine itself never returns an exhausted task to `backlog`.
+ */
+export const MAX_AUTO_WORK_TASK_ATTEMPTS = 3;
+
+interface FailedRunRouting {
+	/** Consecutive failures including the run just closed. */
+	attempts: number;
+	exhausted: boolean;
+	targetStateName: "backlog" | "blocked";
+}
+
+/**
+ * Post-failure task routing (T-100). Call AFTER `completeAutoWorkRun` marked
+ * the run failed so the streak includes it: back to `backlog` (auto-retry on
+ * a later tick) while under `MAX_AUTO_WORK_TASK_ATTEMPTS`, otherwise parked
+ * in `blocked` so the next cycle deterministically moves on to another task
+ * instead of re-running this one forever.
+ */
+function routeTaskAfterFailedRun(taskId: string): FailedRunRouting {
+	const attempts = countConsecutiveAutoWorkFailures(taskId);
+	const exhausted = attempts >= MAX_AUTO_WORK_TASK_ATTEMPTS;
+	const targetStateName = exhausted ? "blocked" : "backlog";
+	const targetState = findStateByName(targetStateName);
+	if (targetState) moveTask(taskId, targetState.id, 0);
+	return { attempts, exhausted, targetStateName };
+}
+
+/** Human-readable retry decision for task notes, history entries, and logs. */
+function describeRetryDecision(routing: FailedRunRouting): string {
+	return routing.exhausted
+		? `MAX_RETRIES_EXCEEDED (${routing.attempts} consecutive failed runs, limit ${MAX_AUTO_WORK_TASK_ATTEMPTS}) — Auto Work parked the task in blocked; move it back to backlog to grant one more attempt`
+		: `${MAX_AUTO_WORK_TASK_ATTEMPTS - routing.attempts} automatic retry attempt(s) remaining`;
+}
+
+function failAutoWorkRun(runId: string, taskId: string, failureReason: string): FailedRunRouting {
+	completeAutoWorkRun(runId, { status: "failed", failureReason });
+	const routing = routeTaskAfterFailedRun(taskId);
+	broadcastBus.broadcast({ type: "tasks_changed" });
+	broadcastBus.broadcast({ type: "auto_work_runs_changed" });
+	return routing;
+}
+
+/**
  * Shared tail of the "a session is actively running" path — waits for
  * terminal state (or timeout) and closes out the DB rows accordingly. Used
  * by both a freshly-started run and a `"resume"`/`"reconnect"` pickup of a
@@ -575,14 +622,6 @@ export async function runAutoWorkCycle(
  * opened by hand — surfacing that loudly in the body and the logs beats
  * silently discarding a completed session behind an unrelated `gh` error.
  */
-function failAutoWorkRun(runId: string, taskId: string, failureReason: string): void {
-	completeAutoWorkRun(runId, { status: "failed", failureReason });
-	const backlogState = findStateByName("backlog");
-	if (backlogState) moveTask(taskId, backlogState.id, 0);
-	broadcastBus.broadcast({ type: "tasks_changed" });
-	broadcastBus.broadcast({ type: "auto_work_runs_changed" });
-}
-
 function finalizeAutoWorkRun(params: {
 	runId: string;
 	task: Task;
@@ -654,25 +693,53 @@ async function settleAutoWorkRun(params: {
 			// otherwise the agent keeps working (and spending) after the run
 			// was already written off, and may even finish the task.
 			await session.abort().catch((err) => log.warn(`run ${runId}: abort after timeout failed`, err));
-			completeAutoWorkRun(runId, { status: "timed_out", failureReason, inputTokens, outputTokens, pctConsumed });
-			broadcastBus.broadcast({ type: "auto_work_runs_changed" });
-		} else {
-			// Inline failAutoWorkRun so we can pass captured token usage (T-80).
-			completeAutoWorkRun(runId, { status: "failed", failureReason, inputTokens, outputTokens, pctConsumed });
-			const backlogState = findStateByName("backlog");
-			if (backlogState) moveTask(task.id, backlogState.id, 0);
-			broadcastBus.broadcast({ type: "tasks_changed" });
-			broadcastBus.broadcast({ type: "auto_work_runs_changed" });
 		}
-		const terminalState = findStateByName(timedOut ? "blocked" : "backlog");
-		if (terminalState) moveTask(task.id, terminalState.id, 0);
-		const failRunNote = `\n\n---\n**Auto Work ${timedOut ? "timeout" : "aborted"}** — run \`${runId}\` ${failureReason}. Session: \`${session.sessionId}\`, worktree: \`${worktreePath}\`.`;
-		const failHistorySummary = `${timedOut ? "Timed out" : "Failed"}: ${failureReason}.`;
+		completeAutoWorkRun(runId, {
+			status: timedOut ? "timed_out" : "failed",
+			failureReason,
+			inputTokens,
+			outputTokens,
+			pctConsumed,
+		});
+		broadcastBus.broadcast({ type: "auto_work_runs_changed" });
+		// T-100: a failed turn can leave the session alive (queued prompts, a
+		// turn that errored mid-stream). Abort defensively, then release the
+		// live handle so a written-off run cannot keep spending. The session
+		// transcript persists on disk — still inspectable and resumable.
+		if (!timedOut) {
+			try {
+				if (await session.isStreamingNow()) await session.abort();
+			} catch (err) {
+				log.warn(`run ${runId}: abort of failed session failed`, err);
+			}
+		}
+		try {
+			await session.dispose();
+		} catch (err) {
+			log.warn(`run ${runId}: dispose of terminal session failed`, err);
+		}
+		// T-100: deterministic next-tick decision. A timed-out task parks in
+		// `blocked` (unchanged); a failed one returns to `backlog` while its
+		// consecutive-failure budget lasts, else parks in `blocked` with a
+		// MAX_RETRIES_EXCEEDED marker so the next cycle picks another task.
+		let movedTo: "backlog" | "blocked";
+		let decision = "";
+		if (timedOut) {
+			const blockedState = findStateByName("blocked");
+			if (blockedState) moveTask(task.id, blockedState.id, 0);
+			movedTo = "blocked";
+		} else {
+			const routing = routeTaskAfterFailedRun(task.id);
+			movedTo = routing.targetStateName;
+			decision = ` ${describeRetryDecision(routing)}.`;
+		}
+		const failRunNote = `\n\n---\n**Auto Work ${timedOut ? "timeout" : "aborted"}** — run \`${runId}\` ${failureReason}.${decision} Session: \`${session.sessionId}\`, worktree: \`${worktreePath}\`.`;
+		const failHistorySummary = `${timedOut ? "Timed out" : "Failed"}: ${failureReason}.${decision}`;
 		updateTask(task.id, {
 			body: appendAgentHistoryEntry(task.body + failRunNote, runId, new Date().toISOString(), failHistorySummary),
 		});
 		broadcastBus.broadcast({ type: "tasks_changed" });
-		log.warn(`run ${runId} ${timedOut ? "timed out" : "failed"}; T-${task.displayId} moved to ${timedOut ? "blocked" : "backlog"} (${failureReason})`);
+		log.warn(`run ${runId} ${timedOut ? "timed out" : "failed"}; T-${task.displayId} moved to ${movedTo} (${failureReason})`);
 		await notify({ kind: "task_failed", displayId: task.displayId, reason: failureReason });
 		if (timedOut) return { outcome: "timed_out", taskId: task.id, runId, sessionId: session.sessionId, worktreePath };
 		return { outcome: "failed", taskId: task.id, runId, sessionId: session.sessionId, worktreePath, failureReason };
@@ -709,15 +776,20 @@ async function settleAutoWorkRun(params: {
 			if (!hasCommits) {
 				const failureReason = `agent produced no commits (PR: ${errMsg})`;
 				completeAutoWorkRun(runId, { status: "failed", failureReason, inputTokens, outputTokens, pctConsumed });
-				const backlogState = findStateByName("backlog");
-				if (backlogState) moveTask(task.id, backlogState.id, 0);
+				const routing = routeTaskAfterFailedRun(task.id);
 				broadcastBus.broadcast({ type: "tasks_changed" });
 				broadcastBus.broadcast({ type: "auto_work_runs_changed" });
+				// T-100: release the live handle — this run is written off.
+				try {
+					await session.dispose();
+				} catch (disposeErr) {
+					log.warn(`run ${runId}: dispose of failed session failed`, disposeErr);
+				}
 				updateTask(task.id, {
-					body: `${task.body}\n\n---\n**Auto Work aborted** — run \`${runId}\` ${failureReason}. Session: \`${session.sessionId}\`, worktree: \`${worktreePath}\`.`,
+					body: `${task.body}\n\n---\n**Auto Work aborted** — run \`${runId}\` ${failureReason}. ${describeRetryDecision(routing)}. Session: \`${session.sessionId}\`, worktree: \`${worktreePath}\`.`,
 				});
 				broadcastBus.broadcast({ type: "tasks_changed" });
-				log.warn(`run ${runId} failed (no agent commits); T-${task.displayId} moved to backlog (${failureReason})`);
+				log.warn(`run ${runId} failed (no agent commits); T-${task.displayId} moved to ${routing.targetStateName} (${failureReason})`);
 				await notify({ kind: "task_failed", displayId: task.displayId, reason: failureReason });
 				return { outcome: "failed", taskId: task.id, runId, sessionId: session.sessionId, worktreePath, failureReason };
 			}
@@ -788,8 +860,10 @@ export async function reconcileInactiveAutoWorkRuns(bridge: AgentBridge, now = D
 			continue;
 		}
 		if (stillLive) continue;
-		failAutoWorkRun(run.id, run.taskId, "session_not_running");
-		log.warn(`run ${run.id} (session ${run.sessionId}) is no longer running; moved task back to backlog`);
+		const routing = failAutoWorkRun(run.id, run.taskId, "session_not_running");
+		log.warn(
+			`run ${run.id} (session ${run.sessionId}) is no longer running; task moved to ${routing.targetStateName}${routing.exhausted ? " (MAX_RETRIES_EXCEEDED)" : ""}`,
+		);
 		reconciled += 1;
 	}
 	return reconciled;
@@ -907,13 +981,10 @@ async function resumeOrRetireAutoWorkRun(
 	const classification = classifyRunningAutoWorkRun(run, handle !== undefined, worktreeExists);
 
 	if (classification === "stale" || !handle) {
+		const routing = failAutoWorkRun(run.id, run.taskId, "session_lost");
 		log.warn(
-			`run ${run.id} (session ${run.sessionId}) has no live or persisted session to resume — marking failed and returning the task to backlog`,
+			`run ${run.id} (session ${run.sessionId}) has no live or persisted session to resume — marked failed, task moved to ${routing.targetStateName}${routing.exhausted ? " (MAX_RETRIES_EXCEEDED)" : ""}`,
 		);
-		completeAutoWorkRun(run.id, { status: "failed", failureReason: "session_lost" });
-		broadcastBus.broadcast({ type: "auto_work_runs_changed" });
-		const backlogState = findStateByName("backlog");
-		if (backlogState) moveTask(run.taskId, backlogState.id, 0);
 		await removeAutoWorkWorktree(cwd, run.worktreePath);
 		return undefined;
 	}
