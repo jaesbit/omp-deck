@@ -426,3 +426,78 @@ describe("trimHistory", () => {
 		expect(Object.keys(trimmed.toolCalls)).toEqual(["t2"]);
 	});
 });
+
+// ─── T-97: Codex sub-agent cost display ────────────────────────────────────
+
+/** A task `tool_execution_end` event carrying sub-agent results with the full
+ *  SDK `usage` shape (`cost` as an object). Uses a non-zero `cost.total` so
+ *  any accidental serialisation or extraction bug is detectable. */
+function taskEndEvent(costTotal: number, tokens: number, isError = false): never {
+	const usage = {
+		input: 1000,
+		output: 200,
+		cacheRead: 0,
+		cacheWrite: 0,
+		totalTokens: 1200,
+		cost: { input: 0.01, output: 0.032, cacheRead: 0, cacheWrite: 0, total: costTotal },
+	};
+	return {
+		type: "tool_execution_end",
+		toolCallId: "tc-task-1",
+		toolName: "task",
+		isError,
+		result: {
+			content: [{ type: "text", text: "done" }],
+			details: {
+				projectAgentsDir: null,
+				results: [
+					{
+						index: 0,
+						id: "Worker1",
+						agent: "task",
+						agentSource: "bundled",
+						tokens,
+						requests: 3,
+						exitCode: 0,
+						durationMs: 8000,
+						usage,
+					},
+				],
+				totalDurationMs: 8000,
+				usage,
+			},
+		},
+	} as never;
+}
+
+describe("T-97: task tool sub-agent cost display (Codex fixture)", () => {
+	test("sub-agent result row: tokens and usage.cost survive the reducer unchanged", () => {
+		const state = applyEvent(fresh(), taskEndEvent(0.042, 5432));
+		const result = state.toolCalls["tc-task-1"]?.result as Record<string, unknown> | undefined;
+		expect(result).toBeDefined();
+		const details = result?.details as Record<string, unknown> | undefined;
+		const results = details?.results as Array<Record<string, unknown>> | undefined;
+		expect(Array.isArray(results) && results.length).toBe(1);
+		const row = results?.[0];
+		expect(row?.tokens).toBe(5432);
+		const rowUsage = row?.usage as Record<string, unknown> | undefined;
+		const rowCost = rowUsage?.cost as Record<string, unknown> | undefined;
+		expect(rowCost?.total).toBe(0.042);
+	});
+
+	test("parent CostStrip: details.usage.cost.total is rolled into session usage", () => {
+		const state = applyEvent(fresh(), taskEndEvent(0.042, 5432));
+		// Without the fix this is 0 — the bug: rollupUsage is never called from tool_execution_end.
+		expect(state.usage.cost).toBeCloseTo(0.042, 6);
+	});
+
+	test("parent CostStrip: details.usage tokens are rolled in alongside cost", () => {
+		const state = applyEvent(fresh(), taskEndEvent(0.042, 5432));
+		expect(state.usage.totalTokens).toBe(1200);
+	});
+
+	test("parent CostStrip: errors do not roll up sub-agent usage", () => {
+		const state = applyEvent(fresh(), taskEndEvent(0.042, 5432, true));
+		expect(state.usage.cost).toBe(0);
+	});
+});
