@@ -1139,11 +1139,20 @@ export async function waitForAutoWorkSessionTerminal(
  * the matching project policy before the remote default, never from the
  * currently checked-out branch in the main worktree. This keeps every
  * auto-work branch on the configured clean base regardless of local checkout.
+ *
+ * Every linked worktree shares the main checkout's `.git/config` (this repo
+ * does not opt into `extensions.worktreeConfig`), so a stray repo-local
+ * `user.name`/`user.email` silently overrides the real committer identity
+ * for EVERY worktree, not just the one it was set from. `stripLocalGitIdentityOverride`
+ * runs on every call — including the reused-worktree fast path — so commit
+ * authorship always falls through to whatever is configured globally.
  */
 async function createAutoWorkWorktree(repoCwd: string, task: Task, slug: string): Promise<string> {
 	const dirName = `aw-T${task.displayId}-${slug}`;
 	const worktreePath = path.join(repoCwd, ".worktrees", dirName);
 	const branch = `auto-work/t${task.displayId}-${slug}`;
+
+	await stripLocalGitIdentityOverride(repoCwd);
 
 	// Reuse an existing registered worktree rather than failing with exit 255
 	// when a previous run left the branch/path in place (retry or crashed session).
@@ -1167,6 +1176,36 @@ async function createAutoWorkWorktree(repoCwd: string, task: Task, slug: string)
 		throw new Error(`git worktree add failed (exit ${exitCode}) for T-${task.displayId}: ${stderr.trim()}`);
 	}
 	return worktreePath;
+}
+
+/**
+ * Removes any repo-local `user.name`/`user.email` override so commit
+ * authorship always resolves to the global git identity. A local override
+ * here is never intentional: it silently attributes every future commit,
+ * in every worktree (including the user's own main checkout), to whatever
+ * it was set to instead of the real committer — this is exactly what
+ * happened when a repo-local `agent <agent@omp-deck.local>` identity ended
+ * up in `.git/config`. `git config --unset-all` exits 5 when the key is
+ * already absent, which is the common case and not an error here.
+ */
+async function stripLocalGitIdentityOverride(repoCwd: string): Promise<void> {
+	for (const key of ["user.name", "user.email"]) {
+		const proc = Bun.spawn(["git", "config", "--local", "--unset-all", key], {
+			cwd: repoCwd,
+			stdin: "ignore",
+			stdout: "ignore",
+			stderr: "pipe",
+			windowsHide: true,
+		});
+		const [stderr, exitCode] = await Promise.all([new Response(proc.stderr).text(), proc.exited]);
+		// Exit 0 = removed, 5 = key was already absent (the common case) —
+		// both are fine. Anything else (lock contention, a malformed config)
+		// means the override may still be sitting there, so surface it instead
+		// of silently proceeding with a possibly-still-poisoned identity.
+		if (exitCode !== 0 && exitCode !== 5) {
+			log.warn(`failed to strip local git ${key} override in ${repoCwd} (exit ${exitCode}): ${stderr.trim()}`);
+		}
+	}
 }
 
 /**
