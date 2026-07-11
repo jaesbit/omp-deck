@@ -20,8 +20,8 @@ import type { AutoWorkConfig, ModelInfo, SessionSummary, Task, TaskPriority } fr
 import type { AgentBridge, CreateSessionOpts, EventListener, SessionHandle } from "../bridge/types.ts";
 import { broadcastBus } from "../broadcast-bus.ts";
 import { DEFAULT_AUTO_WORK_VALUES, setAutoWorkConfig } from "../db/auto-work.ts";
-import { getAutoWorkCostEstimate, listAutoWorkRuns, startAutoWorkRun } from "../db/auto-work-runs.ts";
-import { closeDb, openDb } from "../db/index.ts";
+import { completeAutoWorkRun, getAutoWorkCostEstimate, listAutoWorkRuns, startAutoWorkRun } from "../db/auto-work-runs.ts";
+import { closeDb, getDb, openDb } from "../db/index.ts";
 import { setInternalTaskModel } from "../db/server-settings.ts";
 import { createTask, getTask, moveTask } from "../db/tasks.ts";
 import { AUTO_WORK_RULES_BODY, BRANCH_NAMING_RULES_BODY } from "../kb-templates.ts";
@@ -684,6 +684,13 @@ class FakeSessionHandle {
 		this.abortCalls += 1;
 		this.turnEnded.resolve();
 		this.turnEnded = Promise.withResolvers<void>();
+	}
+
+	/** T-100: the engine releases failed sessions — count calls so tests can assert cleanup. */
+	disposeCalls = 0;
+
+	async dispose(): Promise<void> {
+		this.disposeCalls += 1;
 	}
 
 	/** T-94: records the title `maybeAutoTitleSession` applies via the shared session-title helper. */
@@ -2824,5 +2831,146 @@ describe("runAutoWorkCycle token and pct recording (T-80)", () => {
 		expect(run?.outputTokens).toBeNull();
 		// pctConsumed is 0 because both start and end weeklyPct = 5 (same stub each call)
 		expect(run?.pctConsumed).toBe(0);
+	});
+});
+// ─── Retry budget and failed-session cleanup (T-100) ───────────────────────
+
+describe("runAutoWorkCycle retry budget and session cleanup (T-100)", () => {
+	let seedSeq = 0;
+
+	/**
+	 * Seeds a closed run for `taskId` — prior history feeding the
+	 * consecutive-failure streak. Each seed is backdated (minutes in the past,
+	 * in insertion order) so ordering is deterministic without wall-clock
+	 * sleeps: the cycle's own run always gets a strictly newer `started_at`
+	 * than any seed, and `countConsecutiveAutoWorkFailures` orders by it.
+	 */
+	function seedClosedRun(taskId: string, status: "completed" | "failed"): void {
+		seedSeq += 1;
+		const runId = startAutoWorkRun({
+			taskId,
+			taskPriority: "P5",
+			sessionId: `sess_seed_${seedSeq}`,
+			worktreePath: `/tmp/aw-seed-${seedSeq}`,
+		});
+		completeAutoWorkRun(runId, { status, failureReason: status === "failed" ? "seeded failure" : undefined });
+		const startedAt = new Date(Date.now() - 60_000 * (100 - seedSeq)).toISOString();
+		getDb().prepare("UPDATE auto_work_runs SET started_at = ? WHERE id = ?").run(startedAt, runId);
+	}
+
+	/** Runs one cycle whose agent turn ends with a failing stop reason (same pattern as the aborted/max_tokens tests). */
+	async function runFailingCycle(handle: FakeSessionHandle) {
+		const cycle = runAutoWorkCycle(repoCwd, fakeBridge(handle), {
+			getSubscriptionUsage: async () => ({ available: true, weeklyPct: 5 }),
+			createPullRequest: async () => {
+				throw new Error("a failed run must not create a pull request");
+			},
+		});
+		await handle.subscriptionStarted;
+		handle.emit({ type: "turn_end", message: { stopReason: "error" } });
+		return cycle;
+	}
+
+	test("a failure with retry budget left returns the task to backlog with the remaining-attempts note and disposes the session", async () => {
+		setAutoWorkConfig(repoCwd, { ...DEFAULT_AUTO_WORK_VALUES, enabled: true });
+		const task = createTask({ title: "One prior failure", cwd: repoCwd, priority: "P5", autoWork: true });
+		seedClosedRun(task.id, "failed");
+
+		const handle = new FakeSessionHandle("sess_budget_left", null);
+		const result = await runFailingCycle(handle);
+
+		expect(result.outcome).toBe("failed");
+		const updated = getTask(task.id);
+		expect(updated?.stateId).toBe("s_backlog");
+		expect(updated?.body).toContain("1 automatic retry attempt(s) remaining");
+		expect(updated?.body).not.toContain("MAX_RETRIES_EXCEEDED");
+		expect(listAutoWorkRuns({ taskId: task.id })[0]?.status).toBe("failed");
+		// T-100: a written-off run must release its live session handle.
+		expect(handle.disposeCalls).toBeGreaterThanOrEqual(1);
+	});
+
+	test("the third consecutive failure exhausts the budget: task parks in blocked with a MAX_RETRIES_EXCEEDED note", async () => {
+		setAutoWorkConfig(repoCwd, { ...DEFAULT_AUTO_WORK_VALUES, enabled: true });
+		const task = createTask({ title: "Two prior failures", cwd: repoCwd, priority: "P5", autoWork: true });
+		seedClosedRun(task.id, "failed");
+		seedClosedRun(task.id, "failed");
+
+		const handle = new FakeSessionHandle("sess_budget_exhausted", null);
+		const result = await runFailingCycle(handle);
+
+		expect(result.outcome).toBe("failed");
+		const updated = getTask(task.id);
+		expect(updated?.stateId).toBe("s_blocked");
+		expect(updated?.body).toContain("MAX_RETRIES_EXCEEDED");
+		expect(updated?.body).not.toContain("automatic retry attempt(s) remaining");
+		expect(listAutoWorkRuns({ taskId: task.id })[0]?.status).toBe("failed");
+		expect(handle.disposeCalls).toBeGreaterThanOrEqual(1);
+	});
+
+	test("the next cycle selects another backlog task instead of re-running the exhausted one", async () => {
+		setAutoWorkConfig(repoCwd, { ...DEFAULT_AUTO_WORK_VALUES, enabled: true });
+		// Created first, so if the exhausted task ever leaked back to backlog it
+		// would sit at order 0 and win selection — making this test fail loudly.
+		const exhausted = createTask({ title: "Exhausted task", cwd: repoCwd, priority: "P5", autoWork: true });
+		seedClosedRun(exhausted.id, "failed");
+		seedClosedRun(exhausted.id, "failed");
+		await runFailingCycle(new FakeSessionHandle("sess_exhausting_run", null));
+		expect(getTask(exhausted.id)?.stateId).toBe("s_blocked");
+		const exhaustedRunCount = listAutoWorkRuns({ taskId: exhausted.id }).length;
+
+		const other = createTask({ title: "Fresh backlog task", cwd: repoCwd, priority: "P5", autoWork: true });
+		const okHandle = new FakeSessionHandle("sess_other_task", 10);
+		const createSessionCalls: CreateSessionOpts[] = [];
+		const result = await runAutoWorkCycle(repoCwd, fakeBridge(okHandle, { createSessionCalls }), {
+			getSubscriptionUsage: async () => ({ available: true, weeklyPct: 5 }),
+			createPullRequest: stubCreatePullRequest,
+		});
+
+		expect(result.outcome).toBe("completed");
+		if (result.outcome !== "completed") throw new Error("expected completed");
+		expect(result.taskId).toBe(other.id);
+		// The exhausted task stays parked: still blocked, no new session, no new run row.
+		expect(getTask(exhausted.id)?.stateId).toBe("s_blocked");
+		expect(createSessionCalls).toHaveLength(1);
+		expect(listAutoWorkRuns({ taskId: exhausted.id })).toHaveLength(exhaustedRunCount);
+	});
+
+	test("a successful run resets the failure streak: the next failure returns to backlog instead of blocked", async () => {
+		setAutoWorkConfig(repoCwd, { ...DEFAULT_AUTO_WORK_VALUES, enabled: true });
+		const task = createTask({ title: "Streak reset by success", cwd: repoCwd, priority: "P5", autoWork: true });
+		seedClosedRun(task.id, "failed");
+		seedClosedRun(task.id, "failed");
+		seedClosedRun(task.id, "completed");
+
+		const handle = new FakeSessionHandle("sess_streak_reset", null);
+		const result = await runFailingCycle(handle);
+
+		expect(result.outcome).toBe("failed");
+		const updated = getTask(task.id);
+		expect(updated?.stateId).toBe("s_backlog");
+		expect(updated?.body).toContain("2 automatic retry attempt(s) remaining");
+		expect(updated?.body).not.toContain("MAX_RETRIES_EXCEEDED");
+	});
+
+	test("a timed-out run aborts and disposes the still-running session and parks the task in blocked", async () => {
+		setAutoWorkConfig(repoCwd, {
+			...DEFAULT_AUTO_WORK_VALUES,
+			enabled: true,
+			timeoutMinutesByPriority: { P0: 120, P1: 90, P2: 60, P3: 45, P4: 45, P5: 0.0005 }, // 30ms
+		});
+		const task = createTask({ title: "Timeout cleanup", cwd: repoCwd, priority: "P5", autoWork: true });
+
+		const handle = new FakeSessionHandle("sess_timeout_dispose", null); // never emits a terminal event
+		const result = await runAutoWorkCycle(repoCwd, fakeBridge(handle), {
+			getSubscriptionUsage: async () => ({ available: true, weeklyPct: 5 }),
+			createPullRequest: stubCreatePullRequest,
+		});
+
+		expect(result.outcome).toBe("timed_out");
+		expect(getTask(task.id)?.stateId).toBe("s_blocked");
+		// The write-off must actually stop AND release the live session (T-100):
+		// abort ends the in-flight turn, dispose drops the handle.
+		expect(handle.abortCalls).toBeGreaterThanOrEqual(1);
+		expect(handle.disposeCalls).toBeGreaterThanOrEqual(1);
 	});
 });
