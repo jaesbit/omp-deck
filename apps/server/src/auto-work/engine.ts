@@ -50,6 +50,7 @@ import { loadConfig } from "../config.ts";
 import { buildSessionUrl } from "../deck-links.ts";
 import { getAutoWorkConfig } from "../db/auto-work.ts";
 import { resolveIntegrationPrompt, type IntegrationPromptName } from "../integration-prompts.ts";
+import { KB_TEMPLATES } from "../kb-templates.ts";
 import { KbService, resolveKbRoot, resolveProjectBranchPolicy } from "../kb-service.ts";
 import { completeAutoWorkRun, countConsecutiveAutoWorkFailures, listAutoWorkRuns, startAutoWorkRun } from "../db/auto-work-runs.ts";
 import { getDeckBaseUrl as getServerDeckBaseUrl } from "../db/server-settings.ts";
@@ -382,13 +383,21 @@ export interface RunGlobalAutoWorkCycleOptions extends RunAutoWorkCycleOptions {
 let integrationKb: KbService | undefined;
 let integrationKbRoot: string | undefined;
 
-function resolveAutoWorkIntegrationPrompt(name: IntegrationPromptName): Promise<string> {
+async function resolveAutoWorkIntegrationPrompt(name: IntegrationPromptName): Promise<string> {
 	const root = resolveKbRoot();
 	if (!integrationKb || integrationKbRoot !== root) {
 		integrationKb = new KbService({ root });
 		integrationKbRoot = root;
 	}
-	return resolveIntegrationPrompt(integrationKb, name);
+	// T-105: a broken KB (unreadable root, index failure) must never abort an
+	// auto-work cycle — fall back to the bundled template so the session still
+	// gets its core instructions, and log loudly so the KB problem is visible.
+	try {
+		return await resolveIntegrationPrompt(integrationKb, name);
+	} catch (err) {
+		log.error(`integration prompt "${name}" failed to resolve from the KB, using the bundled template`, err);
+		return KB_TEMPLATES.find((t) => t.dir === "integrations" && t.name === `${name}.md`)?.body ?? "";
+	}
 }
 
 
@@ -425,7 +434,7 @@ export async function runAutoWorkCycle(
 	}
 
 	const allTasks = listTasks();
-	const workspaceTasks = allTasks.filter((t) => t.cwd === cwd);
+	let workspaceTasks = allTasks.filter((t) => t.cwd === cwd);
 	const workspaceTaskIds = new Set(workspaceTasks.map((t) => t.id));
 	let activeRuns = listAutoWorkRuns({ status: "running" }).filter((r) => workspaceTaskIds.has(r.taskId));
 
@@ -442,6 +451,11 @@ export async function runAutoWorkCycle(
 		});
 		if (resumed) return resumed;
 		activeRuns = activeRuns.filter((r) => r.id !== runningRun.id);
+		// The retire path just closed the run and re-routed its task
+		// (backlog/blocked) — refresh the snapshot taken above so this same
+		// cycle can already see and select the re-routed task instead of
+		// idling until the next tick.
+		workspaceTasks = listTasks().filter((t) => t.cwd === cwd);
 	}
 
 	const preflight = checkAutoWorkPreflight({ config, now, subscriptionPctUsed, sessionPctUsed, activeRuns });
@@ -506,18 +520,62 @@ export async function runAutoWorkCycle(
 		}
 	}
 
-	// Default here is the plain synchronous slug (no model call): this keeps
-	// `runAutoWorkCycle`'s own unit tests fast and deterministic without a
-	// second `bridge.createSession` call. `runGlobalAutoWorkCycle` — the real
-	// production entry point — injects the LLM-backed generator by default.
-	const branchSlug = options.generateBranchSlug ? await options.generateBranchSlug(task) : slugifyTaskTitle(task.title);
-	const worktreePath = await createAutoWorkWorktree(cwd, task, branchSlug);
+	// T-104: a retry of a task whose previous attempt failed resumes that
+	// attempt's session — full prior context, same worktree — instead of
+	// starting from scratch. Falls back to a fresh session when the prior
+	// session or worktree no longer exists.
+	const retry = await resumePriorFailedRunSession(bridge, task);
 
-	const session = await bridge.createSession({
-		cwd,
-		systemPromptAppend: await resolveAutoWorkIntegrationPrompt("auto-work"),
-		...(model ? { model } : {}),
-	});
+	const agentHistory = extractAgentHistory(task.body);
+	const historyBlock = agentHistory ? `\n\n## Agent history for this task\n${agentHistory}` : "";
+
+	let session: SessionHandle;
+	let worktreePath: string;
+	let prompt: string;
+	if (retry) {
+		session = retry.session;
+		worktreePath = retry.priorRun.worktreePath;
+		const failureNote = retry.priorRun.failureReason ? ` Motivo: ${retry.priorRun.failureReason}.` : "";
+		prompt =
+			`Reintento de Auto Work para T-${task.displayId}: ${task.title}\n\n` +
+			`Tu intento anterior (run \`${retry.priorRun.id}\`) terminó en estado ${retry.priorRun.status}.${failureNote} ` +
+			`Continúa el trabajo donde lo dejaste en el worktree \`${worktreePath}\` (misma rama). ` +
+			`Revisa primero el estado real (commits, tests) y completa lo que falte.\n\n` +
+			`(contexto completo disponible via GET /api/tasks/${task.id})${historyBlock}`;
+		log.info(`T-${task.displayId}: resuming prior session ${session.sessionId} for retry of run ${retry.priorRun.id}`);
+	} else {
+		// Default here is the plain synchronous slug (no model call): this keeps
+		// `runAutoWorkCycle`'s own unit tests fast and deterministic without a
+		// second `bridge.createSession` call. `runGlobalAutoWorkCycle` — the real
+		// production entry point — injects the LLM-backed generator by default.
+		const branchSlug = options.generateBranchSlug ? await options.generateBranchSlug(task) : slugifyTaskTitle(task.title);
+		worktreePath = await createAutoWorkWorktree(cwd, task, branchSlug);
+
+		try {
+			session = await bridge.createSession({
+				cwd,
+				systemPromptAppend: await resolveAutoWorkIntegrationPrompt("auto-work"),
+				...(model ? { model } : {}),
+			});
+		} catch (err) {
+			// T-105: a session that cannot even launch must not abort the cycle
+			// with an exception — the scheduler would re-select this same task
+			// every tick, starving everything behind it. Park the task in
+			// blocked with a visible note, moving it back to backlog explicitly
+			// grants another attempt.
+			const msg = ((err instanceof Error ? err.message : String(err)).split("\n")[0] ?? "").trim().slice(0, 160);
+			const reason = `agent session launch failed: ${msg}`;
+			log.error(`T-${task.displayId}: ${reason}`, err);
+			updateTask(task.id, {
+				body: `${task.body}\n\n---\n**Auto Work launch failed** — ${reason}. Task parked in blocked, move it back to backlog to retry. Worktree: \`${worktreePath}\`.`,
+			});
+			moveTask(task.id, blockedState.id, 0);
+			broadcastBus.broadcast({ type: "tasks_changed" });
+			await notify({ kind: "task_failed", displayId: task.displayId, reason });
+			return { outcome: "skipped", reason };
+		}
+		prompt = `Trabaja en T-${task.displayId}: ${task.title}\n\n(contexto completo disponible via GET /api/tasks/${task.id})\n\nEl worktree para esta tarea ya está configurado en \`${worktreePath}\` (rama \`auto-work/t${task.displayId}-${branchSlug}\`). Usa ese directorio para todos los commits y cambios de fichero.${historyBlock}`;
+	}
 
 	moveTask(task.id, activeState.id, 0);
 	const runId = startAutoWorkRun({
@@ -526,7 +584,9 @@ export async function runAutoWorkCycle(
 		sessionId: session.sessionId,
 		worktreePath,
 	});
-	log.info(`run ${runId} started for T-${task.displayId}, session ${session.sessionId}, worktree ${worktreePath}`);
+	log.info(
+		`run ${runId} started for T-${task.displayId}, session ${session.sessionId}, worktree ${worktreePath}${retry ? " (resumed prior session)" : ""}`,
+	);
 	broadcastBus.broadcast({ type: "auto_work_runs_changed" });
 	await notify({
 		kind: "task_started",
@@ -535,13 +595,11 @@ export async function runAutoWorkCycle(
 		model: model ? `${model.provider}/${model.id}` : "default",
 	});
 
-	const agentHistory = extractAgentHistory(task.body);
-	const historyBlock = agentHistory ? `\n\n## Agent history for this task\n${agentHistory}` : "";
-	const prompt = `Trabaja en T-${task.displayId}: ${task.title}\n\n(contexto completo disponible via GET /api/tasks/${task.id})\n\nEl worktree para esta tarea ya está configurado en \`${worktreePath}\` (rama \`auto-work/t${task.displayId}-${branchSlug}\`). Usa ese directorio para todos los commits y cambios de fichero.${historyBlock}`;
 	// T-94: title the session from its first-turn prompt, matching the
 	// regular-chat auto-title behavior (T-78). Fire-and-forget — never
-	// delays the actual agent turn below.
-	maybeAutoTitleSession(bridge, session, prompt);
+	// delays the actual agent turn below. Only a fresh session needs a
+	// title; a resumed one keeps the title it already has.
+	if (!retry) maybeAutoTitleSession(bridge, session, prompt);
 	const timeoutMinutes = resolveAutoWorkTimeoutMinutes(task.priority, config);
 	return await finalizeAutoWorkRun({
 		runId,
@@ -556,6 +614,40 @@ export async function runAutoWorkCycle(
 		usageLookup,
 		startPct: subscriptionPctUsed,
 	});
+}
+
+/**
+ * T-104: when the engine re-selects a task whose most recent run ended
+ * failed/timed_out, resume that run's persisted session (the transcript
+ * survives `dispose()`) so the retry keeps the full prior context and
+ * reuses the same worktree/branch. Returns undefined — the retry starts a
+ * fresh session — when the prior worktree or persisted session is gone,
+ * or when resuming fails for any reason. Never throws.
+ */
+async function resumePriorFailedRunSession(
+	bridge: AgentBridge,
+	task: Task,
+): Promise<{ session: SessionHandle; priorRun: AutoWorkRun } | undefined> {
+	const [prior] = listAutoWorkRuns({ taskId: task.id, limit: 1 });
+	if (!prior || (prior.status !== "failed" && prior.status !== "timed_out")) return undefined;
+	if (!fs.existsSync(prior.worktreePath)) return undefined;
+	try {
+		const live = bridge.getSession(prior.sessionId);
+		if (live) return { session: live, priorRun: prior };
+		const persisted = await findPersistedAutoWorkSession(bridge, prior);
+		if (!persisted) return undefined;
+		const session = await bridge.resumeSession({
+			sessionPath: persisted.path,
+			systemPromptAppend: await resolveAutoWorkIntegrationPrompt("auto-work"),
+		});
+		return { session, priorRun: prior };
+	} catch (err) {
+		log.warn(
+			`T-${task.displayId}: could not resume prior session ${prior.sessionId} for the retry, starting a fresh session`,
+			err,
+		);
+		return undefined;
+	}
 }
 
 // ─── Small IO helpers ───────────────────────────────────────────────────────
@@ -759,7 +851,7 @@ async function settleAutoWorkRun(params: {
 		prNumber = pr.number;
 		log.info(`run ${runId}: opened PR #${pr.number} (${pr.url}) for T-${task.displayId}`);
 	} catch (err) {
-		const errMsg = (err instanceof Error ? err.message : String(err)).split("\n")[0].trim().slice(0, 120);
+		const errMsg = ((err instanceof Error ? err.message : String(err)).split("\n")[0] ?? "").trim().slice(0, 120);
 		prFailureReason = errMsg;
 		log.error(`run ${runId}: gh pr create failed for T-${task.displayId}`, err);
 
@@ -976,7 +1068,21 @@ async function resumeOrRetireAutoWorkRun(
 		usageLookup: () => Promise<{ available: boolean; weeklyPct?: number }>;
 	},
 ): Promise<AutoWorkCycleResult | undefined> {
-	const handle = await resolveRunningSessionHandle(bridge, run);
+	let handle: SessionHandle | undefined;
+	try {
+		handle = await resolveRunningSessionHandle(bridge, run);
+	} catch (err) {
+		// T-105: a resume failure (corrupt transcript, bridge error) must not
+		// leave the row `running` — that wedges the workspace mutex and stops
+		// Auto Work entirely. Close the run as failed (the normal retry budget
+		// applies) and let this cycle fall through to fresh task selection.
+		const msg = ((err instanceof Error ? err.message : String(err)).split("\n")[0] ?? "").trim().slice(0, 160);
+		const routing = failAutoWorkRun(run.id, run.taskId, `session_resume_failed: ${msg}`);
+		log.warn(
+			`run ${run.id}: resuming session ${run.sessionId} failed (${msg}) — run marked failed, task moved to ${routing.targetStateName}${routing.exhausted ? " (MAX_RETRIES_EXCEEDED)" : ""}`,
+		);
+		return undefined;
+	}
 	const worktreeExists = fs.existsSync(run.worktreePath);
 	const classification = classifyRunningAutoWorkRun(run, handle !== undefined, worktreeExists);
 
