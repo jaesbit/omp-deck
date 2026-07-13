@@ -1,9 +1,9 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-import { resolveProjectBranchPolicy } from "./kb-service.ts";
+import { KbService, resolveProjectBranchPolicy } from "./kb-service.ts";
 
 let fixtureRoot: string;
 let kbRoot: string;
@@ -42,5 +42,83 @@ describe("resolveProjectBranchPolicy", () => {
 			baseBranch: "devel",
 			sourcePath: nestedPolicyPath,
 		});
+	});
+});
+
+describe("KbService root containment", () => {
+	test("supports a KB root that is itself a symlink", async () => {
+		const actualKbRoot = path.join(fixtureRoot, "actual-kb");
+		const linkedKbRoot = path.join(fixtureRoot, "linked-kb");
+		mkdirSync(actualKbRoot);
+		writeFileSync(path.join(actualKbRoot, "inside.md"), "# Inside\n", "utf8");
+		symlinkSync(actualKbRoot, linkedKbRoot, "dir");
+
+		const service = new KbService({ root: linkedKbRoot });
+
+		expect((await service.getTree())?.files.map((entry) => entry.path)).toEqual(["inside.md"]);
+		expect((await service.getFile("inside.md"))?.body).toBe("# Inside\n");
+	});
+
+	test("never indexes or reads a symlinked directory outside the resolved root", async () => {
+		mkdirSync(kbRoot);
+		const outsideRoot = path.join(fixtureRoot, "outside");
+		mkdirSync(outsideRoot);
+		writeFileSync(path.join(kbRoot, "inside.md"), "# Inside\n", "utf8");
+		writeFileSync(path.join(outsideRoot, "secret.md"), "# Secret\n", "utf8");
+		symlinkSync(outsideRoot, path.join(kbRoot, "outside-link"), "dir");
+
+		const service = new KbService({ root: kbRoot });
+
+		expect((await service.getTree())?.dirs.map((entry) => entry.path)).not.toContain("outside-link");
+		expect(await service.getFile("outside-link/secret.md")).toBeUndefined();
+		expect((await service.getGraph()).nodes.map((node) => node.path)).toEqual(["inside.md"]);
+	});
+
+	test("does not read an indexed symlink after its target escapes the resolved root", async () => {
+		mkdirSync(kbRoot);
+		const internalRoot = path.join(kbRoot, "internal");
+		const outsideRoot = path.join(fixtureRoot, "outside");
+		mkdirSync(internalRoot);
+		mkdirSync(outsideRoot);
+		writeFileSync(path.join(internalRoot, "note.md"), "# Safe\n", "utf8");
+		writeFileSync(path.join(outsideRoot, "note.md"), "# Outside secret\n", "utf8");
+		const linkedDir = path.join(kbRoot, "linked");
+		symlinkSync(internalRoot, linkedDir, "dir");
+
+		const service = new KbService({ root: kbRoot });
+		await service.ensureIndex();
+		rmSync(linkedDir);
+		symlinkSync(outsideRoot, linkedDir, "dir");
+
+		expect((await service.search("outside secret", 20)).totalMatches).toBe(0);
+	});
+
+	test("rebuilds when invalidated while an index build is in flight", async () => {
+		mkdirSync(kbRoot);
+		writeFileSync(path.join(kbRoot, "before.md"), "# Before\n", "utf8");
+		const service = new KbService({ root: kbRoot });
+		const walkSeam = service as unknown as {
+			walk: (...args: unknown[]) => Promise<void>;
+		};
+		const originalWalk = walkSeam.walk.bind(service);
+		const firstWalkFinished = Promise.withResolvers<void>();
+		const continueFirstBuild = Promise.withResolvers<void>();
+		let blockFirstBuild = true;
+		walkSeam.walk = async (...args) => {
+			await originalWalk(...args);
+			if (!blockFirstBuild) return;
+			blockFirstBuild = false;
+			firstWalkFinished.resolve();
+			await continueFirstBuild.promise;
+		};
+
+		const indexing = service.ensureIndex();
+		await firstWalkFinished.promise;
+		writeFileSync(path.join(kbRoot, "after.md"), "# After\n", "utf8");
+		service.invalidate();
+		continueFirstBuild.resolve();
+		await indexing;
+
+		expect((await service.getGraph()).nodes.map((node) => node.path)).toEqual(["after.md", "before.md"]);
 	});
 });

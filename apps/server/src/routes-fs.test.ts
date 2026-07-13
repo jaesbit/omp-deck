@@ -4,7 +4,7 @@
  * resolve under $HOME or a configured OMP_DECK_WORKSPACES root are acceptable.
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
@@ -56,6 +56,25 @@ describe("isCwdAllowed", () => {
 
 	test("rejects a path that exists but is a file, not a directory", () => {
 		expect(isCwdAllowed(fileUnderHome)).toBe(false);
+	});
+
+	test("rejects a symlink under $HOME that resolves outside the allowed root", () => {
+		const outside = mkdtempSync(path.join(os.tmpdir(), "omp-deck-outside-"));
+		const link = path.join(fakeHome, "escaped-project");
+		try {
+			symlinkSync(outside, link, "dir");
+			expect(isCwdAllowed(link)).toBe(false);
+		} finally {
+			rmSync(outside, { recursive: true, force: true });
+		}
+	});
+
+	test("accepts a symlink under $HOME that resolves within the allowed root", () => {
+		const target = path.join(fakeHome, "projects", "target");
+		const link = path.join(fakeHome, "linked-project");
+		mkdirSync(target, { recursive: true });
+		symlinkSync(target, link, "dir");
+		expect(isCwdAllowed(link)).toBe(true);
 	});
 
 	test("fails closed when $HOME/$USERPROFILE is unset", () => {

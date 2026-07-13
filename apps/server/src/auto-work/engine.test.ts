@@ -1574,6 +1574,23 @@ describe("runAutoWorkCycle", () => {
 		expect(runs[0]?.worktreePath).toBe(result.worktreePath);
 	});
 
+	test("moves a completed task to blocked with a visible reason when validate state is missing", async () => {
+		setAutoWorkConfig(repoCwd, { ...DEFAULT_AUTO_WORK_VALUES, enabled: true });
+		const task = createTask({ title: "Needs manual validation routing", cwd: repoCwd, priority: "P5", autoWork: true });
+		getDb().prepare("DELETE FROM task_states WHERE id = ?").run("s_validate");
+
+		const result = await runAutoWorkCycle(repoCwd, fakeBridge(new FakeSessionHandle("sess_missing_validate", 10)), {
+			getSubscriptionUsage: async () => ({ available: true, weeklyPct: 5 }),
+			createPullRequest: stubCreatePullRequest,
+		});
+
+		expect(result.outcome).toBe("completed");
+		expect(getTask(task.id)?.stateId).toBe("s_blocked");
+		expect(getTask(task.id)?.body).toContain('validate task state not found, task moved to blocked for manual review');
+		const run = listAutoWorkRuns({ taskId: task.id })[0];
+		expect(run).toEqual(expect.objectContaining({ status: "completed", failureReason: expect.stringContaining("validate task state not found") }));
+	});
+
 	test("creates an Auto Work worktree from the matching KB branch rather than origin/HEAD", async () => {
 		runGit(["checkout", "-q", "-b", "devel"], repoCwd);
 		fs.writeFileSync(path.join(repoCwd, "devel-only.txt"), "from devel\n");
@@ -2789,6 +2806,23 @@ describe("runAutoWorkCycle token and pct recording (T-80)", () => {
 		expect(run?.inputTokens).toBe(1500);
 		expect(run?.outputTokens).toBe(800);
 		expect(run?.pctConsumed).toBe(5); // 15 - 10
+	});
+
+	test("clamps pctConsumed to zero when the subscription week resets during a completed run", async () => {
+		setAutoWorkConfig(repoCwd, { ...DEFAULT_AUTO_WORK_VALUES, enabled: true });
+		createTask({ title: "Subscription reset task", cwd: repoCwd, priority: "P5", autoWork: true });
+
+		let usageCallCount = 0;
+		const result = await runAutoWorkCycle(repoCwd, fakeBridge(new FakeSessionHandle("sess_pct_reset", 10)), {
+			getSubscriptionUsage: async () => {
+				usageCallCount++;
+				return { available: true, weeklyPct: usageCallCount === 1 ? 70 : 2 };
+			},
+			createPullRequest: stubCreatePullRequest,
+		});
+
+		expect(result.outcome).toBe("completed");
+		expect(listAutoWorkRuns({})[0]?.pctConsumed).toBe(0);
 	});
 
 	test("persists inputTokens, outputTokens, and pctConsumed even on a failed run", async () => {

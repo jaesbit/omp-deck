@@ -21,11 +21,12 @@
  * On a successful run, `settleAutoWorkRun` opens a PR from the worktree
  * branch, appends a session-link + PR-reference note to the task body, and
  * moves the task to `validate` (never `done` — every auto-work result is
- * human-reviewed) before closing the run row `status: "completed"`. When
- * `gh pr create` itself fails, the implementation is still complete and the
- * task still moves to validate, but the run closes as
- * `status: "completed_pr_failed"` with an actionable `failureReason`
- * instead — distinct from a real success (T-85).
+ * human-reviewed) before closing the run row `status: "completed"`. If the
+ * validate state is unavailable, it safely parks the task in `blocked` with
+ * an actionable reason. When `gh pr create` itself fails, the implementation
+ * is still complete and the run closes as `status: "completed_pr_failed"`
+ * with an actionable `failureReason` instead — distinct from a real success
+ * (T-85).
  *
  * Explicitly out of scope here (later tickets in the stack):
  *  - T-67: notifications. Lifecycle transitions are logged at info/warn so a
@@ -708,11 +709,13 @@ export function failAutoWorkRun(runId: string, taskId: string, failureReason: st
  *
  * The success branch (T-66) opens a PR from the worktree branch, appends a
  * session-link + PR-reference note to the task body, and moves the task to
- * `validate` (never `done` — every auto-work result is human-reviewed). A PR
- * creation failure does not fail the run: the agent's work did complete, so
- * the task still moves to `validate` with a note that the PR needs to be
- * opened by hand — surfacing that loudly in the body and the logs beats
- * silently discarding a completed session behind an unrelated `gh` error.
+ * `validate` (never `done` — every auto-work result is human-reviewed). If
+ * validate is unavailable, it moves the task to `blocked` with a visible
+ * reason rather than leaving it active. A PR creation failure does not fail
+ * the run: the agent's work did complete, so the task still moves to validate
+ * with a note that the PR needs to be opened by hand — surfacing that loudly
+ * in the body and the logs beats silently discarding a completed session
+ * behind an unrelated `gh` error.
  */
 function finalizeAutoWorkRun(params: {
 	runId: string;
@@ -772,7 +775,7 @@ async function settleAutoWorkRun(params: {
 		typeof endUsageResult.value.weeklyPct === "number"
 			? endUsageResult.value.weeklyPct
 			: null;
-	const pctConsumed: number | null = startPct !== null && endPct !== null ? endPct - startPct : null;
+	const pctConsumed: number | null = startPct !== null && endPct !== null ? Math.max(0, endPct - startPct) : null;
 
 	if (terminal.outcome !== "completed") {
 		const timedOut = terminal.outcome === "timed_out";
@@ -888,32 +891,47 @@ async function settleAutoWorkRun(params: {
 		}
 	}
 
-	const completeRunNote =
+	const validateState = findStateByName("validate");
+	const validationRoutingReason = validateState ? undefined : "validate task state not found, task moved to blocked for manual review";
+	if (validateState) {
+		moveTask(task.id, validateState.id, 0);
+	} else {
+		const blockedState = findStateByName("blocked");
+		if (blockedState) moveTask(task.id, blockedState.id, 0);
+		else log.error(`run ${runId}: "validate" and "blocked" task states not found — T-${task.displayId} left in its current state`);
+	}
+
+	const completeRunNoteBase =
 		prNumber !== undefined
 			? `\n\n---\n**Auto Work** — [session ${shortSessionId}](${sessionUrl}) · PR #${prNumber}`
 			: `\n\n---\n**Auto Work — implementation complete, PR creation failed**\n[session ${shortSessionId}](${sessionUrl}) · run \`${runId}\`\n\n**Error:** ${prFailureReason}\n\nRetry with \`POST /auto-work/runs/${runId}/create-pr\`, or run \`gh pr create\` manually from \`${worktreePath}\`.`;
-	const completeHistorySummary =
+	const completeRunNote = validationRoutingReason
+		? `${completeRunNoteBase}\n\n**Auto Work routing:** ${validationRoutingReason}.`
+		: completeRunNoteBase;
+	const completeHistorySummaryBase =
 		prNumber !== undefined
 			? `Session completed. PR #${prNumber}.`
 			: `Session completed. PR creation failed: ${prFailureReason}.`;
+	const completeHistorySummary = validationRoutingReason
+		? `${completeHistorySummaryBase} ${validationRoutingReason}.`
+		: completeHistorySummaryBase;
 	updateTask(task.id, {
 		body: appendAgentHistoryEntry(task.body + completeRunNote, runId, new Date().toISOString(), completeHistorySummary),
 	});
 
-	const validateState = findStateByName("validate");
-	if (validateState) moveTask(task.id, validateState.id, 0);
-	else log.error(`run ${runId}: "validate" task state not found — T-${task.displayId} left in its current state`);
-
+	const completionFailureReason = `${prFailureReason ? `${prFailureReason} ` : ""}${validationRoutingReason ?? ""}`.trim() || null;
 	completeAutoWorkRun(runId, {
 		status: prNumber !== undefined ? "completed" : "completed_pr_failed",
 		inputTokens,
 		outputTokens,
 		pctConsumed,
-		failureReason: prFailureReason ?? null,
+		failureReason: completionFailureReason,
 	});
 	broadcastBus.broadcast({ type: "tasks_changed" });
 	broadcastBus.broadcast({ type: "auto_work_runs_changed" });
-	log.info(`run ${runId} completed for T-${task.displayId} — moved to validate${prNumber === undefined ? " (PR creation failed)" : ""}`);
+	log.info(
+		`run ${runId} completed for T-${task.displayId} — moved to ${validateState ? "validate" : "blocked"}${prNumber === undefined ? " (PR creation failed)" : ""}`,
+	);
 	// A real PR announces success; a PR-creation failure still gets its own
 	// (quieter) notification kind so it's visible without being confused
 	// with a genuine completion (T-85) — unlike the no-commits case above,

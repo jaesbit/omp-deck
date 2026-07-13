@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Archive, Bot, CheckCircle2, Circle, Link2, MessageSquarePlus, RotateCcw, Trash2, Wand2, X, Zap } from "lucide-react";
 import type { Task, TaskPriority, TaskState } from "@omp-deck/protocol";
 
@@ -67,17 +67,20 @@ export function TaskModal({
 	}, [task]);
 	// Rewrite state: null = idle, loading = in-flight, RewriteTaskResponse = preview pending
 	const [rewrite, setRewrite] = useState<{ title: string; body: string } | "loading" | null>(null);
+	const activeTaskIdRef = useRef<string | null>(task?.id ?? null);
 
 	async function triggerRewrite(): Promise<void> {
 		if (!task || rewrite === "loading") return;
 		setRewrite("loading");
 		try {
 			const result = await api.rewriteTask(task.id);
-			setRewrite(result);
+			if (activeTaskIdRef.current === task.id) setRewrite(result);
 		} catch (err) {
-			setRewrite(null);
-			// Surface the error to the user as a dismissible note inline.
-			setRewriteError(err instanceof Error ? err.message : String(err));
+			if (activeTaskIdRef.current === task.id) {
+				setRewrite(null);
+				// Surface the error to the user as a dismissible note inline.
+				setRewriteError(err instanceof Error ? err.message : String(err));
+			}
 		}
 	}
 	const [rewriteError, setRewriteError] = useState<string | null>(null);
@@ -106,6 +109,7 @@ export function TaskModal({
 
 	// Clear rewrite preview/error when a new task opens.
 	useEffect(() => {
+		activeTaskIdRef.current = task?.id ?? null;
 		setRewrite(null);
 		setRewriteError(null);
 	}, [task?.id]);

@@ -15,7 +15,7 @@
  * watched since the engine moves tasks between states as runs progress.
  */
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import {
 	Activity,
@@ -400,6 +400,7 @@ export function AutoWorkView() {
 	// Global schedule state.
 	const [scheduleStatus, setScheduleStatus] = useState<AutoWorkScheduleStatus | null>(null);
 	const [triggering, setTriggering] = useState(false);
+	const refreshSequence = useRef(0);
 
 
 	const refreshScheduleStatus = useCallback(async (): Promise<void> => {
@@ -411,6 +412,7 @@ export function AutoWorkView() {
 
 
 	const refresh = useCallback(async (): Promise<void> => {
+		const sequence = ++refreshSequence.current;
 		try {
 			const [runsRes, tasksRes] = await Promise.all([
 				api.listAutoWorkRuns({ limit: 200 }),
@@ -421,6 +423,7 @@ export function AutoWorkView() {
 				if (a.status !== "running" && b.status === "running") return 1;
 				return new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime();
 			});
+			if (sequence !== refreshSequence.current) return;
 			setAllRuns(sorted);
 			const map: Record<string, Task> = {};
 			for (const t of tasksRes.tasks) map[t.id] = t;
@@ -431,9 +434,10 @@ export function AutoWorkView() {
 			// otherwise the detail pane goes blank instead of showing another run.
 			setSelectedRunId((prev) => (prev && sorted.some((r) => r.id === prev) ? prev : sorted[0]?.id));
 		} catch (e) {
+			if (sequence !== refreshSequence.current) return;
 			setError(String(e));
 		} finally {
-			setLoading(false);
+			if (sequence === refreshSequence.current) setLoading(false);
 		}
 	}, []);
 
