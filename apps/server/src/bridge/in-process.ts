@@ -57,7 +57,7 @@ import { ExtensionUIBridge } from "./ext-ui-bridge.ts";
 import { GoalModeBridge } from "./goal-mode-bridge.ts";
 import type { GoalAction, GoalModeSessionSurface, GoalModeState } from "./goal-mode-bridge.ts";
 import { PlanModeBridge } from "./plan-mode-bridge.ts";
-import type { PlanModelController, PlanModeSessionSurface } from "./plan-mode-bridge.ts";
+import type { PersistedPlanModeData, PlanModelController, PlanModeSessionSurface } from "./plan-mode-bridge.ts";
 import { getPlanModel } from "../db/server-settings.ts";
 import { summarizeSession } from "./session-normalizer.ts";
 import type {
@@ -627,6 +627,11 @@ export class InProcessAgentBridge implements AgentBridge {
 			getArtifactsDir: () => (sessionManager as unknown as { getArtifactsDir: () => string | null }).getArtifactsDir(),
 			getSessionId: () => (sessionManager as unknown as { getSessionId: () => string | null }).getSessionId(),
 			planModel: planModelController,
+			// T-29: durable plan-mode marker in the session .jsonl — the same
+			// `mode_change` entry the TUI writes — so resume can rehydrate below.
+			persistModeChange: (mode, data) => {
+				sessionManager.appendModeChange(mode, data);
+			},
 		});
 
 		const goalBridge = new GoalModeBridge(
@@ -739,20 +744,24 @@ export class InProcessAgentBridge implements AgentBridge {
 			planBridge,
 			goalBridge,
 		});
-		const persistedGoal = sessionManager.buildSessionContext() as unknown as {
+		const persistedMode = sessionManager.buildSessionContext() as unknown as {
 			mode?: string;
-			modeData?: { goal?: GoalModeState["goal"] };
+			modeData?: { goal?: GoalModeState["goal"] } & PersistedPlanModeData;
 		};
-		if (persistedGoal.mode === "goal" || persistedGoal.mode === "goal_paused") {
+		if (persistedMode.mode === "goal" || persistedMode.mode === "goal_paused") {
 			await goalBridge.restore(
-				persistedGoal.modeData?.goal
+				persistedMode.modeData?.goal
 					? {
-						enabled: persistedGoal.mode === "goal",
+						enabled: persistedMode.mode === "goal",
 						mode: "active",
-						goal: persistedGoal.modeData.goal,
+						goal: persistedMode.modeData.goal,
 					}
 					: undefined,
 			);
+		} else if (persistedMode.mode === "plan") {
+			// T-29: a reopened plan session recovers plan mode, its plan file
+			// and any proposal that was pending when the previous process died.
+			await planBridge.restore(persistedMode.modeData);
 		}
 		return handle;
 	}
