@@ -134,6 +134,10 @@ export function TaskModal({
 		const next = cwd.trim() || undefined;
 		if ((task.cwd ?? "") !== (next ?? "")) onSave({ cwd: next });
 	}
+	// Auto Work needs a repo to run in: block enabling the flag until the task
+	// names a workspace. Mirrors the server-side invariant (autoWork ⇒ cwd).
+	// Turning the flag OFF stays allowed for legacy cwd-less rows.
+	const autoWorkToggleBlocked = task !== null && !task.autoWork && cwd.trim().length === 0;
 	function addDependency(depId: string): void {
 		if (!task || !depId || task.dependsOn.includes(depId)) return;
 		onSave({ dependsOn: [...task.dependsOn, depId] });
@@ -261,11 +265,26 @@ export function TaskModal({
 						</span>
 						<span className="text-ink-4">auto work</span>
 						<span className="col-span-3">
-							<label className="inline-flex cursor-pointer items-center gap-1.5 text-ink-2">
+							<label
+								className={cn(
+									"inline-flex items-center gap-1.5 text-ink-2",
+									autoWorkToggleBlocked ? "cursor-not-allowed opacity-60" : "cursor-pointer",
+								)}
+								title={autoWorkToggleBlocked ? "Assign a workspace (cwd) above first — Auto Work needs a repo to run in" : undefined}
+							>
 								<input
 									type="checkbox"
 									checked={task.autoWork}
-									onChange={(e) => onSave({ autoWork: e.target.checked })}
+									disabled={autoWorkToggleBlocked}
+									onChange={(e) => {
+										const patch: { autoWork: boolean; cwd?: string } = { autoWork: e.target.checked };
+										const trimmed = cwd.trim();
+										// A cwd typed but not yet committed via blur travels in the
+										// same atomic patch, so the server invariant (autoWork ⇒ cwd)
+										// never rejects the toggle.
+										if (e.target.checked && trimmed && trimmed !== task.cwd) patch.cwd = trimmed;
+										onSave(patch);
+									}}
 									className="h-3.5 w-3.5 rounded-sm border-line accent-accent"
 								/>
 								<Zap className="h-3.5 w-3.5 shrink-0 text-accent" />

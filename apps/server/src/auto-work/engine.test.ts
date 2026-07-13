@@ -399,6 +399,49 @@ describe("selectNextAutoWorkTask", () => {
 		});
 		expect(result).toEqual({ kind: "none_eligible" });
 	});
+	test("pinned: selects exactly the pinned task even when a higher-priority task exists", () => {
+		const p0 = baseTask({ priority: "P0" });
+		const pinned = baseTask({ priority: "P5" });
+		const result = selectNextAutoWorkTask({
+			tasks: [p0, pinned],
+			config: baseConfig(),
+			currentPctUsed: 0,
+			backlogStateId: "s_backlog",
+			doneStateId: "s_done",
+			estimateCostPct,
+			pinnedTaskId: pinned.id,
+		});
+		expect(result).toEqual({ kind: "selected", task: pinned, estimatedCostPct: 5 });
+	});
+
+	test("pinned: returns pinned_unavailable when the pinned task left the backlog", () => {
+		const eligible = baseTask();
+		const pinned = baseTask({ stateId: "s_active" });
+		const result = selectNextAutoWorkTask({
+			tasks: [eligible, pinned],
+			config: baseConfig(),
+			currentPctUsed: 0,
+			backlogStateId: "s_backlog",
+			doneStateId: "s_done",
+			estimateCostPct,
+			pinnedTaskId: pinned.id,
+		});
+		expect(result).toEqual({ kind: "pinned_unavailable" });
+	});
+
+	test("pinned: returns pinned_unavailable when the pinned task no longer fits the budget", () => {
+		const pinned = baseTask({ priority: "P0" });
+		const result = selectNextAutoWorkTask({
+			tasks: [pinned],
+			config: baseConfig(),
+			currentPctUsed: 60,
+			backlogStateId: "s_backlog",
+			doneStateId: "s_done",
+			estimateCostPct,
+			pinnedTaskId: pinned.id,
+		});
+		expect(result).toEqual({ kind: "pinned_unavailable" });
+	});
 });
 
 describe("resolveAutoWorkModel", () => {
@@ -2440,6 +2483,86 @@ describe("runGlobalAutoWorkCycle", () => {
 		}
 		expect(createSessionCalls[2]).toMatchObject({ cwd: repoCwd });
 		expect(createSessionCalls[2]?.systemPromptAppend).toEqual(expect.any(String));
+	});
+	test("pinnedTaskId makes the inner cycle run exactly the global winner, not its own priority pick", async () => {
+		setAutoWorkConfig(repoCwd, { ...DEFAULT_AUTO_WORK_VALUES, enabled: true });
+		const priorityPick = createTask({ title: "P0 would win", cwd: repoCwd, priority: "P0", autoWork: true });
+		const pinnedWinner = createTask({ title: "Pinned P5", cwd: repoCwd, priority: "P5", autoWork: true });
+
+		const result = await runAutoWorkCycle(repoCwd, fakeBridge(new FakeSessionHandle("pinned-run", 10)), {
+			getSubscriptionUsage: async () => ({ available: true, weeklyPct: 5 }),
+			createPullRequest: stubCreatePullRequest,
+			generateBranchSlug: async () => "pinned-p5",
+			pinnedTaskId: pinnedWinner.id,
+		});
+
+		expect(result.outcome).toBe("completed");
+		if (result.outcome !== "completed") throw new Error("expected completed");
+		expect(result.taskId).toBe(pinnedWinner.id);
+		expect(getTask(priorityPick.id)?.stateId).toBe("s_backlog");
+	});
+
+	test("pinnedTaskId that is no longer eligible skips the cycle instead of running another task", async () => {
+		setAutoWorkConfig(repoCwd, { ...DEFAULT_AUTO_WORK_VALUES, enabled: true });
+		const fallback = createTask({ title: "Would-be fallback", cwd: repoCwd, priority: "P0", autoWork: true });
+		const gone = createTask({ title: "Moved away", cwd: repoCwd, priority: "P5", autoWork: true });
+		moveTask(gone.id, "s_active", 0);
+
+		const result = await runAutoWorkCycle(repoCwd, fakeBridge(new FakeSessionHandle("pinned-gone", 10)), {
+			getSubscriptionUsage: async () => ({ available: true, weeklyPct: 5 }),
+			pinnedTaskId: gone.id,
+		});
+
+		expect(result.outcome).toBe("skipped");
+		if (result.outcome !== "skipped") throw new Error("expected skipped");
+		expect(result.reason).toContain("no longer eligible");
+		expect(getTask(fallback.id)?.stateId).toBe("s_backlog");
+	});
+
+	test("skip reason names each enabled workspace's blocker instead of a generic line", async () => {
+		setAutoWorkConfig(repoCwd, { ...DEFAULT_AUTO_WORK_VALUES, enabled: true });
+		// An autoWork task with a cwd keeps the workspace inside the global
+		// scan while its done state leaves the backlog empty.
+		const doneTask = createTask({ title: "Already done", cwd: repoCwd, priority: "P5", autoWork: true });
+		moveTask(doneTask.id, "s_done", 0);
+
+		const result = await runGlobalAutoWorkCycle(fakeBridge(new FakeSessionHandle("unused", 10)), {
+			getSubscriptionUsage: async () => ({ available: true, weeklyPct: 5 }),
+		});
+
+		expect(result.outcome).toBe("skipped");
+		if (result.outcome !== "skipped") throw new Error("expected skipped");
+		expect(result.reason).toContain(repoCwd);
+		expect(result.reason).toContain("no eligible auto-work tasks in backlog");
+	});
+
+	test("names orphaned cwd-less auto-work tasks in the skip reason", async () => {
+		setAutoWorkConfig(repoCwd, { ...DEFAULT_AUTO_WORK_VALUES, enabled: true });
+		const doneTask = createTask({ title: "Keeps workspace enabled", cwd: repoCwd, priority: "P5", autoWork: true });
+		moveTask(doneTask.id, "s_done", 0);
+		const orphan = createTask({ title: "No workspace", priority: "P0", autoWork: true });
+
+		const result = await runGlobalAutoWorkCycle(fakeBridge(new FakeSessionHandle("unused", 10)), {
+			getSubscriptionUsage: async () => ({ available: true, weeklyPct: 5 }),
+		});
+
+		expect(result.outcome).toBe("skipped");
+		if (result.outcome !== "skipped") throw new Error("expected skipped");
+		expect(result.reason).toContain(`T-${orphan.displayId}`);
+		expect(result.reason).toContain("no workspace (cwd)");
+	});
+
+	test("reports orphaned tasks even when no workspace is enabled at all", async () => {
+		const orphan = createTask({ title: "Orphan only", priority: "P0", autoWork: true });
+
+		const result = await runGlobalAutoWorkCycle(fakeBridge(new FakeSessionHandle("unused", 10)), {
+			getSubscriptionUsage: async () => ({ available: true, weeklyPct: 5 }),
+		});
+
+		expect(result.outcome).toBe("skipped");
+		if (result.outcome !== "skipped") throw new Error("expected skipped");
+		expect(result.reason).toContain("no workspace has auto-work enabled");
+		expect(result.reason).toContain(`T-${orphan.displayId}`);
 	});
 });
 

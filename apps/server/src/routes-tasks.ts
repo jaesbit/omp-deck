@@ -75,8 +75,14 @@ export function buildTasksRouter(): Hono {
 		if (body.dependsOn !== undefined && !isStringArray(body.dependsOn)) {
 			return c.json({ error: "dependsOn must be string[]" }, 400);
 		}
+		if (body.cwd !== undefined && typeof body.cwd !== "string") {
+			return c.json({ error: "cwd must be a string" }, 400);
+		}
 		if (body.autoWork !== undefined && typeof body.autoWork !== "boolean") {
 			return c.json({ error: "autoWork must be boolean" }, 400);
+		}
+		if (body.autoWork === true && !body.cwd?.trim()) {
+			return c.json({ error: "auto-work tasks require a workspace: set cwd when enabling autoWork" }, 400);
 		}
 		try {
 			const task = createTask(body);
@@ -107,8 +113,21 @@ export function buildTasksRouter(): Hono {
 		if (body.dependsOn !== undefined && !isStringArray(body.dependsOn)) {
 			return c.json({ error: "dependsOn must be string[]" }, 400);
 		}
+		if (body.cwd !== undefined && typeof body.cwd !== "string") {
+			return c.json({ error: "cwd must be a string" }, 400);
+		}
 		if (body.autoWork !== undefined && typeof body.autoWork !== "boolean") {
 			return c.json({ error: "autoWork must be boolean" }, 400);
+		}
+		const existing = getTask(c.req.param("id"));
+		if (!existing) return c.json({ error: "not found" }, 404);
+		// Invariant (auto-work): an eligible task always names its workspace.
+		// Covers both enabling autoWork on a cwd-less task and clearing the
+		// cwd of an already-eligible one — the engine cannot run either.
+		const nextAutoWork = body.autoWork ?? existing.autoWork;
+		const nextCwd = body.cwd !== undefined ? body.cwd : existing.cwd;
+		if (nextAutoWork && !nextCwd?.trim()) {
+			return c.json({ error: "auto-work tasks require a workspace: set cwd or disable autoWork first" }, 400);
 		}
 		try {
 			const updated = updateTask(c.req.param("id"), body);

@@ -15,7 +15,7 @@ import * as path from "node:path";
 
 import { broadcastBus, type BroadcastFrame } from "./broadcast-bus.ts";
 import { closeDb, openDb } from "./db/index.ts";
-import { createState } from "./db/tasks.ts";
+import { createState, createTask } from "./db/tasks.ts";
 import { buildTasksRouter } from "./routes-tasks.ts";
 
 let dbDir: string | null = null;
@@ -142,5 +142,56 @@ describe("task-state routes broadcast tasks_changed", () => {
 		} finally {
 			unsub();
 		}
+	});
+});
+describe("auto-work workspace invariant (autoWork requires cwd)", () => {
+	test("POST /tasks rejects autoWork without a cwd", async () => {
+		bootDb();
+		const app = buildTasksRouter();
+		const res = await app.request("/tasks", jsonRequest("POST", { title: "orphan", autoWork: true }));
+		expect(res.status).toBe(400);
+		const body = (await res.json()) as { error: string };
+		expect(body.error).toContain("workspace");
+	});
+
+	test("POST /tasks accepts autoWork with a cwd", async () => {
+		bootDb();
+		const app = buildTasksRouter();
+		const res = await app.request("/tasks", jsonRequest("POST", { title: "ok", autoWork: true, cwd: "/tmp/repo" }));
+		expect(res.status).toBe(201);
+	});
+
+	test("PATCH /tasks/:id rejects enabling autoWork on a cwd-less task", async () => {
+		bootDb();
+		const app = buildTasksRouter();
+		const task = createTask({ title: "no cwd" });
+		const res = await app.request(`/tasks/${task.id}`, jsonRequest("PATCH", { autoWork: true }));
+		expect(res.status).toBe(400);
+	});
+
+	test("PATCH /tasks/:id accepts enabling autoWork when the same patch sets cwd", async () => {
+		bootDb();
+		const app = buildTasksRouter();
+		const task = createTask({ title: "no cwd yet" });
+		const res = await app.request(`/tasks/${task.id}`, jsonRequest("PATCH", { autoWork: true, cwd: "/tmp/repo" }));
+		expect(res.status).toBe(200);
+	});
+
+	test("PATCH /tasks/:id rejects blanking the cwd of an auto-work task", async () => {
+		bootDb();
+		const app = buildTasksRouter();
+		const task = createTask({ title: "eligible", cwd: "/tmp/repo", autoWork: true });
+		const res = await app.request(`/tasks/${task.id}`, jsonRequest("PATCH", { cwd: "  " }));
+		expect(res.status).toBe(400);
+	});
+
+	test("PATCH /tasks/:id still allows disabling autoWork on a legacy cwd-less row", async () => {
+		bootDb();
+		const app = buildTasksRouter();
+		// The db layer bypasses route validation, mirroring rows created
+		// before the invariant existed.
+		const task = createTask({ title: "legacy orphan", autoWork: true });
+		const res = await app.request(`/tasks/${task.id}`, jsonRequest("PATCH", { autoWork: false }));
+		expect(res.status).toBe(200);
 	});
 });

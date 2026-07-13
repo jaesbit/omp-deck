@@ -160,12 +160,20 @@ export interface TaskSelectionInput {
 	doneStateId: string;
 	/** Injected rather than calling `estimateTaskCostPct` directly, so this stays DB-free and pure. */
 	estimateCostPct: (priority: TaskPriority) => number;
+	/**
+	 * Pin selection to this exact task id. Set by `runGlobalAutoWorkCycle`
+	 * so the winner it announced is exactly the task the inner cycle runs.
+	 * A pinned task that is no longer eligible or affordable yields
+	 * `pinned_unavailable` — never a silently different task.
+	 */
+	pinnedTaskId?: string;
 }
 
 export type TaskSelectionResult =
 	| { kind: "selected"; task: Task; estimatedCostPct: number }
 	| { kind: "none_eligible" }
-	| { kind: "none_fit"; consideredCount: number };
+	| { kind: "none_fit"; consideredCount: number }
+	| { kind: "pinned_unavailable" };
 
 /**
  * `autoWork=true` AND `stateId=backlog` AND every `dependsOn` task is
@@ -175,13 +183,23 @@ export type TaskSelectionResult =
  * priority task further down the list may still be affordable.
  */
 export function selectNextAutoWorkTask(input: TaskSelectionInput): TaskSelectionResult {
-	const { tasks, config, currentPctUsed, backlogStateId, doneStateId, estimateCostPct } = input;
+	const { tasks, config, currentPctUsed, backlogStateId, doneStateId, estimateCostPct, pinnedTaskId } = input;
 	const tasksById = new Map(tasks.map((t) => [t.id, t]));
 
 	const eligible = tasks
 		.filter((t) => t.autoWork && t.stateId === backlogStateId)
 		.filter((t) => t.dependsOn.every((depId) => tasksById.get(depId)?.stateId === doneStateId))
 		.sort((a, b) => PRIORITY_ORDER[a.priority] - PRIORITY_ORDER[b.priority] || a.orderInState - b.orderInState);
+
+	if (pinnedTaskId !== undefined) {
+		const pinned = eligible.find((t) => t.id === pinnedTaskId);
+		if (!pinned) return { kind: "pinned_unavailable" };
+		const estimatedCostPct = estimateCostPct(pinned.priority);
+		if (!costFitsAutoWorkBudget(estimatedCostPct, currentPctUsed, config)) {
+			return { kind: "pinned_unavailable" };
+		}
+		return { kind: "selected", task: pinned, estimatedCostPct };
+	}
 
 	if (eligible.length === 0) return { kind: "none_eligible" };
 
@@ -363,6 +381,12 @@ export interface RunAutoWorkCycleOptions {
 	 * to skip that call and keep worktree/branch names predictable.
 	 */
 	generateBranchSlug?: (task: Task) => Promise<string>;
+	/**
+	 * Pin the inner cycle's selection to one task id — see
+	 * `TaskSelectionInput.pinnedTaskId`. Production sets this from the
+	 * global cycle's winner; a plain per-workspace cycle leaves it unset.
+	 */
+	pinnedTaskId?: string;
 }
 
 /** Candidate supplied to the optional cross-workspace task selector. */
@@ -482,13 +506,16 @@ export async function runAutoWorkCycle(
 		backlogStateId: backlogState.id,
 		doneStateId: doneState.id,
 		estimateCostPct: (priority) => estimateTaskCostPct(priority, config),
+		pinnedTaskId: options.pinnedTaskId,
 	});
 
 	if (selection.kind !== "selected") {
 		const reason =
 			selection.kind === "none_eligible"
 				? "no eligible auto-work tasks in backlog (autoWork flag, dependencies, or state)"
-				: `${selection.consideredCount} eligible task(s) considered but none fit the current cost/budget limits`;
+				: selection.kind === "pinned_unavailable"
+					? "the globally selected task is no longer eligible or affordable — reselecting on the next cycle"
+					: `${selection.consideredCount} eligible task(s) considered but none fit the current cost/budget limits`;
 		log.info(`cycle for ${cwd}: ${reason}`);
 		// Session-limit notification (T-67) — only for the "considered but none
 		// fit" case (a genuine budget-driven pause), and only when the weekly
@@ -1660,14 +1687,31 @@ export async function runGlobalAutoWorkCycle(
 		if (config.enabled) enabledCwds.add(t.cwd);
 	}
 
+	// Auto-work backlog tasks without a workspace can never run — the task
+	// write paths reject that state now, but pre-existing rows (or direct DB
+	// edits) must be loudly visible instead of silently ignored.
+	const orphaned = allTasks.filter((t) => t.autoWork && t.stateId === backlogState.id && !t.cwd?.trim());
+	const orphanNote =
+		orphaned.length > 0
+			? `${orphaned.length} auto-work task(s) have no workspace (cwd) and were ignored: ${orphaned
+					.map((t) => `T-${t.displayId}`)
+					.join(", ")} — set a cwd on the task card`
+			: undefined;
+	if (orphanNote) log.warn(`global cycle: ${orphanNote}`);
+
 	if (enabledCwds.size === 0) {
-		return { outcome: "skipped", reason: "no workspace has auto-work enabled" };
+		const reason = orphanNote
+			? `no workspace has auto-work enabled — ${orphanNote}`
+			: "no workspace has auto-work enabled";
+		log.info(`global cycle skipped: ${reason}`);
+		return { outcome: "skipped", reason };
 	}
 
 	// Per-workspace: preflight + task selection.
 	const tasksById = new Map(allTasks.map((t) => [t.id, t]));
 
 	const candidates: GlobalAutoWorkCandidate[] = [];
+	const workspaceSkips: string[] = [];
 
 	for (const cwd of enabledCwds) {
 		const config = getAutoWorkConfig(cwd);
@@ -1677,7 +1721,7 @@ export async function runGlobalAutoWorkCycle(
 		});
 		const preflight = checkAutoWorkPreflight({ config, now, subscriptionPctUsed, sessionPctUsed, activeRuns });
 		if (!preflight.ok) {
-			log.debug(`global cycle: ${cwd} skipped (${preflight.reason})`);
+			workspaceSkips.push(`${cwd}: ${preflight.reason}`);
 			continue;
 		}
 		const cwdTasks = allTasks.filter((t) => t.cwd === cwd);
@@ -1691,11 +1735,20 @@ export async function runGlobalAutoWorkCycle(
 		});
 		if (selection.kind === "selected") {
 			candidates.push({ workspaceCwd: cwd, task: selection.task, estimatedCostPct: selection.estimatedCostPct });
+		} else if (selection.kind === "none_eligible") {
+			workspaceSkips.push(`${cwd}: no eligible auto-work tasks in backlog`);
+		} else if (selection.kind === "none_fit") {
+			workspaceSkips.push(`${cwd}: ${selection.consideredCount} eligible task(s) exceed the current budget`);
 		}
 	}
 
 	if (candidates.length === 0) {
-		return { outcome: "skipped", reason: "no eligible task fits the current budget across all workspaces" };
+		const details = [...workspaceSkips, ...(orphanNote ? [orphanNote] : [])].join(" / ");
+		const reason = details
+			? `no runnable auto-work task: ${details}`
+			: "no eligible task fits the current budget across all workspaces";
+		log.info(`global cycle skipped: ${reason}`);
+		return { outcome: "skipped", reason };
 	}
 
 	// Priority remains the deterministic fallback. A selector only runs after
@@ -1722,6 +1775,7 @@ export async function runGlobalAutoWorkCycle(
 		...options,
 		now: () => now,
 		getSubscriptionUsage: () => Promise.resolve(cachedUsage),
+		pinnedTaskId: winner.task.id,
 		generateBranchSlug:
 			options.generateBranchSlug ??
 			((task) => generateBranchSlugWithModel(bridge, winner.workspaceCwd, task, options.taskSelectionModel ?? null)),
