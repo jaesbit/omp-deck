@@ -150,6 +150,9 @@ export function updateGlobalSchedule(
 		runGlobalAutoWorkCycle(bridge, { ...cycleOptions, taskSelectionModel: config.taskSelectionModel })
 			.then(async (outcome) => {
 				state.lastOutcome = outcome;
+				log.info(
+					`scheduled cycle finished: ${outcome.outcome}${outcome.outcome === "skipped" ? ` — ${outcome.reason}` : ""}`,
+				);
 				await runSqueezeFollowUps(config, bridge, cycleOptions);
 			})
 			.catch((err: unknown) => {
