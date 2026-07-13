@@ -7,7 +7,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-import { closeDb, openDb } from "./index.ts";
+import { closeDb, getDb, openDb } from "./index.ts";
 import {
 	createState,
 	createTask,
@@ -227,6 +227,35 @@ describe("dependencies (T-57)", () => {
 
 		const updated = updateTask(t.id, { dependsOn: [b.id] })!;
 		expect(updated.dependsOn).toEqual([b.id]);
+	});
+
+	test("rolls back scalar changes when dependency replacement fails", () => {
+		bootDb();
+		const originalDependency = createTask({ title: "original dependency", stateId: "s_backlog" });
+		const replacementDependency = createTask({ title: "replacement dependency", stateId: "s_backlog" });
+		const task = createTask({
+			title: "original title",
+			stateId: "s_backlog",
+			dependsOn: [originalDependency.id],
+		});
+		getDb().exec(`
+			CREATE TRIGGER fail_dependency_insert
+			BEFORE INSERT ON task_dependencies
+			BEGIN
+				SELECT RAISE(ABORT, 'dependency replacement failed');
+			END
+		`);
+
+		expect(() =>
+			updateTask(task.id, {
+				title: "renamed title",
+				dependsOn: [replacementDependency.id],
+			}),
+		).toThrow(/dependency replacement failed/);
+		expect(getTask(task.id)).toMatchObject({
+			title: "original title",
+			dependsOn: [originalDependency.id],
+		});
 	});
 
 	test("updateTask can clear dependencies with an empty array", () => {

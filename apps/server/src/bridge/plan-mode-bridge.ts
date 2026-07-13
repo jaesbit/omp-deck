@@ -548,9 +548,11 @@ export class PlanModeBridge {
 	dispose(): void {
 		if (this.disposed) return;
 		this.disposed = true;
-		// Fire-and-forget — dispose is sync; the SDK call chain in exit() is
-		// best-effort during teardown.
-		void this.exit("session_disposed");
+		// Fire-and-forget — dispose is sync, and teardown failures must not
+		// become unhandled rejections.
+		void this.exit("session_disposed").catch((err) => {
+			log.warn(`plan mode disposal failed for ${this.sessionId}`, err);
+		});
 		this.listeners.clear();
 	}
 

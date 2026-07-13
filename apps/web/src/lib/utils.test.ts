@@ -8,6 +8,7 @@ describe("formatDurationMs", () => {
 		{ name: "seconds", input: 1_500, expected: "1.5s" },
 		{ name: "minutes", input: 65_000, expected: "1m 5s" },
 		{ name: "zero milliseconds", input: 0, expected: "0ms" },
+		{ name: "rounded minute carry", input: 59_999, expected: "1m 0s" },
 	]
 
 	for (const { name, input, expected } of cases) {

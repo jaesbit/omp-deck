@@ -129,17 +129,18 @@ function wouldCreateCycle(db: Database, taskId: string, dependsOn: string[]): bo
 	return false;
 }
 
-/** Replaces `taskId`'s full dependency set. Caller must have already validated. */
+/**
+ * Replaces `taskId`'s full dependency set. Caller must have already validated
+ * and must invoke this inside its encompassing task mutation transaction.
+ */
 function applyDependencies(db: Database, taskId: string, dependsOn: string[]): void {
 	const now = nowIso();
-	db.transaction(() => {
-		db.prepare<unknown, [string]>("DELETE FROM task_dependencies WHERE task_id = ?").run(taskId);
-		if (dependsOn.length === 0) return;
-		const insert = db.prepare<unknown, [string, string, string]>(
-			"INSERT INTO task_dependencies (task_id, depends_on_task_id, created_at) VALUES (?, ?, ?)",
-		);
-		for (const dep of dependsOn) insert.run(taskId, dep, now);
-	})();
+	db.prepare<unknown, [string]>("DELETE FROM task_dependencies WHERE task_id = ?").run(taskId);
+	if (dependsOn.length === 0) return;
+	const insert = db.prepare<unknown, [string, string, string]>(
+		"INSERT INTO task_dependencies (task_id, depends_on_task_id, created_at) VALUES (?, ?, ?)",
+	);
+	for (const dep of dependsOn) insert.run(taskId, dep, now);
 }
 
 // ─── States ────────────────────────────────────────────────────────────────
@@ -305,7 +306,12 @@ export function getTask(taskId: string): Task | undefined {
 	return row ? rowToTask(row, listDependenciesFor(row.id)) : undefined;
 }
 
-export function createTask(input: {
+/**
+ * Creates a task without starting a transaction. This is deliberately public
+ * for mutations that need to compose task creation with another write in one
+ * caller-owned transaction.
+ */
+export function createTaskInTransaction(input: {
 	title: string;
 	body?: string;
 	stateId?: string;
@@ -327,29 +333,38 @@ export function createTask(input: {
 	const taskId = `t_${id().toLowerCase().slice(0, 18)}`;
 	const now = nowIso();
 	const dependsOn = input.dependsOn ? validateDependencyIds(db, taskId, input.dependsOn) : [];
-	let displayId = 0;
-	db.transaction(() => {
-		const seqRow = db
-			.query<{ value: number }, []>(
-				"UPDATE sequences SET value = value + 1 WHERE name = 'tasks' RETURNING value",
-			)
-			.get() as { value: number } | null;
-		if (!seqRow) throw new Error("tasks sequence missing — migration 002 not applied");
-		displayId = seqRow.value;
-		db.prepare<unknown, [string, number, string, string, string, number, string, string | null, string, string, string, number]>(
-			`INSERT INTO tasks (id, display_id, title, body, state_id, order_in_state, priority, cwd, created_at, updated_at, state_entered_at, auto_work)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		).run(taskId, displayId, input.title, input.body ?? "", state.id, maxOrder + 1000, input.priority ?? "P5", input.cwd ?? null, now, now, now, input.autoWork ? 1 : 0);
-		if (dependsOn.length > 0) {
-			const insertDep = db.prepare<unknown, [string, string, string]>(
-				"INSERT INTO task_dependencies (task_id, depends_on_task_id, created_at) VALUES (?, ?, ?)",
-			);
-			for (const dep of dependsOn) insertDep.run(taskId, dep, now);
-		}
-	})();
+	const seqRow = db
+		.query<{ value: number }, []>(
+			"UPDATE sequences SET value = value + 1 WHERE name = 'tasks' RETURNING value",
+		)
+		.get() as { value: number } | null;
+	if (!seqRow) throw new Error("tasks sequence missing — migration 002 not applied");
+	db.prepare<unknown, [string, number, string, string, string, number, string, string | null, string, string, string, number]>(
+		`INSERT INTO tasks (id, display_id, title, body, state_id, order_in_state, priority, cwd, created_at, updated_at, state_entered_at, auto_work)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+	).run(taskId, seqRow.value, input.title, input.body ?? "", state.id, maxOrder + 1000, input.priority ?? "P5", input.cwd ?? null, now, now, now, input.autoWork ? 1 : 0);
+	if (dependsOn.length > 0) {
+		const insertDep = db.prepare<unknown, [string, string, string]>(
+			"INSERT INTO task_dependencies (task_id, depends_on_task_id, created_at) VALUES (?, ?, ?)",
+		);
+		for (const dep of dependsOn) insertDep.run(taskId, dep, now);
+	}
 	const out = getTask(taskId);
 	if (!out) throw new Error("createTask failed");
 	return out;
+}
+
+export function createTask(input: {
+	title: string;
+	body?: string;
+	stateId?: string;
+	cwd?: string;
+	priority?: TaskPriority;
+	dependsOn?: string[];
+	autoWork?: boolean;
+}): Task {
+	const db = getDb();
+	return db.transaction(() => createTaskInTransaction(input))();
 }
 
 export function updateTask(
@@ -384,29 +399,31 @@ export function updateTask(
 	if (nextDependsOn !== undefined && wouldCreateCycle(db, taskId, nextDependsOn)) {
 		throw new Error("dependency change would create a cycle");
 	}
-	db.prepare<
-		unknown,
-		[string, string, string, number, string, string | null, string, string, string | null, number, string]
-	>(
-		`UPDATE tasks
-		   SET title = ?, body = ?, state_id = ?, order_in_state = ?, priority = ?, cwd = ?,
-		       updated_at = ?, state_entered_at = ?, archived_at = ?, auto_work = ?
-		 WHERE id = ?`,
-	).run(
-		next.title,
-		next.body,
-		next.stateId,
-		next.orderInState,
-		next.priority,
-		next.cwd ?? null,
-		nowIso(),
-		stateEnteredAt,
-		archivedAt,
-		next.autoWork ? 1 : 0,
-		taskId,
-	);
-	if (nextDependsOn !== undefined) applyDependencies(db, taskId, nextDependsOn);
-	return getTask(taskId);
+	return db.transaction(() => {
+		db.prepare<
+			unknown,
+			[string, string, string, number, string, string | null, string, string, string | null, number, string]
+		>(
+			`UPDATE tasks
+			   SET title = ?, body = ?, state_id = ?, order_in_state = ?, priority = ?, cwd = ?,
+			       updated_at = ?, state_entered_at = ?, archived_at = ?, auto_work = ?
+			 WHERE id = ?`,
+		).run(
+			next.title,
+			next.body,
+			next.stateId,
+			next.orderInState,
+			next.priority,
+			next.cwd ?? null,
+			nowIso(),
+			stateEnteredAt,
+			archivedAt,
+			next.autoWork ? 1 : 0,
+			taskId,
+		);
+		if (nextDependsOn !== undefined) applyDependencies(db, taskId, nextDependsOn);
+		return getTask(taskId);
+	})();
 }
 
 export function deleteTask(taskId: string): boolean {

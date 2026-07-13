@@ -149,6 +149,9 @@ export function buildRouter(
 		} catch {
 			return c.json({ error: "invalid json body" }, 400);
 		}
+		if (!body || typeof body !== "object" || Array.isArray(body) || body.model === undefined) {
+			return c.json({ error: "model is required" }, 400);
+		}
 		if (body.model !== null) {
 			const invalid = await validateModelRef(bridge, body.model);
 			if (invalid) return c.json({ error: invalid }, 400);

@@ -13,7 +13,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 
 import type { ModelRef, ServerFrame } from "@omp-deck/protocol";
 
@@ -876,6 +876,30 @@ describe("PlanModeBridge", () => {
 		harness.bridge.dispose();
 		await expect(resultPromise).rejects.toThrow(/abandoned|disposed/i);
 		expect(harness.bridge.hasPendingApproval()).toBe(false);
+	});
+
+	it("dispose() catches and logs an asynchronous exit failure", async () => {
+		await harness.bridge.enter();
+		const originalSetStandingResolveHandler = harness.session.setStandingResolveHandler;
+		const failure = new Error("standing handler cleanup failed");
+		harness.session.setStandingResolveHandler = () => {
+			throw failure;
+		};
+		const logged = Promise.withResolvers<void>();
+		const logSpy = spyOn(console, "log").mockImplementation((message: unknown, error: unknown) => {
+			if (typeof message === "string" && message.includes("plan mode disposal failed for s_test")) {
+				expect(error).toBe(failure);
+				logged.resolve();
+			}
+		});
+
+		try {
+			harness.bridge.dispose();
+			await logged.promise;
+		} finally {
+			logSpy.mockRestore();
+			harness.session.setStandingResolveHandler = originalSetStandingResolveHandler;
+		}
 	});
 
 	it("snapshot replay frames cover both mode-changed and pending proposal", async () => {

@@ -43,6 +43,11 @@ export function Chat() {
 	const sessionId = session?.sessionId;
 	const hasOlder = (session?.historyStartIndex ?? 0) > 0;
 
+	useEffect(() => {
+		stickyRef.current = true;
+		setShowScrollButton(false);
+	}, [sessionId]);
+
 	// Re-anchor the viewport after an older page was prepended: keep the
 	// message the user was looking at in place by offsetting scrollTop with
 	// the height the new content added. Must run before paint (layout effect)

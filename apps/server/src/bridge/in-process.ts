@@ -639,7 +639,9 @@ export class InProcessAgentBridge implements AgentBridge {
 			() => planBridge.exit("user_cancelled"),
 		);
 
-		const handle = new InProcessSessionHandle({
+		let handle: InProcessSessionHandle;
+		let unsubscribe: (() => void) | undefined;
+		handle = new InProcessSessionHandle({
 			session,
 			sessionManager,
 			cwd,
@@ -648,16 +650,22 @@ export class InProcessAgentBridge implements AgentBridge {
 			planBridge,
 			goalBridge,
 			onDispose: () => {
+				const active = this.active.get(sessionId);
+				if (active?.handle === handle) {
+					active.unsubscribe();
+					this.active.delete(sessionId);
+				} else {
+					unsubscribe?.();
+				}
 				uiBridge.dispose();
 				goalBridge.dispose();
 				planBridge.dispose();
-				this.active.delete(sessionId);
 			},
 		});
 
 		// Bridge SDK events to handle's listeners, AND to bridge-internal activity
 		// tracking so the reaper sees real agent work and won't kill an in-flight turn.
-		const unsubscribe = session.subscribe((event) => {
+		unsubscribe = session.subscribe((event) => {
 			const entry = this.active.get(sessionId);
 			if (entry) {
 				entry.lastActivityAt = Date.now();
