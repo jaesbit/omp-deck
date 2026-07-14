@@ -53,6 +53,8 @@ import { buildOrientationRouter } from "./routes-orientation.ts";
 import { buildAuthOAuthRouter } from "./routes-auth-oauth.ts";
 import { buildOnboardingRouter } from "./routes-onboarding.ts";
 import { buildUsageRouter } from "./routes-usage.ts";
+import { buildCodebaseMemoryRouter } from "./routes-codebase-memory.ts";
+
 import { buildAutoWorkRouter } from "./routes-auto-work.ts";
 import type { RoutinesRunner } from "./routines-runner.ts";
 import type { BridgeSupervisor } from "./bridge-supervisor.ts";
@@ -516,6 +518,7 @@ export function buildRouter(
 	app.route("/", buildSkillsRouter(skills));
 	app.route("/", buildKbRouter(kb));
 	app.route("/auth/oauth", buildAuthOAuthRouter());
+	app.route("/", buildCodebaseMemoryRouter(isCwdAllowed));
 	app.route("/onboarding", buildOnboardingRouter());
 	app.route("/", buildUsageRouter(bridge, config));
 	app.route("/", buildAutoWorkRouter(bridge, config));

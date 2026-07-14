@@ -9,6 +9,7 @@ import type {
 	AutoWorkScheduleStatus,
 	CreateSessionRequest,
 	CreateSessionResponse,
+	CodebaseMemoryMcpStatus,
 	DeckBaseUrlResponse,
 	DelegationArtifactResponse,
 	DiscardDelegationArtifactRequest,
@@ -157,6 +158,15 @@ export const api = {
 		return request<AutoWorkConfig>(`/auto-work/config?cwd=${encodeURIComponent(cwd)}`, {
 			method: "PUT",
 			body: JSON.stringify(config),
+		});
+	},
+	getCodebaseMemoryMcpStatus(cwd: string): Promise<CodebaseMemoryMcpStatus> {
+		return request<CodebaseMemoryMcpStatus>(`/workspace-mcp/codebase-memory?cwd=${encodeURIComponent(cwd)}`);
+	},
+	setCodebaseMemoryMcpEnabled(cwd: string, enabled: boolean): Promise<CodebaseMemoryMcpStatus> {
+		return request<CodebaseMemoryMcpStatus>(`/workspace-mcp/codebase-memory?cwd=${encodeURIComponent(cwd)}`, {
+			method: "PUT",
+			body: JSON.stringify({ enabled }),
 		});
 	},
 	getDeckBaseUrl(): Promise<DeckBaseUrlResponse> {

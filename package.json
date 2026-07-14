@@ -68,6 +68,7 @@
 		"@omp-deck/protocol": "0.6.1",
 		"ajv": "^8.17.1",
 		"ajv-formats": "^3.0.1",
+		"codebase-memory-mcp": "0.9.0",
 		"croner": "^10.0.1",
 		"hono": "^4.12.27",
 		"quickjs-emscripten": "^0.32.0",
