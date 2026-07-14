@@ -75,6 +75,7 @@ export function SubscriptionLimitsView() {
 					</header>
 					<div className="flex-1 overflow-y-auto p-4">
 						<div className="mx-auto max-w-3xl space-y-6">
+							<SubscriptionLimitsContent usage={usage} loading={loading} error={usageError} onRetry={refresh} />
 							<AccountSpendSection
 								spend={spend}
 								loading={loading}
@@ -82,7 +83,6 @@ export function SubscriptionLimitsView() {
 								granularity={granularity}
 								onGranularityChange={setGranularity}
 							/>
-							<SubscriptionLimitsContent usage={usage} loading={loading} error={usageError} onRetry={refresh} />
 						</div>
 					</div>
 				</div>
