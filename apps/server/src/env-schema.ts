@@ -220,13 +220,21 @@ export const ENV_SCHEMA: EnvSchemaEntry[] = [
 		description: "Floor: wall-clock ms between consecutive fires (cross-session via disk state).",
 	},
 	{
+		key: "OMP_DECK_KB_ROOT",
+		valueType: "path",
+		sensitive: false,
+		restartRequired: true,
+		hotApply: false,
+		description: "Root directory of the user's KB wiki. Defaults to ~/kb when unset.",
+	},
+	{
 		key: "OMP_DECK_ORG_ROOT",
 		valueType: "path",
 		sensitive: false,
 		restartRequired: false,
 		hotApply: true,
 		description:
-			"Deck-session org root the maintenance-gate uses to anchor captures. Set automatically by the server to ~/kb unless overridden or disabled.",
+			"Deck org root used by the maintenance-gate extension. Set automatically by the server to the resolved KB root (OMP_DECK_KB_ROOT, default ~/kb) unless explicitly set or the gate is disabled.",
 	},
 ];
 

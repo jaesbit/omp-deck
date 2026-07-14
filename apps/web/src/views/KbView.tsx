@@ -122,7 +122,7 @@ export function KbView() {
 	return (
 		<>
 		<Layout
-			sidebar={<KbSidebar />}
+			sidebar={<KbSidebar root={status?.root ?? "~/kb"} />}
 			inspector={
 				<KbInspector
 					currentPath={currentPath}
@@ -192,6 +192,7 @@ export function KbView() {
 										{currentPath ? (
 											<KbFilePane
 												path={currentPath}
+												root={status?.root ?? "~/kb"}
 												onNavigate={(p) => {
 													const next = new URLSearchParams(params);
 													next.set("path", p);
@@ -237,9 +238,9 @@ export function KbView() {
 										)}
 									>
 										{currentPath ? (
-											<KbFilePane path={currentPath} onNavigate={(p) => setCurrentPath(p)} kbChangeCounter={kbChangeCounter} />
+											<KbFilePane path={currentPath} root={status?.root ?? "~/kb"} onNavigate={(p) => setCurrentPath(p)} kbChangeCounter={kbChangeCounter} />
 										) : (
-											<KbEmpty />
+											<KbEmpty root={status?.root ?? "~/kb"} />
 										)}
 									</div>
 								</div>
@@ -324,13 +325,13 @@ function KbTopBar({
 	);
 }
 
-function KbEmpty() {
+function KbEmpty({ root }: { root: string }) {
 	return (
 		<div className="flex h-full flex-col items-center justify-center px-6 py-10 text-center">
 			<BookOpen className="h-6 w-6 text-ink-4" />
 			<div className="mt-3 text-sm text-ink-2">Pick a file from the tree.</div>
 			<div className="mt-1 max-w-sm text-xs text-ink-3">
-				The KB cockpit reads your wiki at <span className="font-mono text-ink-2">~/kb</span>. Set{" "}
+				The KB cockpit reads your wiki at <span className="font-mono text-ink-2">{root}</span>. Set{" "}
 				<span className="font-mono">OMP_DECK_KB_EXCLUDE_DIRS</span> to hide subtrees if you need to.
 			</div>
 		</div>
@@ -427,7 +428,7 @@ function KbWelcome({
 
 // ─── Tree ────────────────────────────────────────────────────────────────
 
-function KbSidebar() {
+function KbSidebar({ root }: { root: string }) {
 	return (
 		<div className="flex h-full min-h-0 flex-col">
 			<div className="border-b border-line px-3 py-2">
@@ -437,7 +438,7 @@ function KbSidebar() {
 				</div>
 			</div>
 			<div className="min-h-0 flex-1 px-3 py-2 text-xs text-ink-3">
-				The cockpit reads <span className="font-mono">~/kb</span> via{" "}
+				The cockpit reads <span className="font-mono">{root}</span> via{" "}
 				<span className="font-mono">OMP_DECK_KB_ROOT</span>. Hide subtrees via{" "}
 				<span className="font-mono">OMP_DECK_KB_EXCLUDE_DIRS</span>.
 			</div>
@@ -642,11 +643,13 @@ function KbFilePane({
 	onNavigate,
 	onClose,
 	kbChangeCounter,
+	root,
 }: {
 	path: string;
 	onNavigate: (p: string) => void;
 	onClose?: () => void;
 	kbChangeCounter: number;
+	root: string;
 }) {
 	const [file, setFile] = useState<KbFileResponse | null>(null);
 	const [loading, setLoading] = useState(true);
@@ -764,7 +767,7 @@ function KbFilePane({
 			</div>
 		);
 	}
-	if (!file) return <KbEmpty />;
+	if (!file) return <KbEmpty root={root} />;
 
 	return (
 		<div className="flex h-full flex-col">
