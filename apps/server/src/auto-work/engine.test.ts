@@ -2566,6 +2566,112 @@ describe("runGlobalAutoWorkCycle", () => {
 	});
 });
 
+describe("runGlobalAutoWorkCycle orphan recovery (T-106)", () => {
+	function persistedSummary(sessionId: string, cwd: string): SessionSummary {
+		const now = new Date().toISOString();
+		return { id: sessionId, path: `/tmp/sessions/${sessionId}.jsonl`, cwd, createdAt: now, updatedAt: now, messageCount: 4 };
+	}
+
+	test("a running row orphaned by a restart, with a resumable session, is resumed through the owning workspace instead of blocking the global cycle", async () => {
+		setAutoWorkConfig(repoCwd, { ...DEFAULT_AUTO_WORK_VALUES, enabled: true });
+		const orphanTask = createTask({ title: "Orphaned by restart", cwd: repoCwd, priority: "P5", autoWork: true });
+		moveTask(orphanTask.id, "s_active", 0);
+		const worktreePath = path.join(repoCwd, ".worktrees", "aw-orphan-resume");
+		fs.mkdirSync(worktreePath, { recursive: true });
+		const orphanRunId = startAutoWorkRun({ taskId: orphanTask.id, taskPriority: "P5", sessionId: "sess_orphan_resume", worktreePath });
+
+		// A second, unrelated task sits ready in backlog — proves the tick that
+		// recovers the orphan does not also start a fresh task.
+		const otherTask = createTask({ title: "Would run next tick", cwd: repoCwd, priority: "P0", autoWork: true });
+
+		const resumedHandle = new FakeSessionHandle("sess_orphan_resume", 10);
+		const decoyHandle = new FakeSessionHandle("sess_decoy", 10);
+		const createSessionCalls: CreateSessionOpts[] = [];
+		const result = await runGlobalAutoWorkCycle(
+			fakeBridge(decoyHandle, {
+				createSessionCalls,
+				persistedSessions: [persistedSummary("sess_orphan_resume", worktreePath)],
+				liveSessions: new Map([["sess_orphan_resume", resumedHandle]]),
+			}),
+			{ getSubscriptionUsage: async () => ({ available: true, weeklyPct: 5 }), createPullRequest: stubCreatePullRequest },
+		);
+
+		expect(result.outcome).toBe("completed");
+		if (result.outcome !== "completed") throw new Error("expected completed");
+		expect(result.taskId).toBe(orphanTask.id);
+		expect(result.runId).toBe(orphanRunId);
+		expect(result.sessionId).toBe("sess_orphan_resume");
+		expect(result.worktreePath).toBe(worktreePath);
+		expect(createSessionCalls).toHaveLength(0); // resumed — no fresh session created
+		expect(listAutoWorkRuns({ taskId: orphanTask.id })).toHaveLength(1); // no duplicate row
+		expect(getTask(orphanTask.id)?.stateId).toBe("s_validate");
+		expect(getTask(otherTask.id)?.stateId).toBe("s_backlog"); // untouched this tick
+	});
+
+	test("a running row orphaned by a restart, with no persisted session, is retired and the same tick selects another task", async () => {
+		setAutoWorkConfig(repoCwd, { ...DEFAULT_AUTO_WORK_VALUES, enabled: true });
+		const orphanTask = createTask({ title: "Orphaned, unrecoverable", cwd: repoCwd, priority: "P5", autoWork: true });
+		moveTask(orphanTask.id, "s_active", 0);
+		const worktreePath = path.join(repoCwd, ".worktrees", "aw-orphan-stale");
+		runGit(["worktree", "add", "-b", "auto-work/orphan-stale-test", worktreePath], repoCwd);
+		expect(fs.existsSync(worktreePath)).toBe(true);
+		const orphanRunId = startAutoWorkRun({ taskId: orphanTask.id, taskPriority: "P5", sessionId: "sess_orphan_stale", worktreePath });
+
+		// Higher priority than the retired task once it's back in backlog —
+		// must win the re-selection, proving the cycle picks up fresh work
+		// rather than merely retrying the task it just retired.
+		const nextTask = createTask({ title: "Picked up same tick", cwd: repoCwd, priority: "P0", autoWork: true });
+
+		const freshHandle = new FakeSessionHandle("sess_fresh_after_retire", 10);
+		const result = await runGlobalAutoWorkCycle(
+			fakeBridge(freshHandle), // no persistedSessions/liveSessions registered for sess_orphan_stale -> stale
+			{ getSubscriptionUsage: async () => ({ available: true, weeklyPct: 5 }), createPullRequest: stubCreatePullRequest },
+		);
+
+		const orphanRun = listAutoWorkRuns({ taskId: orphanTask.id }).find((r) => r.id === orphanRunId);
+		expect(orphanRun?.status).toBe("failed");
+		expect(orphanRun?.failureReason).toBe("session_lost");
+		expect(getTask(orphanTask.id)?.stateId).toBe("s_backlog"); // first failure — auto-retry, not blocked
+		expect(fs.existsSync(worktreePath)).toBe(false); // orphaned worktree was removed by the retire path
+
+		expect(result.outcome).toBe("completed");
+		if (result.outcome !== "completed") throw new Error("expected completed");
+		expect(result.taskId).toBe(nextTask.id); // the cycle continued and picked the fresh candidate
+		expect(result.sessionId).toBe("sess_fresh_after_retire");
+	});
+
+	test("a genuinely live run (this process's own finalizer) keeps the global mutex skip, unlike a restart orphan", async () => {
+		setAutoWorkConfig(repoCwd, { ...DEFAULT_AUTO_WORK_VALUES, enabled: true });
+		const liveTask = createTask({ title: "Genuinely in flight", cwd: repoCwd, priority: "P5", autoWork: true });
+
+		// Never emits a terminal event on its own — stays "running" in this
+		// same process until explicitly triggered below via `emit()`.
+		const liveHandle = new FakeSessionHandle("sess_live_mutex", null);
+		const cycle = runGlobalAutoWorkCycle(fakeBridge(liveHandle), {
+			getSubscriptionUsage: async () => ({ available: true, weeklyPct: 5 }),
+			createPullRequest: stubCreatePullRequest,
+			selectTask: async (candidates) => candidates[0]?.task.id,
+			generateBranchSlug: async () => "live-mutex",
+		});
+		// Waits until the real execution turn subscribes — by then
+		// `finalizeAutoWorkRun` has already registered the run in `activeRunIds`.
+		await liveHandle.subscriptionStarted;
+
+		const otherTask = createTask({ title: "Must wait its turn", cwd: repoCwd, priority: "P0", autoWork: true });
+		const secondTick = await runGlobalAutoWorkCycle(fakeBridge(new FakeSessionHandle("sess_unused", 10)), {
+			getSubscriptionUsage: async () => ({ available: true, weeklyPct: 5 }),
+		});
+		expect(secondTick).toEqual({ outcome: "skipped", reason: "another auto-work run is already active" });
+		expect(getTask(otherTask.id)?.stateId).toBe("s_backlog");
+
+		liveHandle.emit({ type: "turn_end", message: { stopReason: "end_turn" } });
+		const result = await cycle;
+		expect(result.outcome).toBe("completed");
+		if (result.outcome !== "completed") throw new Error("expected completed");
+		expect(result.taskId).toBe(liveTask.id);
+	});
+});
+
 describe("runAutoWorkCycle session continuation (T-65)", () => {
 	test("resumes an interrupted run via its live session handle — no new worktree or session is created", async () => {
 		setAutoWorkConfig(repoCwd, { ...DEFAULT_AUTO_WORK_VALUES, enabled: true });

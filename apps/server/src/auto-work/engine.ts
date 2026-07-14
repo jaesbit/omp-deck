@@ -74,6 +74,17 @@ const PRIORITY_ORDER: Record<TaskPriority, number> = { P0: 0, P1: 1, P2: 2, P3: 
 const activeRunIds = new Set<string>();
 const STALE_RUN_GRACE_MS = 60_000;
 
+/**
+ * True when this process has a live `finalizeAutoWorkRun` awaiting `runId`'s
+ * terminal event — the authoritative "is a running row genuinely in flight
+ * here" signal (T-106). A truthy `bridge.getSession(run.sessionId)` is NOT
+ * sufficient: after a restart it can resurrect a persisted handle from disk
+ * even though nothing in this process is watching it finish.
+ */
+export function hasActiveAutoWorkRunFinalizer(runId: string): boolean {
+	return activeRunIds.has(runId);
+}
+
 // ─── Pure decision logic ────────────────────────────────────────────────────
 
 export interface AutoWorkPreflightInput {
@@ -1665,19 +1676,48 @@ export async function runGlobalAutoWorkCycle(
 	const usage = await usageLookup();
 	const subscriptionPctUsed = usage.available && typeof usage.weeklyPct === "number" ? usage.weeklyPct : null;
 	const sessionPctUsed = usage.available && typeof usage.sessionPct === "number" ? usage.sessionPct : null;
+	const resolveDeckBaseUrl = options.getDeckBaseUrl ?? (() => getServerDeckBaseUrl(loadConfig()).deckBaseUrl);
+	const createPullRequest = options.createPullRequest ?? createPullRequestViaGh;
+	const notify = options.notify ?? sendAutoWorkNotification;
 
-	const allTasks = listTasks();
 	const backlogState = findStateByName("backlog");
 	const doneState = findStateByName("done");
 	if (!backlogState || !doneState) {
 		return { outcome: "skipped", reason: "backlog/done task states missing — cannot run auto-work" };
 	}
 
-	// Global Auto Work is deliberately sequential. A running row anywhere is
-	// enough to defer this cycle, rather than starting work in another workspace.
+	// A `running` row surviving a restart (T-106): `activeRunIds` is this
+	// process's authoritative "a finalizer is actually watching this run"
+	// signal, so any running row missing from it is orphaned rather than
+	// genuinely in flight. Route it through the owning workspace's
+	// resume/retire path instead of wedging the global mutex forever.
+	const orphanRun = listAutoWorkRuns({ status: "running" }).find((r) => !activeRunIds.has(r.id));
+	if (orphanRun) {
+		const orphanTask = getTask(orphanRun.taskId);
+		if (orphanTask?.cwd) {
+			const resumed = await resumeOrRetireAutoWorkRun(
+				orphanTask.cwd,
+				bridge,
+				orphanRun,
+				getAutoWorkConfig(orphanTask.cwd),
+				{ resolveDeckBaseUrl, createPullRequest, notify, usageLookup },
+			);
+			if (resumed) return resumed;
+		} else {
+			const routing = failAutoWorkRun(orphanRun.id, orphanRun.taskId, "session_lost");
+			log.warn(
+				`global cycle: run ${orphanRun.id} has no resolvable task/cwd — marked failed${routing.exhausted ? " (MAX_RETRIES_EXCEEDED)" : ""}`,
+			);
+		}
+	}
+
+	// Global Auto Work is deliberately sequential: a genuinely live run
+	// anywhere still defers this cycle, rather than starting work elsewhere.
 	if (listAutoWorkRuns({ status: "running" }).length > 0) {
 		return { outcome: "skipped", reason: "another auto-work run is already active" };
 	}
+
+	const allTasks = listTasks();
 
 	// Collect distinct enabled cwds from all auto-work–flagged tasks.
 	const enabledCwds = new Set<string>();
