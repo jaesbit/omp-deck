@@ -81,6 +81,7 @@ function fullConfigBody(overrides: Partial<SetAutoWorkConfigRequest> = {}): SetA
 	return {
 		enabled: true,
 		modelByPriority: { P0: null, P1: null, P2: null, P3: null, P4: null, P5: null },
+		modelByDifficulty: { easy: null, medium: null, hard: null },
 		timeWindows: [{ start: 9, end: 17 }],
 		sessionPctLimit: 25,
 		weeklyPctLimit: 60,
@@ -100,6 +101,7 @@ function globalConfigBody(
 		scheduleIntervalMinutes: 15,
 		taskSelectionModel: { provider: "anthropic", id: "claude-good" },
 		squeezeEnabled: false,
+		modelByDifficulty: { easy: null, medium: null, hard: null },
 		...overrides,
 	};
 }

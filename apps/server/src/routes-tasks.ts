@@ -37,6 +37,7 @@ import {
 const log = logger("routes:tasks");
 
 const TASK_PRIORITIES = new Set(["P0", "P1", "P2", "P3", "P4", "P5"]);
+const TASK_DIFFICULTIES: Record<string, true> = { easy: true, medium: true, hard: true };
 
 function isStringArray(v: unknown): v is string[] {
 	return Array.isArray(v) && v.every((x) => typeof x === "string");
@@ -84,6 +85,9 @@ export function buildTasksRouter(): Hono {
 		if (body.autoWork === true && !body.cwd?.trim()) {
 			return c.json({ error: "auto-work tasks require a workspace: set cwd when enabling autoWork" }, 400);
 		}
+		if (body.difficulty !== undefined && !Object.hasOwn(TASK_DIFFICULTIES, body.difficulty as string)) {
+			return c.json({ error: `invalid difficulty: ${body.difficulty}` }, 400);
+		}
 		try {
 			const task = createTask(body);
 			notifyTasksChanged();
@@ -128,6 +132,9 @@ export function buildTasksRouter(): Hono {
 		const nextCwd = body.cwd !== undefined ? body.cwd : existing.cwd;
 		if (nextAutoWork && !nextCwd?.trim()) {
 			return c.json({ error: "auto-work tasks require a workspace: set cwd or disable autoWork first" }, 400);
+		}
+		if (body.difficulty !== undefined && !Object.hasOwn(TASK_DIFFICULTIES, body.difficulty as string)) {
+			return c.json({ error: `invalid difficulty: ${body.difficulty}` }, 400);
 		}
 		try {
 			const updated = updateTask(c.req.param("id"), body);

@@ -15,11 +15,12 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-import type { AutoWorkConfig, ModelInfo, SessionSummary, Task, TaskPriority } from "@omp-deck/protocol";
+import type { AutoWorkConfig, AutoWorkGlobalConfig, ModelInfo, SessionSummary, Task, TaskDifficulty, TaskPriority } from "@omp-deck/protocol";
 
 import type { AgentBridge, CreateSessionOpts, EventListener, SessionHandle } from "../bridge/types.ts";
 import { broadcastBus } from "../broadcast-bus.ts";
-import { DEFAULT_AUTO_WORK_VALUES, setAutoWorkConfig } from "../db/auto-work.ts";
+import { DEFAULT_AUTO_WORK_VALUES, DEFAULT_MODEL_BY_DIFFICULTY, setAutoWorkConfig } from "../db/auto-work.ts";
+import { DEFAULT_AUTO_WORK_GLOBAL } from "../db/auto-work-global.ts";
 import { completeAutoWorkRun, getAutoWorkCostEstimate, listAutoWorkRuns, startAutoWorkRun } from "../db/auto-work-runs.ts";
 import { closeDb, getDb, openDb } from "../db/index.ts";
 import { setInternalTaskModel } from "../db/server-settings.ts";
@@ -72,6 +73,7 @@ function baseTask(overrides: Partial<Task> = {}): Task {
 		stateId: "s_backlog",
 		orderInState: taskSeq * 1000,
 		priority: "P5",
+		difficulty: "medium" as TaskDifficulty,
 		createdAt: "2026-01-01T00:00:00.000Z",
 		updatedAt: "2026-01-01T00:00:00.000Z",
 		stateEnteredAt: "2026-01-01T00:00:00.000Z",
@@ -445,34 +447,92 @@ describe("selectNextAutoWorkTask", () => {
 });
 
 describe("resolveAutoWorkModel", () => {
-	test("prefers the per-priority override", () => {
+	const noGlobal: AutoWorkGlobalConfig = {
+		...DEFAULT_AUTO_WORK_GLOBAL,
+		updatedAt: "2026-01-01T00:00:00.000Z",
+	};
+
+	test("returns workspace difficulty mapping for exact match", () => {
 		const config = baseConfig({
-			modelByPriority: {
-				P0: { provider: "anthropic", id: "claude-p0" },
-				P1: null,
-				P2: null,
-				P3: null,
-				P4: null,
-				P5: null,
+			modelByDifficulty: {
+				...DEFAULT_MODEL_BY_DIFFICULTY,
+				hard: { provider: "anthropic", id: "claude-hard" },
 			},
 		});
-		expect(resolveAutoWorkModel("P0", config, { provider: "anthropic", id: "claude-ws" })).toEqual({
+		expect(resolveAutoWorkModel("hard", config, noGlobal, null)).toEqual({
 			provider: "anthropic",
-			id: "claude-p0",
+			id: "claude-hard",
 		});
 	});
 
-	test("falls back to the workspace default when no override is configured", () => {
-		const config = baseConfig();
-		expect(resolveAutoWorkModel("P1", config, { provider: "anthropic", id: "claude-ws" })).toEqual({
+	test("cascades to lower difficulty within workspace (hard→medium)", () => {
+		const config = baseConfig({
+			modelByDifficulty: {
+				...DEFAULT_MODEL_BY_DIFFICULTY,
+				medium: { provider: "anthropic", id: "claude-medium" },
+			},
+		});
+		expect(resolveAutoWorkModel("hard", config, noGlobal, null)).toEqual({
 			provider: "anthropic",
-			id: "claude-ws",
+			id: "claude-medium",
 		});
 	});
 
-	test("falls back to undefined (SDK global default) when neither is set", () => {
+	test("easy task does not cascade upward", () => {
+		const config = baseConfig({
+			modelByDifficulty: {
+				...DEFAULT_MODEL_BY_DIFFICULTY,
+				medium: { provider: "anthropic", id: "claude-medium" },
+				hard: { provider: "anthropic", id: "claude-hard" },
+			},
+		});
+		// easy has no mapping; hard/medium are above it — must not be used
+		expect(resolveAutoWorkModel("easy", config, noGlobal, { provider: "anthropic", id: "ws-default" })).toEqual({
+			provider: "anthropic",
+			id: "ws-default",
+		});
+	});
+
+	test("falls through to global mapping after exhausting workspace", () => {
 		const config = baseConfig();
-		expect(resolveAutoWorkModel("P2", config, null)).toBeUndefined();
+		const global: AutoWorkGlobalConfig = {
+			...noGlobal,
+			modelByDifficulty: {
+				...DEFAULT_MODEL_BY_DIFFICULTY,
+				medium: { provider: "openai", id: "gpt-global-medium" },
+			},
+		};
+		expect(resolveAutoWorkModel("hard", config, global, null)).toEqual({
+			provider: "openai",
+			id: "gpt-global-medium",
+		});
+	});
+
+	test("global cascade respects lower-difficulty-only direction", () => {
+		const config = baseConfig();
+		const global: AutoWorkGlobalConfig = {
+			...noGlobal,
+			modelByDifficulty: {
+				...DEFAULT_MODEL_BY_DIFFICULTY,
+				easy: { provider: "openai", id: "gpt-global-easy" },
+			},
+		};
+		// hard task cascades to medium then easy in global
+		expect(resolveAutoWorkModel("hard", config, global, null)).toEqual({
+			provider: "openai",
+			id: "gpt-global-easy",
+		});
+	});
+
+	test("falls back to workspace default model when all maps are null", () => {
+		expect(resolveAutoWorkModel("medium", baseConfig(), noGlobal, { provider: "anthropic", id: "ws-default" })).toEqual({
+			provider: "anthropic",
+			id: "ws-default",
+		});
+	});
+
+	test("returns undefined when all maps null and no workspace default", () => {
+		expect(resolveAutoWorkModel("easy", baseConfig(), noGlobal, null)).toBeUndefined();
 	});
 });
 

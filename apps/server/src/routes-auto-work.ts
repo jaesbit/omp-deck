@@ -57,6 +57,7 @@ import { getModelCatalogOverlay } from "./model-catalog-overlay.ts";
 const log = logger("routes:auto-work");
 
 const TASK_PRIORITIES: TaskPriority[] = ["P0", "P1", "P2", "P3", "P4", "P5"];
+const TASK_DIFFICULTIES: Record<string, true> = { easy: true, medium: true, hard: true };
 const RUN_STATUSES: AutoWorkRunStatus[] = ["running", "completed", "completed_pr_failed", "failed", "timed_out"];
 
 export function buildAutoWorkRouter(bridge: AgentBridge, config: Config, cycleOptions: RunAutoWorkCycleOptions = {}): Hono {
@@ -95,10 +96,17 @@ export function buildAutoWorkRouter(bridge: AgentBridge, config: Config, cycleOp
 			if (invalid) return c.json({ error: `${priority}: ${invalid}` }, 400);
 		}
 
+		for (const difficulty of Object.keys(TASK_DIFFICULTIES)) {
+			const ref = body.modelByDifficulty[difficulty as keyof typeof body.modelByDifficulty];
+			if (ref === null) continue;
+			const invalid = await validateModelRef(bridge, ref);
+			if (invalid) return c.json({ error: `modelByDifficulty.${difficulty}: ${invalid}` }, 400);
+		}
 		try {
 			const saved = setAutoWorkConfig(cwd, {
 				enabled: body.enabled,
 				modelByPriority: body.modelByPriority,
+				modelByDifficulty: body.modelByDifficulty,
 				timeWindows: body.timeWindows,
 				sessionPctLimit: body.sessionPctLimit,
 				weeklyPctLimit: body.weeklyPctLimit,
@@ -283,6 +291,13 @@ export function buildAutoWorkRouter(bridge: AgentBridge, config: Config, cycleOp
 			const invalid = await validateModelRef(bridge, body.taskSelectionModel);
 			if (invalid) return c.json({ error: `taskSelectionModel: ${invalid}` }, 400);
 		}
+		for (const difficulty of Object.keys(TASK_DIFFICULTIES)) {
+			const ref = body.modelByDifficulty[difficulty as keyof typeof body.modelByDifficulty];
+			if (ref === null) continue;
+			const invalid = await validateModelRef(bridge, ref);
+			if (invalid) return c.json({ error: `modelByDifficulty.${difficulty}: ${invalid}` }, 400);
+		}
+
 
 		try {
 			const saved: AutoWorkGlobalConfig = setAutoWorkGlobalConfig({
@@ -290,6 +305,7 @@ export function buildAutoWorkRouter(bridge: AgentBridge, config: Config, cycleOp
 				scheduleIntervalMinutes: body.scheduleIntervalMinutes,
 				taskSelectionModel: body.taskSelectionModel,
 				squeezeEnabled: body.squeezeEnabled,
+				modelByDifficulty: body.modelByDifficulty,
 			});
 			// Reconfigure the in-process scheduler immediately.
 			updateGlobalSchedule(saved, bridge, {
@@ -391,6 +407,19 @@ function validateWorkspaceShape(body: SetAutoWorkConfigRequest): string | undefi
 			return `timeoutMinutesByPriority.${priority} must be a positive number`;
 	}
 
+	if (typeof body.modelByDifficulty !== "object" || body.modelByDifficulty === null) {
+		return "modelByDifficulty must be an object";
+	}
+	for (const difficulty of Object.keys(TASK_DIFFICULTIES)) {
+		const ref = (body.modelByDifficulty as Record<string, unknown>)[difficulty];
+		if (ref === undefined) return `modelByDifficulty.${difficulty} is required (use null for no override)`;
+		if (ref === null) continue;
+		if (typeof ref !== "object" || typeof (ref as Record<string, unknown>).provider !== "string" || typeof (ref as Record<string, unknown>).id !== "string") {
+			return `modelByDifficulty.${difficulty} must be null or {provider, id}`;
+		}
+	}
+
+
 	return undefined;
 }
 
@@ -409,6 +438,17 @@ function validateGlobalShape(body: SetAutoWorkGlobalConfigRequest): string | und
 		) return "taskSelectionModel must be null or {provider, id}";
 	}
 	if (typeof body.squeezeEnabled !== "boolean") return "squeezeEnabled must be a boolean";
+	if (typeof body.modelByDifficulty !== "object" || body.modelByDifficulty === null) {
+		return "modelByDifficulty must be an object";
+	}
+	for (const difficulty of Object.keys(TASK_DIFFICULTIES)) {
+		const ref = (body.modelByDifficulty as Record<string, unknown>)[difficulty];
+		if (ref === undefined) return `modelByDifficulty.${difficulty} is required (use null for no override)`;
+		if (ref === null) continue;
+		if (typeof ref !== "object" || typeof (ref as Record<string, unknown>).provider !== "string" || typeof (ref as Record<string, unknown>).id !== "string") {
+			return `modelByDifficulty.${difficulty} must be null or {provider, id}`;
+		}
+	}
 	return undefined;
 }
 async function validateModelRef(bridge: AgentBridge, ref: ModelRef): Promise<string | undefined> {

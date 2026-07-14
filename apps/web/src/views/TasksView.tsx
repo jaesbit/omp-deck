@@ -15,7 +15,7 @@ import {
 } from "@dnd-kit/sortable";
 import { ArrowDownWideNarrow, Settings2 } from "lucide-react";
 
-import type { Task, TaskPriority, TaskState } from "@omp-deck/protocol";
+import type { ModelRef, Task, TaskDifficulty, TaskPriority, TaskState } from "@omp-deck/protocol";
 
 import { Layout } from "@/components/Layout";
 import { Column } from "@/components/tasks/Column";
@@ -33,6 +33,7 @@ import { tasksApi } from "@/lib/tasks-api";
 import { useStore } from "@/lib/store";
 import { cn, shortPath } from "@/lib/utils";
 import { usePersistedViewState } from "@/lib/use-persisted-view-state";
+import { api } from "@/lib/api";
 
 export function TasksView() {
 	const navigate = useNavigate();
@@ -51,7 +52,7 @@ export function TasksView() {
 
 	const [openTask, setOpenTask] = useState<Task | undefined>();
 	const [launchTarget, setLaunchTarget] = useState<
-		{ task: Task; draft: "full" | "short" } | undefined
+		{ task: Task; draft: "full" | "short"; suggestedModel?: ModelRef } | undefined
 	>();
 	const [showStateConfig, setShowStateConfig] = useState(false);
 	const { colors: projectColors, setColor: setProjectColor } = useProjectColors();
@@ -291,8 +292,30 @@ export function TasksView() {
 		setLaunchTarget({ task, draft: "full" });
 	}
 
-	function sendToAgent(task: Task): void {
-		setLaunchTarget({ task, draft: "short" });
+	async function sendToAgent(task: Task): Promise<void> {
+		let suggestedModel: ModelRef | undefined;
+		if (task.cwd) {
+			try {
+				const [wsConfig, globalConfig] = await Promise.all([
+					api.getAutoWorkConfig(task.cwd),
+					api.getAutoWorkGlobalConfig(),
+				]);
+				// Mirror engine cascade: workspace difficulty↓ → global difficulty↓ → undefined
+				const cascade: TaskDifficulty[] = ["hard", "medium", "easy"];
+				const startIdx = cascade.indexOf(task.difficulty);
+				for (let i = startIdx; i < cascade.length && !suggestedModel; i++) {
+					const m = wsConfig.modelByDifficulty[cascade[i]!];
+					if (m) suggestedModel = m;
+				}
+				for (let i = startIdx; i < cascade.length && !suggestedModel; i++) {
+					const m = globalConfig.modelByDifficulty[cascade[i]!];
+					if (m) suggestedModel = m;
+				}
+			} catch {
+				// Best-effort — ignore fetch errors, the user can still pick manually.
+			}
+		}
+		setLaunchTarget({ task, draft: "short", suggestedModel });
 	}
 
 	async function confirmLaunch(opts: SessionLaunchOpts): Promise<void> {
@@ -506,6 +529,7 @@ export function TasksView() {
 				title={launchTarget?.draft === "short" ? `Assign to agent — T-${launchTarget.task.displayId}` : "Open in chat"}
 				confirmLabel="Open chat"
 				initialCwd={launchTarget?.task.cwd || defaultCwd}
+				initialModel={launchTarget?.draft === "short" ? launchTarget?.suggestedModel : undefined}
 				showInitialPrompt={false}
 				onCancel={() => setLaunchTarget(undefined)}
 				onConfirm={confirmLaunch}

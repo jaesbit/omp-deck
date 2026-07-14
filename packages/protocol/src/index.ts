@@ -1390,6 +1390,9 @@ export type KnownTool = (typeof KNOWN_TOOLS)[number];
 /** P0 is highest priority, P5 lowest. Cards without an explicit priority are
  * treated as P5 (see migration 005). */
 export type TaskPriority = "P0" | "P1" | "P2" | "P3" | "P4" | "P5";
+/** Effort level of a task, used to select the auto-work execution agent (T-109). */
+export type TaskDifficulty = "easy" | "medium" | "hard";
+
 
 export interface TaskState {
 	id: string;
@@ -1408,6 +1411,11 @@ export interface Task {
 	stateId: string;
 	orderInState: number;
 	priority: TaskPriority;
+	/**
+	 * Effort level of this task (T-109). Always present — defaults to `"medium"`
+	 * on create when omitted. Drives auto-work agent selection via `modelByDifficulty`.
+	 */
+	difficulty: TaskDifficulty;
 	cwd?: string;
 	createdAt: string;
 	updatedAt: string;
@@ -1445,6 +1453,8 @@ export interface CreateTaskRequest {
 	dependsOn?: string[];
 	/** Defaults to `false` server-side when omitted (T-58). */
 	autoWork?: boolean;
+	/** Defaults to `"medium"` server-side when omitted (T-109). */
+	difficulty?: TaskDifficulty;
 }
 
 export interface UpdateTaskRequest {
@@ -1458,6 +1468,8 @@ export interface UpdateTaskRequest {
 	/** Replaces the full dependency set when present (T-57). */
 	dependsOn?: string[];
 	autoWork?: boolean;
+	/** When present, replaces the task's difficulty (T-109). */
+	difficulty?: TaskDifficulty;
 }
 
 export interface ListTasksResponse {
@@ -2035,6 +2047,12 @@ export interface OAuthPromptReplyRequest {
  * means "use the workspace default model" (see `WorkspacePreference`).
  */
 export type AutoWorkModelByPriority = Record<TaskPriority, ModelRef | null>;
+/**
+ * Per-difficulty model override for auto-work runs (T-109). `null` means
+ * "no override for this difficulty level — fall through the cascade".
+ */
+export type AutoWorkModelByDifficulty = Record<TaskDifficulty, ModelRef | null>;
+
 
 /** One auto-work execution window — a half-open hour range [start, end). */
 export interface AutoWorkTimeWindow {
@@ -2054,6 +2072,15 @@ export interface AutoWorkConfig {
 	workspaceCwd: string;
 	enabled: boolean;
 	modelByPriority: AutoWorkModelByPriority;
+	/**
+	 * Per-difficulty model override for auto-work agent selection (T-109).
+	 * Within each config tier (workspace, then global), tries the task's own
+	 * difficulty first, then cascades to lower difficulties only (hard→medium→easy).
+	 * Full cascade: workspace[difficulty]…→ global[difficulty]…→ workspace default model.
+	 * Replaces `modelByPriority` as the primary agent selector; `modelByPriority`
+	 * is retained for backward compatibility but no longer consulted during selection.
+	 */
+	modelByDifficulty: AutoWorkModelByDifficulty;
 	/**
 	 * Non-overlapping time windows (hour-of-day) during which auto-work may
 	 * run. Empty array = never run. Sorted by `start` for display.
@@ -2093,6 +2120,7 @@ export interface AutoWorkConfig {
 export interface SetAutoWorkConfigRequest {
 	enabled: boolean;
 	modelByPriority: AutoWorkModelByPriority;
+	modelByDifficulty: AutoWorkModelByDifficulty;
 	timeWindows: AutoWorkTimeWindow[];
 	sessionPctLimit: number;
 	weeklyPctLimit: number;
@@ -2128,6 +2156,12 @@ export interface AutoWorkGlobalConfig {
 	 * is the only cadence.
 	 */
 	squeezeEnabled: boolean;
+	/**
+	 * Global fallback difficulty→agent mapping (T-109). Consulted when the
+	 * per-workspace `modelByDifficulty` has no entry for the task's difficulty
+	 * level (after cascading hard→medium→easy within the workspace).
+	 */
+	modelByDifficulty: AutoWorkModelByDifficulty;
 	updatedAt: string;
 }
 
@@ -2137,6 +2171,7 @@ export interface SetAutoWorkGlobalConfigRequest {
 	scheduleIntervalMinutes: number;
 	taskSelectionModel: ModelRef | null;
 	squeezeEnabled: boolean;
+	modelByDifficulty: AutoWorkModelByDifficulty;
 }
 
 /** `GET /api/auto-work/schedule-status` response (global, not per-workspace). */

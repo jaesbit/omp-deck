@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Archive, Bot, CheckCircle2, Circle, Link2, MessageSquarePlus, RotateCcw, Trash2, Wand2, X, Zap } from "lucide-react";
-import type { Task, TaskPriority, TaskState } from "@omp-deck/protocol";
+import type { Task, TaskDifficulty, TaskPriority, TaskState } from "@omp-deck/protocol";
 
 import { MarkdownEdit } from "@/components/MarkdownEdit";
 import { Modal } from "@/components/ui/Modal";
@@ -9,6 +9,11 @@ import { api } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
 const PRIORITIES: TaskPriority[] = ["P0", "P1", "P2", "P3", "P4", "P5"];
+const DIFFICULTIES: { value: TaskDifficulty; label: string }[] = [
+	{ value: "easy", label: "easy" },
+	{ value: "medium", label: "medium" },
+	{ value: "hard", label: "hard" },
+];
 
 interface Props {
 	task: Task | null;
@@ -22,6 +27,7 @@ interface Props {
 		stateId?: string;
 		cwd?: string;
 		priority?: TaskPriority;
+		difficulty?: TaskDifficulty;
 		dependsOn?: string[];
 		autoWork?: boolean;
 	}) => void;
@@ -129,6 +135,10 @@ export function TaskModal({
 		if (!task || next === task.priority) return;
 		onSave({ priority: next });
 	}
+	function commitDifficulty(next: TaskDifficulty): void {
+		if (!task || next === task.difficulty) return;
+		onSave({ difficulty: next });
+	}
 	function commitCwd(): void {
 		if (!task) return;
 		const next = cwd.trim() || undefined;
@@ -189,6 +199,18 @@ export function TaskModal({
 						{PRIORITIES.map((p) => (
 							<option key={p} value={p}>
 								{p}
+							</option>
+						))}
+					</select>
+					<select
+						value={task.difficulty}
+						onChange={(e) => commitDifficulty(e.target.value as TaskDifficulty)}
+						title="Difficulty — affects auto-work agent selection"
+						className="field h-8 px-2 font-mono text-2xs uppercase tracking-meta"
+					>
+						{DIFFICULTIES.map((d) => (
+							<option key={d.value} value={d.value}>
+								{d.label}
 							</option>
 						))}
 					</select>

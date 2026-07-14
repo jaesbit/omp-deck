@@ -4,6 +4,7 @@ import { Play, RotateCcw, Save, Square, X } from "lucide-react";
 import type {
 	AutoWorkConfig,
 	AutoWorkGlobalConfig,
+	AutoWorkModelByDifficulty,
 	BridgeInfo,
 	BridgeName,
 	DeckBaseUrlResponse,
@@ -1739,6 +1740,8 @@ function GlobalScheduleCard({ onError }: { onError: (msg: string) => void }) {
 	const [intervalMinutes, setIntervalMinutes] = useState(5);
 	const [taskSelectionModel, setTaskSelectionModel] = useState<ModelRef | null>(null);
 	const [squeezeEnabled, setSqueezeEnabled] = useState(false);
+	const [modelByDifficulty, setModelByDifficulty] = useState<AutoWorkModelByDifficulty>({ easy: null, medium: null, hard: null });
+	const [pickerGlobalDifficulty, setPickerGlobalDifficulty] = useState<"easy" | "medium" | "hard" | undefined>();
 	const [saving, setSaving] = useState(false);
 
 	useEffect(() => {
@@ -1749,6 +1752,7 @@ function GlobalScheduleCard({ onError }: { onError: (msg: string) => void }) {
 				setIntervalMinutes(cfg.scheduleIntervalMinutes);
 				setTaskSelectionModel(cfg.taskSelectionModel);
 				setSqueezeEnabled(cfg.squeezeEnabled);
+				setModelByDifficulty(cfg.modelByDifficulty);
 				setModels(modelsResp.models.filter((m) => m.isAvailable));
 			})
 			.catch((e: unknown) => onError(String(e)));
@@ -1762,6 +1766,7 @@ function GlobalScheduleCard({ onError }: { onError: (msg: string) => void }) {
 			scheduleIntervalMinutes: intervalMinutes,
 			taskSelectionModel,
 			squeezeEnabled,
+			modelByDifficulty,
 		};
 		api.setAutoWorkGlobalConfig(body)
 			.then((updated) => {
@@ -1770,6 +1775,7 @@ function GlobalScheduleCard({ onError }: { onError: (msg: string) => void }) {
 				setIntervalMinutes(updated.scheduleIntervalMinutes);
 				setTaskSelectionModel(updated.taskSelectionModel);
 				setSqueezeEnabled(updated.squeezeEnabled);
+				setModelByDifficulty(updated.modelByDifficulty);
 			})
 			.catch((e: unknown) => onError(String(e)))
 			.finally(() => { setSaving(false); });
@@ -1779,6 +1785,7 @@ function GlobalScheduleCard({ onError }: { onError: (msg: string) => void }) {
 	const selectedKey = taskSelectionModel ? modelKey(taskSelectionModel) : "";
 
 	return (
+		<>
 		<div className="rounded-md border border-line bg-paper-2 p-4">
 			<h2 className="mb-3 text-sm font-semibold text-ink">Global schedule</h2>
 			<div className="space-y-3">
@@ -1864,6 +1871,39 @@ function GlobalScheduleCard({ onError }: { onError: (msg: string) => void }) {
 					</div>
 				</div>
 
+				<div>
+					<div className="meta mb-1 text-xs">Global fallback agent per difficulty</div>
+					<p className="mb-1 text-xs text-ink-4">
+						Consulted when a workspace has no mapping for a difficulty level
+						(hard→medium→easy cascade within this tier before workspace default).
+					</p>
+					<ul className="divide-y divide-line rounded-md border border-line">
+						{(["hard", "medium", "easy"] as const).map((d) => {
+							const ref = modelByDifficulty[d];
+							return (
+								<li key={d} className="flex items-center gap-2 px-2 py-1.5 text-sm">
+									<span className="w-14 font-mono text-2xs text-ink-3">{d}</span>
+									<span className="min-w-0 flex-1 truncate font-mono text-2xs">
+										{ref ? `${ref.provider}/${ref.id}` : "not set"}
+									</span>
+									<Button variant="ghost" size="sm" onClick={() => setPickerGlobalDifficulty(d)}>
+										Change
+									</Button>
+									{ref ? (
+										<Button
+											variant="ghost"
+											size="sm"
+											onClick={() => setModelByDifficulty({ ...modelByDifficulty, [d]: null })}
+										>
+											Clear
+										</Button>
+									) : null}
+								</li>
+							);
+						})}
+					</ul>
+				</div>
+
 				<div className="flex justify-end">
 					<Button variant="ghost" size="sm" disabled={saving || !config} onClick={save}>
 						{saving ? "Saving…" : "Save"}
@@ -1871,6 +1911,17 @@ function GlobalScheduleCard({ onError }: { onError: (msg: string) => void }) {
 				</div>
 			</div>
 		</div>
+		<PriorityModelPickerModal
+			open={pickerGlobalDifficulty !== undefined}
+			onClose={() => setPickerGlobalDifficulty(undefined)}
+			onPicked={(ref) => {
+				if (pickerGlobalDifficulty) {
+					setModelByDifficulty({ ...modelByDifficulty, [pickerGlobalDifficulty]: ref });
+				}
+				setPickerGlobalDifficulty(undefined);
+			}}
+		/>
+		</>
 	);
 }
 
@@ -1878,6 +1929,7 @@ function autoWorkToRequest(config: AutoWorkConfig): SetAutoWorkConfigRequest {
 	return {
 		enabled: config.enabled,
 		modelByPriority: config.modelByPriority,
+		modelByDifficulty: config.modelByDifficulty,
 		timeWindows: config.timeWindows,
 		sessionPctLimit: config.sessionPctLimit,
 		weeklyPctLimit: config.weeklyPctLimit,
@@ -2022,6 +2074,7 @@ function AutoWorkConfigModal({
 	const open = cwd !== undefined && config !== undefined;
 	const [draft, setDraft] = useState<AutoWorkConfig | undefined>(config);
 	const [pickerPriority, setPickerPriority] = useState<TaskPriority | undefined>();
+	const [pickerDifficulty, setPickerDifficulty] = useState<"easy" | "medium" | "hard" | undefined>();
 	const [saving, setSaving] = useState(false);
 	const [error, setError] = useState<string | undefined>();
 
@@ -2190,7 +2243,45 @@ function AutoWorkConfigModal({
 					</div>
 
 					<div>
-						<div className="meta mb-1">Model per priority</div>
+						<div className="meta mb-1">Agent model per difficulty</div>
+						<p className="mb-1 text-2xs text-ink-3">
+							Which model the auto-work engine uses, selected by the task's difficulty level.
+							Cascade: workspace hard→medium→easy → global hard→medium→easy → workspace default.
+						</p>
+						<ul className="divide-y divide-line rounded-md border border-line">
+							{(["hard", "medium", "easy"] as const).map((difficulty) => {
+								const ref = draft.modelByDifficulty[difficulty];
+								return (
+									<li key={difficulty} className="flex items-center gap-2 px-2 py-1.5 text-sm">
+										<span className="w-14 font-mono text-2xs text-ink-3">{difficulty}</span>
+										<span className="min-w-0 flex-1 truncate font-mono text-2xs">
+											{ref ? `${ref.provider}/${ref.id}` : "cascade fallback"}
+										</span>
+										<Button variant="ghost" size="sm" onClick={() => setPickerDifficulty(difficulty)}>
+											Change
+										</Button>
+										{ref ? (
+											<Button
+												variant="ghost"
+												size="sm"
+												onClick={() =>
+													setDraft({
+														...draft,
+														modelByDifficulty: { ...draft.modelByDifficulty, [difficulty]: null },
+													})
+												}
+											>
+												Clear
+											</Button>
+										) : null}
+									</li>
+								);
+							})}
+						</ul>
+					</div>
+
+					<div>
+						<div className="meta mb-1">Model per priority (cost estimation only)</div>
 						<ul className="divide-y divide-line rounded-md border border-line">
 							{TASK_PRIORITIES.map((priority) => {
 								const ref = draft.modelByPriority[priority];
@@ -2280,6 +2371,16 @@ function AutoWorkConfigModal({
 					</Button>
 				</div>
 			</Modal>
+			<PriorityModelPickerModal
+				open={pickerDifficulty !== undefined}
+				onClose={() => setPickerDifficulty(undefined)}
+				onPicked={(ref) => {
+					if (pickerDifficulty) {
+						setDraft({ ...draft, modelByDifficulty: { ...draft.modelByDifficulty, [pickerDifficulty]: ref } });
+					}
+					setPickerDifficulty(undefined);
+				}}
+			/>
 			<PriorityModelPickerModal
 				open={pickerPriority !== undefined}
 				onClose={() => setPickerPriority(undefined)}
