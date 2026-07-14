@@ -1360,8 +1360,8 @@ describe("appendAgentHistoryEntry", () => {
 // Stubs `gh pr create` for every `runAutoWorkCycle` test that reaches the
 // success path (T-66) — a test must NEVER let the real default run, since
 // that would shell out to `gh` and attempt to open an actual GitHub PR.
-async function stubCreatePullRequest(): Promise<{ url: string; number: number }> {
-	return { url: "https://github.com/jaesbit/omp-deck/pull/321", number: 321 };
+async function stubCreatePullRequest(): Promise<{ url: string; number: number; prStatus: "opened" | "already_open" }> {
+	return { url: "https://github.com/jaesbit/omp-deck/pull/321", number: 321, prStatus: "opened" };
 }
 
 let dbDir: string;
@@ -1546,6 +1546,14 @@ function fakeGhFailure(stderrText: string, exitCode = 1): FakeGhSubprocess {
 	};
 }
 
+function fakeGhSuccess(stdoutText: string): FakeGhSubprocess {
+	return {
+		stdout: new Blob([stdoutText]).stream(),
+		stderr: new Blob([""]).stream(),
+		exited: Promise.resolve(0),
+	};
+}
+
 
 function withFakeGhSpawn(handler: (cmd: string[]) => FakeGhSubprocess): () => void {
 	const realSpawn = Bun.spawn;
@@ -1636,12 +1644,31 @@ describe("createPullRequestViaGh", () => {
 				createPullRequestViaGh({ cwd: repoCwd, title: "Policy branch", body: "Uses the configured branch." }),
 			);
 
-			expect(result).toEqual({ url: "https://github.com/jaesbit/omp-deck/pull/808", number: 808 });
+			expect(result).toEqual({ url: "https://github.com/jaesbit/omp-deck/pull/808", number: 808, prStatus: "opened" });
+		} finally {
+			restore();
+		}
+	});
+
+	test("returns the existing PR with prStatus 'already_open' when gh pr create reports the PR already exists (case-insensitive)", async () => {
+		const restore = withFakeGhSpawn((cmd) => {
+			if (cmd[2] === "create") {
+				// Simulate the gh output when the agent already opened a PR.
+				// Use uppercase "A pull request" to exercise the case-insensitive check.
+				return fakeGhFailure("A pull request for branch 'auto-work/t5-ship-it' already exists: https://github.com/jaesbit/omp-deck/pull/77");
+			}
+			// gh pr view --json number,url — recovery lookup
+			return fakeGhSuccess('{"number":77,"url":"https://github.com/jaesbit/omp-deck/pull/77"}');
+		});
+		try {
+			const result = await createPullRequestViaGh({ cwd: repoCwd, title: "T", body: "B" });
+			expect(result).toEqual({ url: "https://github.com/jaesbit/omp-deck/pull/77", number: 77, prStatus: "already_open" });
 		} finally {
 			restore();
 		}
 	});
 });
+
 
 describe("runAutoWorkCycle", () => {
 	test("selects the task, creates a worktree, starts a session, and closes the run as completed", async () => {
@@ -1661,6 +1688,8 @@ describe("runAutoWorkCycle", () => {
 		expect(result.sessionId).toBe("sess_1");
 		expect(fs.existsSync(result.worktreePath)).toBe(true);
 		expect(result.worktreePath).toContain(`aw-T${task.displayId}`);
+		expect(result.prNumber).toBe(321);
+		expect(result.prStatus).toBe("opened");
 
 		const updated = getTask(task.id);
 		expect(updated?.stateId).toBe("s_validate");
@@ -1950,6 +1979,25 @@ describe("runAutoWorkCycle", () => {
 		const runs = listAutoWorkRuns({ taskId: task.id });
 		expect(runs[0]?.status).toBe("completed_pr_failed");
 		expect(runs[0]?.failureReason).toBe("gh pr create failed (exit 1): no git remotes found");
+		expect(result.prStatus).toBe("failed");
+		expect(result.prFailureReason).toBe("gh pr create failed (exit 1): no git remotes found");
+	});
+
+	test("completed result carries prStatus 'already_open' when createPullRequest reports an existing PR", async () => {
+		setAutoWorkConfig(repoCwd, { ...DEFAULT_AUTO_WORK_VALUES, enabled: true });
+		const task = createTask({ title: "Agent pre-opened PR", cwd: repoCwd, priority: "P5", autoWork: true });
+		const handle = new FakeSessionHandle("sess_pr_existing", 10);
+		const result = await runAutoWorkCycle(repoCwd, fakeBridge(handle), {
+			getSubscriptionUsage: async () => ({ available: true, weeklyPct: 5 }),
+			createPullRequest: async () => ({ url: "https://github.com/jaesbit/omp-deck/pull/42", number: 42, prStatus: "already_open" as const }),
+		});
+		expect(result.outcome).toBe("completed");
+		if (result.outcome !== "completed") throw new Error("expected completed");
+		expect(result.prNumber).toBe(42);
+		expect(result.prStatus).toBe("already_open");
+		expect(result.prFailureReason).toBeUndefined();
+		expect(getTask(task.id)?.stateId).toBe("s_validate");
+		expect(getTask(task.id)?.body).toContain("PR #42");
 	});
 
 	test("records the completed_pr_failed run's failureReason and the fallback-note body when gh pr create fails with a non-no-commits error (T-85)", async () => {

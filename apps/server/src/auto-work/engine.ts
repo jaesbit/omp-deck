@@ -901,6 +901,7 @@ async function settleAutoWorkRun(params: {
 	const shortSessionId = session.sessionId.slice(0, 8);
 
 	let prNumber: number | undefined;
+	let prStatus: "opened" | "already_open" | "failed" | undefined;
 	let prFailureReason: string | undefined;
 	try {
 		const pr = await createPullRequest({
@@ -909,10 +910,12 @@ async function settleAutoWorkRun(params: {
 			body: `Auto Work completed T-${task.displayId}: ${task.title}\n\nSession: ${sessionUrl}`,
 		});
 		prNumber = pr.number;
-		log.info(`run ${runId}: opened PR #${pr.number} (${pr.url}) for T-${task.displayId}`);
+		prStatus = pr.prStatus;
+		log.info(`run ${runId}: ${pr.prStatus === "already_open" ? "found existing" : "opened"} PR #${pr.number} (${pr.url}) for T-${task.displayId}`);
 	} catch (err) {
 		const errMsg = ((err instanceof Error ? err.message : String(err)).split("\n")[0] ?? "").trim().slice(0, 120);
 		prFailureReason = errMsg;
+		prStatus = "failed";
 		log.error(`run ${runId}: gh pr create failed for T-${task.displayId}`, err);
 
 		// When gh pr create fails with a "no commits" pattern, the agent
@@ -998,7 +1001,7 @@ async function settleAutoWorkRun(params: {
 	} else if (prFailureReason !== undefined) {
 		await notify({ kind: "task_completed_pr_failed", displayId: task.displayId, reason: prFailureReason });
 	}
-	return { outcome: "completed", taskId: task.id, runId, sessionId: session.sessionId, worktreePath };
+	return { outcome: "completed", taskId: task.id, runId, sessionId: session.sessionId, worktreePath, prNumber, prStatus: prStatus ?? "failed", ...(prFailureReason !== undefined ? { prFailureReason } : {}) };
 }
 
 /**
@@ -1510,6 +1513,8 @@ export interface CreatePullRequestParams {
 export interface CreatePullRequestResult {
 	url: string;
 	number: number;
+	/** Whether the engine opened a fresh PR or found one the agent had already created. */
+	prStatus: "opened" | "already_open";
 }
 
 /**
@@ -1598,12 +1603,70 @@ function describeGhFailure(stderr: string): string {
 }
 
 /**
+ * Pushes the current branch to `origin` and sets the upstream tracking ref.
+ * Idempotent — "Everything up-to-date" is success. Must run before
+ * `gh pr create` so the head ref exists on GitHub even when the agent
+ * didn't push during its own turn.
+ */
+async function gitPushSetUpstream(cwd: string): Promise<void> {
+	let proc: Subprocess<"ignore", "pipe", "pipe">;
+	try {
+		proc = Bun.spawn(
+			["git", "push", "--set-upstream", "origin", "HEAD"],
+			{ cwd, stdin: "ignore", stdout: "pipe", stderr: "pipe", windowsHide: true },
+		);
+	} catch (err) {
+		const cause = err instanceof Error ? err.message : String(err);
+		throw new Error(`git push --set-upstream origin HEAD failed to spawn: ${cause}`);
+	}
+	const [, stderr, exitCode] = await Promise.all([
+		new Response(proc.stdout).text(),
+		new Response(proc.stderr).text(),
+		proc.exited,
+	]);
+	if (exitCode !== 0) {
+		throw new Error(`git push --set-upstream origin HEAD failed (exit ${exitCode}): ${stderr.trim()}`);
+	}
+}
+
+/**
+ * Finds an open PR for the current branch via `gh pr view`. Used to recover
+ * gracefully when the agent already opened the PR during its turn and
+ * `gh pr create` would fail with "already exists".
+ * Returns `undefined` when `gh pr view` fails for any reason (no PR, no auth,
+ * network error) so the caller can fall through to the normal error path.
+ */
+async function findExistingPullRequest(cwd: string): Promise<{ url: string; number: number } | undefined> {
+	try {
+		const proc = Bun.spawn(
+			["gh", "pr", "view", "--json", "number,url"],
+			{ cwd, stdin: "ignore", stdout: "pipe", stderr: "pipe", windowsHide: true },
+		);
+		const [stdout, , exitCode] = await Promise.all([
+			new Response(proc.stdout).text(),
+			new Response(proc.stderr).text(),
+			proc.exited,
+		]);
+		if (exitCode !== 0) return undefined;
+		const parsed = JSON.parse(stdout) as { number: number; url: string };
+		if (typeof parsed.number !== "number" || typeof parsed.url !== "string") return undefined;
+		return { number: parsed.number, url: parsed.url };
+	} catch {
+		return undefined;
+	}
+}
+
+/**
  * `gh pr create --base <base-branch> --title <title> --body <body>`, run from
  * the worktree directory so `gh` infers the PR head from the checked-out task
  * branch. The same project-aware base resolver used by worktree creation and
  * commit detection also covers explicit PR retries through this function.
  */
 export async function createPullRequestViaGh(params: CreatePullRequestParams): Promise<CreatePullRequestResult> {
+	// Push first so the head ref exists on origin even when the agent didn't
+	// push during its turn. Idempotent — "Everything up-to-date" is success.
+	await gitPushSetUpstream(params.cwd);
+
 	const baseBranch = await resolveBaseBranch(params.cwd);
 	let proc: Subprocess<"ignore", "pipe", "pipe">;
 	try {
@@ -1621,6 +1684,16 @@ export async function createPullRequestViaGh(params: CreatePullRequestParams): P
 		proc.exited,
 	]);
 	if (exitCode !== 0) {
+		// Idempotent recovery: if the agent already opened a PR during its turn,
+		// find and return it instead of failing. `gh pr view` looks up the open
+		// PR for the current branch without creating a duplicate.
+		// Case-insensitive to match both "pull request already exists" and
+		// "A pull request ... already exists" forms from different gh versions.
+		const stderrLower = stderr.toLowerCase();
+		if (stderrLower.includes("already exists") && stderrLower.includes("pull request")) {
+			const existing = await findExistingPullRequest(params.cwd);
+			if (existing) return { ...existing, prStatus: "already_open" };
+		}
 		throw new Error(`${describeGhFailure(stderr)} (gh pr create exited ${exitCode}): ${stderr.trim()}`);
 	}
 	const url = stdout.trim().split("\n").pop() ?? "";
@@ -1628,7 +1701,7 @@ export async function createPullRequestViaGh(params: CreatePullRequestParams): P
 	if (!match) {
 		throw new Error(`gh pr create succeeded but its output didn't contain a PR URL: ${stdout.trim()}`);
 	}
-	return { url, number: Number(match[1]) };
+	return { url, number: Number(match[1]), prStatus: "opened" };
 }
 
 
