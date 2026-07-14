@@ -18,7 +18,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { FolderCog, RefreshCw } from "lucide-react";
-import type { AutoWorkConfig, TaskDifficulty, WorkspaceEntry } from "@omp-deck/protocol";
+import type { AutoWorkConfig, CodebaseMemoryMcpStatus, TaskDifficulty, WorkspaceEntry } from "@omp-deck/protocol";
 
 import { Layout } from "@/components/Layout";
 import { Sidebar } from "@/components/Sidebar";
@@ -36,6 +36,7 @@ export function ProjectConfigView() {
 	const navigate = useNavigate();
 	const [workspaces, setWorkspaces] = useState<WorkspaceEntry[]>([]);
 	const [autoWorkConfigs, setAutoWorkConfigs] = useState<Record<string, AutoWorkConfig>>({});
+	const [codebaseMemoryMcpStatuses, setCodebaseMemoryMcpStatuses] = useState<Record<string, CodebaseMemoryMcpStatus>>({});
 	const [loading, setLoading] = useState(true);
 	const [error, setError] = useState<string | undefined>();
 	const [selectedCwd, setSelectedCwd] = usePersistedViewState("project-config.workspace", "");
@@ -46,14 +47,17 @@ export function ProjectConfigView() {
 		try {
 			const resp = await api.listWorkspaces();
 			setWorkspaces(resp.workspaces);
-			// allSettled: a workspace on an unmounted drive or a stale cwd
-			// should not break the whole panel — its difficulty map just
-			// shows "unavailable" instead of taking the page down.
+			// A stale workspace must not prevent the remaining project settings from loading.
 			const results = await Promise.allSettled(
 				resp.workspaces.map(async (w) => [w.cwd, await api.getAutoWorkConfig(w.cwd)] as const),
 			);
 			const entries = results.flatMap((r) => (r.status === "fulfilled" ? [r.value] : []));
 			setAutoWorkConfigs(Object.fromEntries(entries));
+			const mcpResults = await Promise.allSettled(
+				resp.workspaces.map(async (w) => [w.cwd, await api.getCodebaseMemoryMcpStatus(w.cwd)] as const),
+			);
+			const mcpEntries = mcpResults.flatMap((r) => (r.status === "fulfilled" ? [r.value] : []));
+			setCodebaseMemoryMcpStatuses(Object.fromEntries(mcpEntries));
 			setError(undefined);
 		} catch (e) {
 			setError(String(e));
@@ -82,6 +86,7 @@ export function ProjectConfigView() {
 
 	const selected = useMemo(() => workspaces.find((w) => w.cwd === selectedCwd), [workspaces, selectedCwd]);
 	const selectedAutoWork = selectedCwd ? autoWorkConfigs[selectedCwd] : undefined;
+	const selectedCodebaseMemoryMcp = selectedCwd ? codebaseMemoryMcpStatuses[selectedCwd] : undefined;
 
 	async function saveDifficultyAgent(difficulty: TaskDifficulty, ref: { provider: string; id: string } | null): Promise<void> {
 		if (!selectedCwd || !selectedAutoWork) return;
@@ -102,6 +107,16 @@ export function ProjectConfigView() {
 		try {
 			await api.setWorkspacePreference(selectedCwd, null, null);
 			await refresh();
+		} catch (e) {
+			setError(e instanceof Error ? e.message : String(e));
+		}
+	}
+
+	async function setCodebaseMemoryMcpEnabled(enabled: boolean): Promise<void> {
+		if (!selectedCwd) return;
+		try {
+			const status = await api.setCodebaseMemoryMcpEnabled(selectedCwd, enabled);
+			setCodebaseMemoryMcpStatuses((prev) => ({ ...prev, [selectedCwd]: status }));
 		} catch (e) {
 			setError(e instanceof Error ? e.message : String(e));
 		}
@@ -236,6 +251,34 @@ export function ProjectConfigView() {
 									})}
 								</ul>
 							)}
+						</div>
+
+						{/* Codebase Memory MCP */}
+						<div className="rounded-md border border-line bg-paper-2 p-4">
+							<h2 className="mb-1 text-sm font-semibold text-ink">Codebase Memory MCP</h2>
+							<p className="mb-3 text-xs text-ink-3">
+								Indexes this project's code for structural and semantic code queries. It is enabled by
+								default for new projects and can be disabled here without affecting other MCP servers.
+							</p>
+							<label className="flex cursor-pointer items-center gap-3 text-sm text-ink-2">
+								<input
+									type="checkbox"
+									checked={selectedCodebaseMemoryMcp?.enabled ?? true}
+									disabled={!selectedCodebaseMemoryMcp}
+									onChange={(event) => void setCodebaseMemoryMcpEnabled(event.target.checked)}
+									className="h-4 w-4 accent-accent"
+								/>
+								<span>
+									{selectedCodebaseMemoryMcp
+										? selectedCodebaseMemoryMcp.enabled
+											? "Enabled for this project"
+											: "Disabled for this project"
+										: "Loading…"}
+								</span>
+							</label>
+							<p className="mt-2 text-2xs text-ink-4">
+								The override is stored in <code>.omp/mcp.json</code> and applies after the next session restart.
+							</p>
 						</div>
 
 						{/* Auto Work summary — everything else about unattended runs lives in Settings. */}

@@ -124,6 +124,22 @@ export interface ListWorkspacePreferencesResponse {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Codebase Memory MCP (per-cwd project override, T-111)
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface CodebaseMemoryMcpStatus {
+	cwd: string;
+	/** Effective state. Defaults to true when the project has no override. */
+	enabled: boolean;
+	/** Whether this project has an explicit `.omp/mcp.json` override. */
+	configured: boolean;
+}
+
+export interface SetCodebaseMemoryMcpRequest {
+	enabled: boolean;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Settings / managed environment
 // ─────────────────────────────────────────────────────────────────────────────
 
