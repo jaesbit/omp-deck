@@ -74,7 +74,7 @@ function fakeBridgeWithSession(sessionId: string, handle: { abort: () => Promise
 // invocation is never wanted here (this router doesn't own the PR mechanics;
 // that's covered by `auto-work/engine.test.ts`).
 async function stubCreatePullRequest() {
-	return { url: "https://github.com/jaesbit/omp-deck/pull/999", number: 999 };
+	return { url: "https://github.com/jaesbit/omp-deck/pull/999", number: 999, prStatus: "opened" as const };
 }
 
 function fullConfigBody(overrides: Partial<SetAutoWorkConfigRequest> = {}): SetAutoWorkConfigRequest {
@@ -628,7 +628,7 @@ describe("POST /auto-work/runs/:id/create-pr", () => {
 		});
 
 		const app = buildAutoWorkRouter(fakeBridge([]), fakeConfig(), {
-			createPullRequest: async () => ({ url: "https://github.com/jaesbit/omp-deck/pull/42", number: 42 }),
+			createPullRequest: async () => ({ url: "https://github.com/jaesbit/omp-deck/pull/42", number: 42, prStatus: "opened" as const }),
 		});
 		const res = await app.request(`/auto-work/runs/${runId}/create-pr`, { method: "POST" });
 		expect(res.status).toBe(200);
@@ -658,7 +658,7 @@ describe("POST /auto-work/runs/:id/create-pr", () => {
 		completeAutoWorkRun(runId, { status: "completed", inputTokens: 1, outputTokens: 1, pctConsumed: 0.5 });
 
 		const app = buildAutoWorkRouter(fakeBridge([]), fakeConfig(), {
-			createPullRequest: async () => ({ url: "https://github.com/jaesbit/omp-deck/pull/7", number: 7 }),
+			createPullRequest: async () => ({ url: "https://github.com/jaesbit/omp-deck/pull/7", number: 7, prStatus: "opened" as const }),
 		});
 		const res = await app.request(`/auto-work/runs/${runId}/create-pr`, { method: "POST" });
 		expect(res.status).toBe(200);

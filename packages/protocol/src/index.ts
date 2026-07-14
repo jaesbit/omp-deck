@@ -2317,7 +2317,7 @@ export interface AutoWorkCostEstimateResponse {
  */
 export type AutoWorkCycleResult =
 	| { outcome: "skipped"; reason: string }
-	| { outcome: "completed"; taskId: string; runId: string; sessionId: string; worktreePath: string }
+	| { outcome: "completed"; taskId: string; runId: string; sessionId: string; worktreePath: string; prNumber?: number; prStatus: "opened" | "already_open" | "failed"; prFailureReason?: string }
 	| { outcome: "failed"; taskId: string; runId: string; sessionId: string; worktreePath: string; failureReason: string }
 	| { outcome: "timed_out"; taskId: string; runId: string; sessionId: string; worktreePath: string };
 
