@@ -59,10 +59,11 @@ function Inner({ session }: { session: SessionUi }) {
 	const [modelOpen, setModelOpen] = useState(false);
 	const [launchOpen, setLaunchOpen] = useState(false);
 	const switcherRef = useRef<HTMLDivElement>(null);
+	const thinkingPickerRef = useRef<HTMLDivElement>(null);
+	const [thinkingPickerOpen, setThinkingPickerOpen] = useState(false);
 	const currentModelInfo = useCurrentModelInfo(session.sessionId, session.model?.provider, session.model?.id);
 	const thinkingLevels = currentModelInfo?.thinkingLevels ?? [];
 	const thinkingToggleBlocked = session.status !== "idle" || Boolean(session.planMode?.modelOverride);
-	const lastNonOffLevelRef = useRef<string | undefined>(undefined);
 	const [thinkingBusy, setThinkingBusy] = useState(false);
 	const [thinkingError, setThinkingError] = useState<string | undefined>(undefined);
 
@@ -79,20 +80,19 @@ function Inner({ session }: { session: SessionUi }) {
 		document.addEventListener("mousedown", onDocClick);
 		return () => document.removeEventListener("mousedown", onDocClick);
 	}, [switcherOpen]);
-
-	// Seed lastNonOffLevelRef from the snapshot on session change, then keep it
-	// updated so toggling ON restores the most-recent explicitly-set level.
 	useEffect(() => {
-		lastNonOffLevelRef.current =
-			session.thinkingLevel && session.thinkingLevel !== "off"
-				? session.thinkingLevel
-				: undefined;
-	}, [session.sessionId]);
-	useEffect(() => {
-		if (session.thinkingLevel && session.thinkingLevel !== "off") {
-			lastNonOffLevelRef.current = session.thinkingLevel;
+		if (!thinkingPickerOpen) return;
+		function onDocClick(e: MouseEvent): void {
+			if (!thinkingPickerRef.current) return;
+			if (!thinkingPickerRef.current.contains(e.target as Node)) setThinkingPickerOpen(false);
 		}
-	}, [session.thinkingLevel]);
+		document.addEventListener("mousedown", onDocClick);
+		return () => document.removeEventListener("mousedown", onDocClick);
+	}, [thinkingPickerOpen]);
+	useEffect(() => {
+		if (thinkingToggleBlocked) setThinkingPickerOpen(false);
+	}, [thinkingToggleBlocked]);
+
 
 	function commit(): void {
 		const trimmed = draft.trim();
@@ -119,20 +119,17 @@ function Inner({ session }: { session: SessionUi }) {
 		);
 	}
 
-	async function toggleThinking(): Promise<void> {
-		if (thinkingBusy || thinkingToggleBlocked || thinkingLevels.length === 0) return;
-		const next =
-			session.thinkingLevel === "off"
-				? (lastNonOffLevelRef.current ?? thinkingLevels[0] as string)
-				: "off";
+	async function selectThinkingLevel(level: string): Promise<void> {
+		if (thinkingBusy || thinkingToggleBlocked) return;
 		setThinkingBusy(true);
 		setThinkingError(undefined);
 		try {
-			await api.setSessionThinking(session.sessionId, next);
+			await api.setSessionThinking(session.sessionId, level);
 		} catch (err) {
 			setThinkingError(String((err as Error).message ?? err));
 		} finally {
 			setThinkingBusy(false);
+			setThinkingPickerOpen(false);
 		}
 	}
 
@@ -238,34 +235,65 @@ function Inner({ session }: { session: SessionUi }) {
 				</button>
 			) : null}
 			{thinkingLevels.length > 0 ? (
-				<button
-					type="button"
-					onClick={() => void toggleThinking()}
-					disabled={thinkingBusy || thinkingToggleBlocked}
-					title={
-						session.planMode?.modelOverride
-							? "Thinking cannot change while Plan Mode overrides the model"
-							: session.status !== "idle"
-								? "Thinking can change when the session is idle"
-								: session.thinkingLevel === "off"
-									? "Enable thinking"
-									: `Thinking: ${session.thinkingLevel ?? "default"} — click to disable`
-					}
-					className={cn(
-						"hidden h-6 items-center rounded-md border px-2 font-mono text-2xs uppercase tracking-meta sm:flex",
-						session.thinkingLevel === "off"
-							? "border-line bg-paper-2/60 text-ink-4 hover:border-ink/30 hover:text-ink"
-							: "border-thinking/40 bg-thinking/10 text-thinking hover:border-thinking/60",
-						(thinkingBusy || thinkingToggleBlocked) && "cursor-not-allowed opacity-50",
-					)}
-				>
-					{session.thinkingLevel === "off" ? "think" : (session.thinkingLevel ?? "think")}
-				</button>
-			) : null}
-			{thinkingError ? (
-				<span role="alert" title={thinkingError} className="hidden max-w-48 truncate font-mono text-2xs text-danger sm:inline">
-					{thinkingError}
-				</span>
+				<div className="relative hidden sm:block" ref={thinkingPickerRef}>
+					<button
+						type="button"
+						onClick={() => {
+							if (!thinkingBusy && !thinkingToggleBlocked) setThinkingPickerOpen((v) => !v);
+						}}
+						disabled={thinkingBusy || thinkingToggleBlocked}
+						title={
+							session.planMode?.modelOverride
+								? "Thinking cannot change while Plan Mode overrides the model"
+								: session.status !== "idle"
+									? "Thinking can change when the session is idle"
+									: session.thinkingLevel === "off"
+										? "Select thinking level"
+										: `Thinking: ${session.thinkingLevel ?? "default"} — click to change`
+						}
+						className={cn(
+							"flex h-6 items-center gap-1 rounded-md border px-2 font-mono text-2xs uppercase tracking-meta",
+							session.thinkingLevel === "off"
+								? "border-line bg-paper-2/60 text-ink-4 hover:border-ink/30 hover:text-ink"
+								: "border-thinking/40 bg-thinking/10 text-thinking hover:border-thinking/60",
+							(thinkingBusy || thinkingToggleBlocked) && "cursor-not-allowed opacity-50",
+						)}
+					>
+						{session.thinkingLevel === "off" ? "think: off" : (session.thinkingLevel ?? "think")}
+						<ChevronDown className={cn("h-3 w-3 transition-transform", thinkingPickerOpen && "rotate-180")} />
+					</button>
+					{thinkingPickerOpen ? (
+						<div className="absolute right-0 top-full z-50 mt-1 min-w-[90px] rounded-md border border-line bg-paper-2 shadow-[0_8px_24px_-8px_rgba(26,24,20,0.25)]">
+							{(["off", ...thinkingLevels] as string[]).map((level) => (
+								<button
+									key={level}
+									type="button"
+									onClick={() => void selectThinkingLevel(level)}
+									className={cn(
+										"flex w-full items-center justify-between gap-3 px-3 py-1.5 font-mono text-2xs uppercase tracking-meta hover:bg-paper-3/60",
+										session.thinkingLevel === level
+											? "text-thinking"
+											: "text-ink-3",
+									)}
+								>
+									{level}
+									{session.thinkingLevel === level ? (
+										<span>✓</span>
+									) : null}
+								</button>
+							))}
+						</div>
+					) : null}
+					{thinkingError ? (
+						<span
+							role="alert"
+							title={thinkingError}
+							className="absolute left-full top-0 ml-2 max-w-48 truncate whitespace-nowrap font-mono text-2xs text-danger"
+						>
+							{thinkingError}
+						</span>
+					) : null}
+				</div>
 			) : null}
 			{session.planMode?.modelOverride ? (
 				<span
