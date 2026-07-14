@@ -70,6 +70,13 @@ function fakeBridgeWithSession(sessionId: string, handle: { abort: () => Promise
 	} as unknown as AgentBridge;
 }
 
+// Stubs `gh pr create` for the route-level trigger/stop tests below — a real
+// invocation is never wanted here (this router doesn't own the PR mechanics;
+// that's covered by `auto-work/engine.test.ts`).
+async function stubCreatePullRequest() {
+	return { url: "https://github.com/jaesbit/omp-deck/pull/999", number: 999 };
+}
+
 function fullConfigBody(overrides: Partial<SetAutoWorkConfigRequest> = {}): SetAutoWorkConfigRequest {
 	return {
 		enabled: true,
@@ -743,34 +750,61 @@ describe("POST /auto-work/runs/:id/stop", () => {
 		expect(await res.json()).toEqual({ error: "run is not running (status: completed)" });
 	});
 
-	test("200: aborts a live session handle and leaves the row untouched (settlement owned elsewhere)", async () => {
-		const task = createTask({ title: "Live session stop", cwd: "/tmp/wt-stop-live" });
+	test("200: aborts a genuinely live in-process session — settlement is owned by the in-flight finalizer, not this route", async () => {
+		const task = createTask({ title: "Live session stop", cwd: "/tmp/wt-stop-live-finalizer" });
 		const runId = startAutoWorkRun({
 			taskId: task.id,
 			taskPriority: "P2",
-			sessionId: "sess-stop-live",
-			worktreePath: "/tmp/wt-stop-live",
+			sessionId: "sess-stop-live-finalizer",
+			worktreePath: "/tmp/wt-stop-live-finalizer",
 		});
 
 		let abortCalls = 0;
+		const subscribed = Promise.withResolvers<void>();
+		let terminalListener: EventListener | undefined;
 		const handle = {
-			abort: async () => {
+			subscribe(listener: EventListener) {
+				terminalListener = listener;
+				subscribed.resolve();
+				return () => {};
+			},
+			prompt: () => new Promise<void>(() => {}), // never resolves on its own
+			async abort() {
 				abortCalls += 1;
+				terminalListener?.({ type: "turn_end", message: { stopReason: "aborted" } } as never);
+			},
+			async isStreamingNow() {
+				return false;
+			},
+			async dispose() {},
+			async snapshot() {
+				return { messages: [] };
 			},
 		};
-		const app = buildAutoWorkRouter(fakeBridgeWithSession("sess-stop-live", handle), fakeConfig());
+		const app = buildAutoWorkRouter(fakeBridgeWithSession("sess-stop-live-finalizer", handle), fakeConfig(), {
+			createPullRequest: stubCreatePullRequest,
+			getSubscriptionUsage: async () => ({ available: true, weeklyPct: 5 }),
+		});
+
+		// Drives this exact runId through the real orphan-resume path (T-106)
+		// so it gets a genuine in-process finalizer (`activeRunIds`) — the same
+		// state a run that never actually died would be in.
+		const triggerPromise = app.request("/auto-work/trigger", { method: "POST" });
+		await subscribed.promise;
+
 		const res = await app.request(`/auto-work/runs/${runId}/stop`, { method: "POST" });
 		expect(res.status).toBe(200);
 		expect(await res.json()).toEqual({ ok: true });
 		expect(abortCalls).toBe(1);
 
-		// Nothing else settles the run in this isolated route test: production
-		// settlement happens inside the in-flight runAutoWorkCycle/settleAutoWorkRun,
-		// not this route, so the row is still "running" right after a successful stop.
-		expect(getAutoWorkRun(runId)?.status).toBe("running");
+		// The abort's own terminal event is what settles the run — owned by
+		// the in-flight finalizer, not by this route.
+		const triggerRes = await triggerPromise;
+		expect(triggerRes.status).toBe(200);
+		expect(getAutoWorkRun(runId)?.status).toBe("failed");
 	});
 
-	test("500 when handle.abort() rejects, and leaves the row untouched", async () => {
+	test("500 when handle.abort() rejects on a genuinely live session, and the underlying finalizer still settles the run on its own", async () => {
 		const task = createTask({ title: "Abort rejects", cwd: "/tmp/wt-stop-abort-fails" });
 		const runId = startAutoWorkRun({
 			taskId: task.id,
@@ -779,17 +813,46 @@ describe("POST /auto-work/runs/:id/stop", () => {
 			worktreePath: "/tmp/wt-stop-abort-fails",
 		});
 
+		const subscribed = Promise.withResolvers<void>();
+		let terminalListener: EventListener | undefined;
 		const handle = {
-			abort: async () => {
+			subscribe(listener: EventListener) {
+				terminalListener = listener;
+				subscribed.resolve();
+				return () => {};
+			},
+			prompt: () => new Promise<void>(() => {}),
+			async abort() {
+				// A transport-level abort failure doesn't necessarily mean the
+				// underlying turn never ended — emit the terminal event first,
+				// then still surface the error to the caller.
+				terminalListener?.({ type: "turn_end", message: { stopReason: "aborted" } } as never);
 				throw new Error("abort boom");
 			},
+			async isStreamingNow() {
+				return false;
+			},
+			async dispose() {},
+			async snapshot() {
+				return { messages: [] };
+			},
 		};
-		const app = buildAutoWorkRouter(fakeBridgeWithSession("sess-stop-abort-fails", handle), fakeConfig());
+		const app = buildAutoWorkRouter(fakeBridgeWithSession("sess-stop-abort-fails", handle), fakeConfig(), {
+			createPullRequest: stubCreatePullRequest,
+			getSubscriptionUsage: async () => ({ available: true, weeklyPct: 5 }),
+		});
+
+		const triggerPromise = app.request("/auto-work/trigger", { method: "POST" });
+		await subscribed.promise;
+
 		const res = await app.request(`/auto-work/runs/${runId}/stop`, { method: "POST" });
 		expect(res.status).toBe(500);
 		expect(await res.json()).toEqual({ error: "Error: abort boom" });
 
-		expect(getAutoWorkRun(runId)?.status).toBe("running");
+		// The route itself never wrote to the row — settlement is owned by the
+		// in-flight finalizer, which still runs to completion off the emitted event.
+		await triggerPromise;
+		expect(getAutoWorkRun(runId)?.status).toBe("failed");
 	});
 
 	test("200: no live session handle settles the run as failed and moves the task to backlog", async () => {
@@ -885,7 +948,8 @@ describe("POST /auto-work/trigger", () => {
 
 		subscribe(listener: EventListener): () => void {
 			this.listeners.add(listener);
-			if (this.emitsTerminal) queueMicrotask(() => listener({ type: "turn_end" } as never));
+			if (this.emitsTerminal)
+				queueMicrotask(() => listener({ type: "turn_end", message: { stopReason: "end_turn" } } as never));
 			return () => this.listeners.delete(listener);
 		}
 
@@ -894,6 +958,12 @@ describe("POST /auto-work/trigger", () => {
 		}
 
 		async prompt(): Promise<void> {}
+		async abort(): Promise<void> {}
+		async isStreamingNow(): Promise<boolean> {
+			return false;
+		}
+		async dispose(): Promise<void> {}
+		async setName(): Promise<void> {}
 	}
 
 	function triggerBridge(handle: FakeSessionHandle): AgentBridge {
@@ -919,13 +989,6 @@ describe("POST /auto-work/trigger", () => {
 		} as unknown as AgentBridge;
 	}
 
-	// Stubs `gh pr create` for the route-level trigger tests below — a real
-	// invocation is never wanted here (this router doesn't own the PR
-	// mechanics; that's covered by `auto-work/engine.test.ts`).
-	async function stubCreatePullRequest() {
-		return { url: "https://github.com/jaesbit/omp-deck/pull/999", number: 999 };
-	}
-
 	function runGit(args: string[], cwd: string): void {
 		const result = Bun.spawnSync({ cmd: ["git", ...args], cwd, stdout: "pipe", stderr: "pipe" });
 		if (result.exitCode !== 0) throw new Error(`git ${args.join(" ")} failed: ${result.stderr.toString()}`);
@@ -947,6 +1010,18 @@ describe("POST /auto-work/trigger", () => {
 		fs.writeFileSync(path.join(repoCwd, "README.md"), "hello\n");
 		runGit(["add", "."], repoCwd);
 		runGit(["commit", "-q", "-m", "init"], repoCwd);
+
+		// `resolveBaseBranch` needs a resolvable `origin/HEAD` — without a
+		// remote at all, `createAutoWorkWorktree` fails outright and no
+		// trigger test below could ever reach a `completed` outcome.
+		const originDir = path.join(homeDir, "origin.git");
+		fs.mkdirSync(originDir);
+		runGit(["init", "--bare", "-q"], originDir);
+		runGit(["remote", "add", "origin", originDir], repoCwd);
+		runGit(["push", "origin", "HEAD:main"], repoCwd);
+		runGit(["symbolic-ref", "HEAD", "refs/heads/main"], originDir);
+		runGit(["fetch", "-q", "origin"], repoCwd);
+		runGit(["remote", "set-head", "origin", "-a"], repoCwd);
 
 		resetSubscriptionUsageCacheForTests();
 	});
@@ -976,29 +1051,33 @@ describe("POST /auto-work/trigger", () => {
 		expect(listAutoWorkRuns({ taskId: task.id })[0]?.status).toBe("completed");
 	});
 
-	test("skips when every eligible workspace already has an active run", async () => {
+	test("an orphaned running row (no live finalizer) is recovered instead of blocking the trigger (T-106)", async () => {
 		setAutoWorkConfig(repoCwd, { ...DEFAULT_AUTO_WORK_VALUES, enabled: true });
-		const task = createTask({ title: "Already running", cwd: repoCwd, priority: "P5", autoWork: true });
-		const priorRunId = startAutoWorkRun({
+		const task = createTask({ title: "Orphaned by restart", cwd: repoCwd, priority: "P5", autoWork: true });
+		const orphanRunId = startAutoWorkRun({
 			taskId: task.id,
 			taskPriority: "P5",
 			sessionId: "in-flight",
 			worktreePath: path.join(repoCwd, ".worktrees", "aw-in-flight"),
 		});
 
-		const app = buildAutoWorkRouter(triggerBridge(new FakeSessionHandle("sess_2", false)), fakeConfig(), {
+		const app = buildAutoWorkRouter(triggerBridge(new FakeSessionHandle("sess_2", true, task.id)), fakeConfig(), {
 			createPullRequest: stubCreatePullRequest,
 			getSubscriptionUsage: async () => ({ available: true, weeklyPct: 5 }),
 		});
 		const res = await app.request("/auto-work/trigger", { method: "POST" });
 		expect(res.status).toBe(200);
-		expect((await res.json()) as { outcome: string; reason?: string }).toMatchObject({
-			outcome: "skipped",
-			reason: "another auto-work run is already active",
-		});
+		const body = (await res.json()) as { outcome: string; taskId?: string; runId?: string };
+		// The orphan (no live handle, nothing persisted in this fixture) is
+		// retired, and the same trigger tick re-selects and completes the
+		// task with a fresh session instead of staying wedged behind it forever.
+		expect(body.outcome).toBe("completed");
+		expect(body.taskId).toBe(task.id);
+		expect(body.runId).not.toBe(orphanRunId);
 
 		const runs = listAutoWorkRuns({ taskId: task.id });
-		expect(runs).toHaveLength(1);
-		expect(runs[0]).toMatchObject({ id: priorRunId, status: "running" });
+		expect(runs).toHaveLength(2);
+		expect(runs.find((r) => r.id === orphanRunId)).toMatchObject({ status: "failed", failureReason: "session_lost" });
+		expect(runs.find((r) => r.id === body.runId)).toMatchObject({ status: "completed" });
 	});
 });

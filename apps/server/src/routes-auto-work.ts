@@ -39,7 +39,14 @@ import { getAutoWorkGlobalConfig, setAutoWorkGlobalConfig } from "./db/auto-work
 import { completeAutoWorkRun, deleteAutoWorkRun, getAutoWorkCostEstimate, getAutoWorkRun, listAutoWorkRuns } from "./db/auto-work-runs.ts";
 import { getDeckBaseUrl as getServerDeckBaseUrl } from "./db/server-settings.ts";
 import { getTask, updateTask } from "./db/tasks.ts";
-import { appendAgentHistoryEntry, failAutoWorkRun, reconcileInactiveAutoWorkRuns, runGlobalAutoWorkCycle, createPullRequestViaGh } from "./auto-work/engine.ts";
+import {
+	appendAgentHistoryEntry,
+	failAutoWorkRun,
+	hasActiveAutoWorkRunFinalizer,
+	reconcileInactiveAutoWorkRuns,
+	runGlobalAutoWorkCycle,
+	createPullRequestViaGh,
+} from "./auto-work/engine.ts";
 import type { RunAutoWorkCycleOptions } from "./auto-work/engine.ts";
 import { buildSessionUrl } from "./deck-links.ts";
 import { broadcastBus } from "./broadcast-bus.ts";
@@ -146,14 +153,15 @@ export function buildAutoWorkRouter(bridge: AgentBridge, config: Config, cycleOp
 
 	// ─── Stop / delete ─────────────────────────────────────────────────────────
 
-	// Aborts a running run (T-95). When a live session handle exists, only
-	// aborts it — the in-flight `runAutoWorkCycle` call is already awaiting
-	// the resulting terminal event and owns closing out the DB row (see
-	// `settleAutoWorkRun`); writing the row here too would race it. When no
-	// live handle exists (e.g. a stale row left `running` by a server
-	// restart), there is nothing in-flight to own the settlement, so this
-	// fails the row directly via the same helper `reconcileInactiveAutoWorkRuns`
-	// uses for that case.
+	// Aborts a running run (T-95). Only actually aborts the live session when
+	// this process has a finalizer awaiting its terminal event (see
+	// `hasActiveAutoWorkRunFinalizer`) — `settleAutoWorkRun` is already
+	// awaiting the result and owns closing out the DB row, so writing to it
+	// here too would race it. A `bridge.getSession()` hit alone is NOT
+	// enough: a server restart can resurrect a persisted handle with nothing
+	// in this process watching it finish (T-106), so that case — like the
+	// no-handle case — closes the row directly the same way
+	// `reconcileInactiveAutoWorkRuns` does for stale rows.
 	app.post("/auto-work/runs/:id/stop", async (c) => {
 		const runId = c.req.param("id");
 		const run = getAutoWorkRun(runId);
@@ -161,7 +169,7 @@ export function buildAutoWorkRouter(bridge: AgentBridge, config: Config, cycleOp
 		if (run.status !== "running") return c.json({ error: `run is not running (status: ${run.status})` }, 400);
 
 		const handle = bridge.getSession(run.sessionId);
-		if (handle) {
+		if (handle && hasActiveAutoWorkRunFinalizer(runId)) {
 			try {
 				await handle.abort();
 			} catch (err) {
@@ -172,7 +180,7 @@ export function buildAutoWorkRouter(bridge: AgentBridge, config: Config, cycleOp
 		}
 
 		failAutoWorkRun(run.id, run.taskId, "stopped by user (no active session)");
-		log.info(`run ${runId}: stopped by user (no live session handle)`);
+		log.info(`run ${runId}: stopped by user (no live finalizer for this run)`);
 		return c.json({ ok: true });
 	});
 
