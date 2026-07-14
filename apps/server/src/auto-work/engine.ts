@@ -40,9 +40,11 @@ import type { Subprocess } from "bun";
 import type {
 	AutoWorkConfig,
 	AutoWorkCycleResult,
+	AutoWorkGlobalConfig,
 	AutoWorkRun,
 	ModelRef,
 	Task,
+	TaskDifficulty,
 	TaskPriority,
 } from "@omp-deck/protocol";
 
@@ -50,6 +52,7 @@ import type { AgentBridge, SessionHandle } from "../bridge/types.ts";
 import { loadConfig } from "../config.ts";
 import { buildSessionUrl } from "../deck-links.ts";
 import { getAutoWorkConfig } from "../db/auto-work.ts";
+import { getAutoWorkGlobalConfig } from "../db/auto-work-global.ts";
 import { resolveIntegrationPrompt, type IntegrationPromptName } from "../integration-prompts.ts";
 import { KB_TEMPLATES } from "../kb-templates.ts";
 import { KbService, resolveKbRoot, resolveProjectBranchPolicy } from "../kb-service.ts";
@@ -69,6 +72,10 @@ import { getModelCatalogOverlay } from "../model-catalog-overlay.ts";
 const log = logger("auto-work:engine");
 
 const PRIORITY_ORDER: Record<TaskPriority, number> = { P0: 0, P1: 1, P2: 2, P3: 3, P4: 4, P5: 5 };
+
+/** Ordered from highest to lowest effort — cascade walks downward only. */
+const DIFFICULTY_CASCADE: TaskDifficulty[] = ["hard", "medium", "easy"];
+
 
 /** Run ids with a live engine finalizer. They are never stale, even between terminal event delivery and DB completion. */
 const activeRunIds = new Set<string>();
@@ -230,17 +237,28 @@ export function resolveAutoWorkTimeoutMinutes(priority: TaskPriority, config: Au
 }
 
 /**
- * Model resolution order: per-priority override (T-60 config) → per-workspace
- * default (T-42's `WorkspacePreference`) → `undefined`, which leaves the
- * `model` field off `CreateSessionOpts` entirely so the bridge/SDK picks its
- * own global default (same fallback chain `POST /sessions` uses).
+ * Model resolution (T-109): tries the task's difficulty in each config tier
+ * (workspace, then global), cascading to lower difficulties only
+ * (hard→medium→easy) before falling back to the workspace default model.
  */
 export function resolveAutoWorkModel(
-	priority: TaskPriority,
+	difficulty: TaskDifficulty,
 	config: AutoWorkConfig,
+	globalConfig: AutoWorkGlobalConfig,
 	workspaceDefaultModel: ModelRef | null,
 ): ModelRef | undefined {
-	return config.modelByPriority[priority] ?? workspaceDefaultModel ?? undefined;
+	const startIdx = DIFFICULTY_CASCADE.indexOf(difficulty);
+	// Walk workspace mapping from task difficulty downward.
+	for (let i = startIdx; i < DIFFICULTY_CASCADE.length; i++) {
+		const m = config.modelByDifficulty[DIFFICULTY_CASCADE[i]!];
+		if (m !== null) return m;
+	}
+	// Walk global mapping from task difficulty downward.
+	for (let i = startIdx; i < DIFFICULTY_CASCADE.length; i++) {
+		const m = globalConfig.modelByDifficulty[DIFFICULTY_CASCADE[i]!];
+		if (m !== null) return m;
+	}
+	return workspaceDefaultModel ?? undefined;
 }
 
 export type RunningAutoWorkRunClassification = "resume" | "reconnect" | "stale";
@@ -549,11 +567,12 @@ export async function runAutoWorkCycle(
 	);
 
 	const workspacePreference = getWorkspacePreference(cwd);
-	const model = resolveAutoWorkModel(task.priority, config, workspacePreference?.model ?? null);
+	const globalConfig = getAutoWorkGlobalConfig();
+	const model = resolveAutoWorkModel(task.difficulty, config, globalConfig, workspacePreference?.model ?? null);
 	if (model) {
 		const invalid = await validateModelRef(bridge, model);
 		if (invalid) {
-			const reason = `configured model for ${task.priority} is invalid: ${invalid}`;
+			const reason = `configured model for difficulty=${task.difficulty} is invalid: ${invalid}`;
 			log.error(reason);
 			return { outcome: "skipped", reason };
 		}

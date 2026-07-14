@@ -454,8 +454,11 @@ export function buildRouter(
 			projectContext,
 			"",
 			`Current title: ${JSON.stringify(task.title)}`,
+			`Current priority: ${task.priority}`,
+			`Current difficulty: ${task.difficulty}`,
 			`Current body:\n${task.body ?? "(empty)"}`,
 			"",
+			"The rewritten task must preserve the priority and difficulty fields from above — do not change or omit them.",
 			"Return ONLY a JSON object with exactly these fields — no markdown fences, no prose, no explanation:",
 			'{"title": "<improved one-line title>", "body": "<improved body, markdown allowed>"}',
 		].filter(Boolean).join("\n");
