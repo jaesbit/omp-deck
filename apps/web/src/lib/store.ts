@@ -39,7 +39,7 @@ const MAX_NOTIFICATIONS = 50;
 
 import { api } from "./api";
 import { applyEvent, initSession, prependHistory, trimHistory } from "./reducer";
-import type { SessionUi } from "./types";
+import type { NoticeMsg, SessionUi } from "./types";
 import { WsClient, type WsStatus } from "./ws";
 
 /** Messages fetched per scroll-up history page. */
@@ -1050,7 +1050,36 @@ function handleFrame(
 				const next = [...s.notifications, item];
 				// Cap retention; oldest fall off.
 				if (next.length > MAX_NOTIFICATIONS) next.splice(0, next.length - MAX_NOTIFICATIONS);
-				return { notifications: next };
+
+				// Also route to the active session's message stream as an inline NoticeMsg
+				// so advisories appear chronologically alongside user/assistant turns.
+				const noticeId = `notification:${frame.id}`;
+				const activeSession = s.activeId ? s.sessionsById[s.activeId] : undefined;
+				if (!activeSession) return { notifications: next };
+				// Dedup: frame may be re-delivered on reconnect.
+				if (activeSession.messages.some((m) => m.id === noticeId)) return { notifications: next };
+				const noticeLevel: NoticeMsg["level"] =
+					frame.level === "critical" ? "error"
+					: frame.level === "warn" ? "warning"
+					: frame.level === "error" ? "error"
+					: "info";
+				const noticeMsg: NoticeMsg = {
+					id: noticeId,
+					role: "notice",
+					level: noticeLevel,
+					message: frame.title,
+					timestamp: new Date(frame.timestamp).getTime(),
+				};
+				if (frame.body !== undefined) noticeMsg.body = frame.body;
+				if (frame.source !== undefined) noticeMsg.source = frame.source;
+				const updatedSession: SessionUi = {
+					...activeSession,
+					messages: [...activeSession.messages, noticeMsg],
+				};
+				return {
+					notifications: next,
+					sessionsById: { ...s.sessionsById, [s.activeId!]: updatedSession },
+				};
 			});
 			return;
 

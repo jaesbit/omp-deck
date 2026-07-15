@@ -88,6 +88,8 @@ export interface NoticeMsg {
 	role: "notice";
 	level: "info" | "warning" | "error";
 	message: string;
+	/** Secondary detail, e.g. from a `notification` frame's `body` field. */
+	body?: string;
 	source?: string;
 	timestamp: number;
 }
