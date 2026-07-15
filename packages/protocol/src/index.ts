@@ -36,6 +36,7 @@ export interface SessionSummary {
 	/** Elapsed ms between createdAt and updatedAt — a proxy for session duration. */
 	durationMs?: number;
 	/**
+	/**
 	 * Path to the session this one was forked or handed off from, when the
 	 * SDK recorded one (T-31). Absent for root sessions.
 	 */
@@ -1037,6 +1038,27 @@ export interface SessionSnapshot {
 	 * queue immediately instead of waiting for the next `queue_state` event.
 	 */
 	queuedPrompts?: QueuedPromptWire[];
+}
+
+/**
+ * Forward pointer to the session an automatic context handoff continued
+ * into (T-32). Never reflects a manual fork — see
+ * `GET /sessions/handoff-successor` and `bridge/session-handoff.ts`.
+ */
+export interface SessionHandoffSuccessor {
+	sessionId: string;
+	sessionFile: string;
+	createdAt: string;
+}
+
+export interface GetSessionHandoffSuccessorQuery {
+	cwd: string;
+	sessionFile: string;
+}
+
+/** `successor: null` means no automatic-handoff continuation was found. */
+export interface GetSessionHandoffSuccessorResponse {
+	successor: SessionHandoffSuccessor | null;
 }
 
 /**
