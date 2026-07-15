@@ -248,6 +248,13 @@ interface StoreState {
 		/** Thinking level for session creation (T-73). */
 		thinking?: string;
 	}): Promise<string>;
+	/**
+	 * Fork a new session rooted at `entryId`'s history in `sessionId` (T-31).
+	 * Never mutates the source session — the server creates a brand-new
+	 * `.jsonl` file and resumes it into a live handle. Activates the new
+	 * session the same way `createSession`/`selectSession` do.
+	 */
+	branchSession(sessionId: string, entryId: string): Promise<string>;
 	selectSession(id: string): void;
 	/** Retain a session for read-only monitoring. The returned cleanup releases
 	 *  this watcher; the wire subscription stays alive while another owner needs it. */
@@ -455,6 +462,19 @@ export const useStore = create<StoreState>()(
 			set({ activeId: created.sessionId });
 			ensureSessionSubscription(created.sessionId, get);
 			// Background-refresh sidebar to reflect the new entry.
+			void get().refreshSessions();
+			void get().refreshWorkspaces();
+			return created.sessionId;
+		},
+
+		async branchSession(sessionId: string, entryId: string) {
+			const created = await api.branchSession(sessionId, entryId);
+			const previousActiveId = get().activeId;
+			if (previousActiveId && previousActiveId !== created.sessionId && !get().watchingSessionCounts.has(previousActiveId)) {
+				releaseSessionSubscription(previousActiveId, get);
+			}
+			set({ activeId: created.sessionId });
+			ensureSessionSubscription(created.sessionId, get);
 			void get().refreshSessions();
 			void get().refreshWorkspaces();
 			return created.sessionId;

@@ -971,6 +971,8 @@ export interface SessionSnapshot {
 	sessionId: string;
 	sessionFile?: string;
 	sessionName?: string;
+	/** Set when this session itself is a fork/handoff of another session (T-31). */
+	parentSessionPath?: string;
 	cwd: string;
 	model?: ModelRef;
 	thinkingLevel?: string;

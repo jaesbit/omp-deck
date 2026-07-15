@@ -42,6 +42,7 @@ export function initSession(snapshot: SessionSnapshot): SessionUi {
 		cwd: snapshot.cwd,
 		sessionFile: snapshot.sessionFile,
 		sessionName: snapshot.sessionName,
+		parentSessionPath: snapshot.parentSessionPath,
 		model: snapshot.model,
 		thinkingLevel: snapshot.thinkingLevel,
 		messages: [],

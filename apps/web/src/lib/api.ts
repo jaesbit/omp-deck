@@ -35,6 +35,8 @@ import type {
 	RewriteTaskRequest,
 	RewriteTaskResponse,
 	SessionHistoryResponse,
+	SessionTreeResponse,
+	BranchSessionRequest,
 	SetAutoWorkConfigRequest,
 	SetAutoWorkGlobalConfigRequest,
 	SetDeckBaseUrlRequest,
@@ -89,6 +91,16 @@ export const api = {
 		return request<SessionHistoryResponse>(
 			`/sessions/${encodeURIComponent(id)}/history?before=${before}&limit=${limit}`,
 		);
+	},
+	sessionTree(id: string): Promise<SessionTreeResponse> {
+		return request<SessionTreeResponse>(`/sessions/${encodeURIComponent(id)}/tree`);
+	},
+	branchSession(id: string, entryId: string): Promise<CreateSessionResponse> {
+		const body: BranchSessionRequest = { entryId };
+		return request<CreateSessionResponse>(`/sessions/${encodeURIComponent(id)}/branch`, {
+			method: "POST",
+			body: JSON.stringify(body),
+		});
 	},
 	createSession(body: CreateSessionRequest): Promise<CreateSessionResponse> {
 		return request<CreateSessionResponse>("/sessions", {

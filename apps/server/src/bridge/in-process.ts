@@ -1116,6 +1116,7 @@ export class InProcessSessionHandle implements SessionHandle {
 			sessionId: this.sessionId,
 			sessionFile: this.sessionFile,
 			sessionName: typeof s.sessionName === "string" ? s.sessionName : undefined,
+			parentSessionPath: this.sessionManager.getHeader()?.parentSession,
 			cwd: this.cwd,
 			model:
 				s.model && typeof s.model === "object"
