@@ -13,6 +13,8 @@ import type {
 	RewriteTaskRequest,
 	RewriteTaskResponse,
 	SessionHistoryResponse,
+	BranchSessionRequest,
+	SessionTreeResponse,
 	SetWorkspacePreferenceRequest,
 	WorkspaceEntry,
 } from "@omp-deck/protocol";
@@ -217,6 +219,61 @@ export function buildRouter(
 		const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(limitRaw, 1), 500) : 100;
 		const body: SessionHistoryResponse = await handle.getHistory(before, limit);
 		return c.json(body);
+	});
+
+	/**
+	 * Read-only tree/timeline of a session's entries (T-31) — works for a
+	 * live session and a persisted-only one alike.
+	 */
+	app.get("/sessions/:id/tree", async (c) => {
+		const id = c.req.param("id");
+		try {
+			const tree = await bridge.getSessionTree(id);
+			if (!tree) return c.json({ error: "session not found" }, 404);
+			const body: SessionTreeResponse = tree;
+			return c.json(body);
+		} catch (err) {
+			log.error(`getSessionTree failed`, err);
+			return c.json({ error: String(err) }, 500);
+		}
+	});
+
+	/**
+	 * Fork a brand-new session rooted at `entryId`'s history (T-31). Never
+	 * mutates the source session — creates a new `.jsonl` file, then resumes
+	 * it into a live handle so the response matches `POST /sessions`.
+	 */
+	app.post("/sessions/:id/branch", async (c) => {
+		const id = c.req.param("id");
+		let body: BranchSessionRequest;
+		try {
+			body = (await c.req.json()) as BranchSessionRequest;
+		} catch {
+			return c.json({ error: "invalid json body" }, 400);
+		}
+		if (!body?.entryId || typeof body.entryId !== "string") {
+			return c.json({ error: "entryId is required" }, 400);
+		}
+		let forked: { sessionFile: string; cwd: string } | undefined;
+		try {
+			forked = await bridge.forkSessionAt(id, body.entryId);
+		} catch (err) {
+			log.error(`forkSessionAt failed`, err);
+			return c.json({ error: String(err) }, 400);
+		}
+		if (!forked) return c.json({ error: "session not found" }, 404);
+		try {
+			const handle = await bridge.resumeSession({ sessionPath: forked.sessionFile });
+			const resp: CreateSessionResponse = {
+				sessionId: handle.sessionId,
+				sessionFile: handle.sessionFile,
+				cwd: handle.cwd,
+			};
+			return c.json(resp);
+		} catch (err) {
+			log.error(`resumeSession after fork failed`, err);
+			return c.json({ error: String(err) }, 500);
+		}
 	});
 
 	app.post("/sessions", async (c) => {

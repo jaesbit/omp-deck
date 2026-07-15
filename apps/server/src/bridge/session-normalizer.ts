@@ -62,6 +62,7 @@ export function summarizeSession(raw: RawSessionRecord): SessionSummary {
 		toIso(raw.modified) || toIso(raw.modifiedAt) || toIso(raw.updatedAt) || createdAt;
 	const messageCount = Number(raw.messageCount ?? raw.count ?? 0);
 	const durationMs = computeDurationMs(createdAt, updatedAt);
+	const parentPath = typeof raw.parentSessionPath === "string" && raw.parentSessionPath ? raw.parentSessionPath : undefined;
 	return {
 		id,
 		path: filePath,
@@ -71,5 +72,6 @@ export function summarizeSession(raw: RawSessionRecord): SessionSummary {
 		updatedAt,
 		messageCount,
 		durationMs,
+		...(parentPath ? { parentPath } : {}),
 	};
 }
