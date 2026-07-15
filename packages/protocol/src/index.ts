@@ -35,6 +35,11 @@ export interface SessionSummary {
 	messageCount: number;
 	/** Elapsed ms between createdAt and updatedAt — a proxy for session duration. */
 	durationMs?: number;
+	/**
+	 * Path to the session this one was forked or handed off from, when the
+	 * SDK recorded one (T-31). Absent for root sessions.
+	 */
+	parentPath?: string;
 }
 
 export type SessionMonitorStatus = "active" | "error" | "completed";
@@ -1046,6 +1051,70 @@ export interface UsageRollupWire {
 export interface SessionHistoryResponse {
 	messages: AgentMessageJson[];
 	startIndex: number;
+}
+
+/**
+ * Coarse classification of a session-tree entry for timeline rendering
+ * (T-31). `user_message` / `assistant_message` / `tool_message` cover the
+ * common `message` entries by role, `message` is the fallback for any other
+ * role (e.g. system). The rest mirror the SDK's non-message entry types.
+ */
+export type SessionTreeEntryKind =
+	| "user_message"
+	| "assistant_message"
+	| "tool_message"
+	| "message"
+	| "thinking_level_change"
+	| "model_change"
+	| "service_tier_change"
+	| "compaction"
+	| "branch_summary"
+	| "custom"
+	| "custom_message"
+	| "label"
+	| "title_change"
+	| "ttsr_injection"
+	| "mcp_tool_selection"
+	| "session_init"
+	| "mode_change";
+
+/** Compact, wire-safe summary of one session-tree entry. Never carries full
+ *  message content — `preview` is truncated server-side. */
+export interface SessionTreeEntryWire {
+	id: string;
+	parentId: string | null;
+	kind: SessionTreeEntryKind;
+	timestamp: string;
+	preview: string;
+	/** User-defined bookmark label on this entry, when set. */
+	label?: string;
+}
+
+export interface SessionTreeNodeWire {
+	entry: SessionTreeEntryWire;
+	children: SessionTreeNodeWire[];
+}
+
+/**
+ * Response of `GET /sessions/:id/tree` — the full append-only entry tree for
+ * one session, live or persisted. `roots` normally holds a single root,
+ * orphaned entries (broken parent chain) surface as extra roots.
+ */
+export interface SessionTreeResponse {
+	sessionId: string;
+	sessionFile: string;
+	cwd: string;
+	/** Set when this session itself is a fork/handoff of another session. */
+	parentSessionPath?: string;
+	/** Currently active leaf entry id — the tip of the live branch — or null for an empty session. */
+	leafId: string | null;
+	roots: SessionTreeNodeWire[];
+}
+
+/** Body of `POST /sessions/:id/branch`. */
+export interface BranchSessionRequest {
+	/** Entry id (from `SessionTreeResponse`) to branch from. */
+	entryId: string;
 }
 
 /**
