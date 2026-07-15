@@ -3,6 +3,7 @@ import { loadAllMCPConfigs } from "@oh-my-pi/pi-coding-agent/mcp/config";
 import { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
 import type { MCPServerConnection, MCPToolDefinition } from "@oh-my-pi/pi-coding-agent/mcp/types";
 import type {
+	CodebaseMemoryIndexResult,
 	CodebaseMemoryOverview,
 	CodebaseMemoryQueryResult,
 	CodebaseMemoryTool,
@@ -18,6 +19,7 @@ import {
 } from "./codebase-memory-mcp.ts";
 
 const MCP_REQUEST_TIMEOUT_MS = 15_000;
+const MCP_INDEX_TIMEOUT_MS = 5 * 60_000;
 
 export class CodebaseMemoryMcpDisabledError extends Error {
 	constructor() {
@@ -50,6 +52,17 @@ export class CodebaseMemoryExplorer {
 			}
 			const result = await callTool(connection, request.tool, request.arguments, {
 				signal: AbortSignal.timeout(MCP_REQUEST_TIMEOUT_MS),
+			});
+			return { content: toCodebaseMemoryContent(result.content), isError: result.isError === true };
+		});
+	}
+
+	async index(cwd: string): Promise<CodebaseMemoryIndexResult> {
+		return this.#withConnection(cwd, async (connection, tools) => {
+			const indexTool = tools.find((tool) => tool.name === "index_repository");
+			if (!indexTool) throw new Error("Codebase Memory does not expose tool: index_repository");
+			const result = await callTool(connection, indexTool.name, { repo_path: cwd }, {
+				signal: AbortSignal.timeout(MCP_INDEX_TIMEOUT_MS),
 			});
 			return { content: toCodebaseMemoryContent(result.content), isError: result.isError === true };
 		});

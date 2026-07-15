@@ -10,6 +10,7 @@ import type {
 	CreateSessionRequest,
 	CreateSessionResponse,
 	CodebaseMemoryMcpStatus,
+	CodebaseMemoryIndexResult,
 	CodebaseMemoryOverview,
 	CodebaseMemoryQueryResult,
 	DeckBaseUrlResponse,
@@ -192,6 +193,11 @@ export const api = {
 		return request<CodebaseMemoryQueryResult>(`/workspace-mcp/codebase-memory/query?cwd=${encodeURIComponent(cwd)}`, {
 			method: "POST",
 			body: JSON.stringify(body),
+		});
+	},
+	indexCodebaseMemory(cwd: string): Promise<CodebaseMemoryIndexResult> {
+		return request<CodebaseMemoryIndexResult>(`/workspace-mcp/codebase-memory/index?cwd=${encodeURIComponent(cwd)}`, {
+			method: "POST",
 		});
 	},
 	getDeckBaseUrl(): Promise<DeckBaseUrlResponse> {
