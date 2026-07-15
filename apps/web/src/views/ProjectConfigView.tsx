@@ -42,6 +42,8 @@ export function ProjectConfigView() {
 	const [selectedCwd, setSelectedCwd] = usePersistedViewState("project-config.workspace", "");
 	const [editingDefaultAgent, setEditingDefaultAgent] = useState(false);
 	const [pickerDifficulty, setPickerDifficulty] = useState<TaskDifficulty | undefined>();
+	const [indexing, setIndexing] = useState(false);
+	const [indexFeedback, setIndexFeedback] = useState<{ error: boolean; message: string }>();
 
 	const refresh = useCallback(async (): Promise<void> => {
 		try {
@@ -119,6 +121,32 @@ export function ProjectConfigView() {
 			setCodebaseMemoryMcpStatuses((prev) => ({ ...prev, [selectedCwd]: status }));
 		} catch (e) {
 			setError(e instanceof Error ? e.message : String(e));
+		}
+	}
+
+	async function indexCodebaseMemory(): Promise<void> {
+		if (!selectedCwd || !selectedCodebaseMemoryMcp?.enabled) return;
+		setIndexing(true);
+		setIndexFeedback(undefined);
+		try {
+			const result = await api.indexCodebaseMemory(selectedCwd);
+			const detail = result.content
+				.filter((block) => block.type === "text")
+				.map((block) => block.text)
+				.filter((text): text is string => Boolean(text))
+				.join("\n")
+				.trim();
+			setIndexFeedback({
+				error: result.isError,
+				message: result.isError ? detail || "Codebase Memory rejected the indexing request." : "Codebase memory index updated.",
+			});
+		} catch (e) {
+			setIndexFeedback({
+				error: true,
+				message: e instanceof Error ? e.message : String(e),
+			});
+		} finally {
+			setIndexing(false);
 		}
 	}
 
@@ -257,8 +285,8 @@ export function ProjectConfigView() {
 						<div className="rounded-md border border-line bg-paper-2 p-4">
 							<h2 className="mb-1 text-sm font-semibold text-ink">Codebase Memory MCP</h2>
 							<p className="mb-3 text-xs text-ink-3">
-								Indexes this project's code for structural and semantic code queries. It is enabled by
-								default for new projects and can be disabled here without affecting other MCP servers.
+								Indexes this project's code for structural and semantic code queries. Indexing runs only when
+								you select Index / update, then use it again after relevant code changes.
 							</p>
 							<label className="flex cursor-pointer items-center gap-3 text-sm text-ink-2">
 								<input
@@ -277,14 +305,24 @@ export function ProjectConfigView() {
 								</span>
 							</label>
 							{selectedCodebaseMemoryMcp?.enabled ? (
-								<Button
-									className="mt-3"
-									variant="ghost"
-									size="sm"
-									onClick={() => navigate(`/codebase-memory?cwd=${encodeURIComponent(selectedCwd)}`)}
-								>
-									Explore indexed memory →
-								</Button>
+								<div className="mt-3 flex flex-wrap gap-2">
+									<Button variant="outline" size="sm" disabled={indexing} onClick={() => void indexCodebaseMemory()}>
+										<RefreshCw className={cn("mr-1 h-3.5 w-3.5", indexing && "animate-spin")} />
+										{indexing ? "Indexing…" : "Index / update"}
+									</Button>
+									<Button
+										variant="ghost"
+										size="sm"
+										onClick={() => navigate(`/codebase-memory?cwd=${encodeURIComponent(selectedCwd)}`)}
+									>
+										Explore indexed memory →
+									</Button>
+								</div>
+							) : null}
+							{indexFeedback ? (
+								<p className={cn("mt-2 text-2xs", indexFeedback.error ? "text-danger" : "text-success")}>
+									{indexFeedback.message}
+								</p>
 							) : null}
 							<p className="mt-2 text-2xs text-ink-4">
 								The override is stored in <code>.omp/mcp.json</code> and applies after the next session restart.

@@ -132,6 +132,9 @@ describe("codebase-memory explorer routes (T-118)", () => {
 				async query() {
 					throw new Error("not used");
 				},
+				async index() {
+					throw new Error("not used");
+				},
 			},
 		);
 
@@ -152,6 +155,9 @@ describe("codebase-memory explorer routes (T-118)", () => {
 				async query(queryCwd, request) {
 					queries.push({ cwd: queryCwd, ...request });
 					return { content: [{ type: "text", text: "match" }], isError: false };
+				},
+				async index() {
+					throw new Error("not used");
 				},
 			},
 		);
@@ -174,6 +180,36 @@ describe("codebase-memory explorer routes (T-118)", () => {
 		expect(queries).toHaveLength(1);
 	});
 
+	test("indexes only the explicitly selected allowed workspace", async () => {
+		const indexed: string[] = [];
+		const app = buildCodebaseMemoryRouter(
+			(candidate) => candidate === cwd,
+			{
+				async getOverview() {
+					throw new Error("not used");
+				},
+				async query() {
+					throw new Error("not used");
+				},
+				async index(candidate) {
+					indexed.push(candidate);
+					return { content: [{ type: "text", text: "indexed alpha" }], isError: false };
+				},
+			},
+		);
+
+		const response = await app.request(`/workspace-mcp/codebase-memory/index?cwd=${encodeURIComponent(cwd)}`, {
+			method: "POST",
+		});
+		expect(response.status).toBe(200);
+		expect(await response.json()).toEqual({ content: [{ type: "text", text: "indexed alpha" }], isError: false });
+		expect(indexed).toEqual([cwd]);
+
+		const disallowed = await app.request("/workspace-mcp/codebase-memory/index?cwd=/outside", { method: "POST" });
+		expect(disallowed.status).toBe(400);
+		expect(indexed).toEqual([cwd]);
+	});
+
 	test("reports a disabled integration without invoking MCP tools", async () => {
 		const app = buildCodebaseMemoryRouter(
 			(candidate) => candidate === cwd,
@@ -182,6 +218,9 @@ describe("codebase-memory explorer routes (T-118)", () => {
 					throw new CodebaseMemoryMcpDisabledError();
 				},
 				async query() {
+					throw new CodebaseMemoryMcpDisabledError();
+				},
+				async index() {
 					throw new CodebaseMemoryMcpDisabledError();
 				},
 			},
@@ -203,6 +242,11 @@ describe("codebase-memory explorer routes (T-118)", () => {
 			body: JSON.stringify({ tool: "search_graph", arguments: {} }),
 		});
 		expect(queryResponse.status).toBe(409);
+
+		const indexResponse = await app.request(`/workspace-mcp/codebase-memory/index?cwd=${encodeURIComponent(cwd)}`, {
+			method: "POST",
+		});
+		expect(indexResponse.status).toBe(409);
 	});
 
 	test("reports an unavailable MCP without falling back to an unbounded response", async () => {
@@ -213,6 +257,9 @@ describe("codebase-memory explorer routes (T-118)", () => {
 					throw new CodebaseMemoryMcpUnavailableError("MCP executable did not start");
 				},
 				async query() {
+					throw new CodebaseMemoryMcpUnavailableError("MCP executable did not start");
+				},
+				async index() {
 					throw new CodebaseMemoryMcpUnavailableError("MCP executable did not start");
 				},
 			},
@@ -227,5 +274,10 @@ describe("codebase-memory explorer routes (T-118)", () => {
 			tools: [],
 			catalog: [],
 		});
+
+		const indexResponse = await app.request(`/workspace-mcp/codebase-memory/index?cwd=${encodeURIComponent(cwd)}`, {
+			method: "POST",
+		});
+		expect(indexResponse.status).toBe(503);
 	});
 });

@@ -175,6 +175,11 @@ export interface CodebaseMemoryQueryResult {
 	isError: boolean;
 }
 
+export interface CodebaseMemoryIndexResult {
+	content: CodebaseMemoryContentBlock[];
+	isError: boolean;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Settings / managed environment
 // ─────────────────────────────────────────────────────────────────────────────

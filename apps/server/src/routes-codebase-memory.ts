@@ -3,6 +3,7 @@ import * as path from "node:path";
 
 import { Hono } from "hono";
 import type {
+	CodebaseMemoryIndexResult,
 	CodebaseMemoryOverview,
 	CodebaseMemoryQueryResult,
 	CodebaseMemoryMcpStatus,
@@ -26,6 +27,7 @@ import {
 export interface CodebaseMemoryExplorerApi {
 	getOverview(cwd: string): Promise<CodebaseMemoryOverview>;
 	query(cwd: string, request: QueryCodebaseMemoryRequest): Promise<CodebaseMemoryQueryResult>;
+	index(cwd: string): Promise<CodebaseMemoryIndexResult>;
 }
 
 export function buildCodebaseMemoryRouter(
@@ -67,6 +69,25 @@ export function buildCodebaseMemoryRouter(
 				return c.json(overview);
 			}
 			return c.json({ error: `could not read Codebase Memory: ${String(error)}` }, 502);
+		}
+	});
+
+	app.post("/workspace-mcp/codebase-memory/index", async (c) => {
+		const cwd = c.req.query("cwd")?.trim();
+		if (!cwd) return c.json({ error: "cwd query param is required" }, 400);
+		if (!isCwdAllowed(cwd)) return c.json({ error: "cwd is not an allowed workspace" }, 400);
+
+		try {
+			const result = await explorer.index(cwd);
+			return c.json(result);
+		} catch (error) {
+			if (error instanceof CodebaseMemoryMcpDisabledError) {
+				return c.json({ error: error.message }, 409);
+			}
+			if (error instanceof CodebaseMemoryMcpUnavailableError) {
+				return c.json({ error: error.message }, 503);
+			}
+			return c.json({ error: `could not index Codebase Memory: ${String(error)}` }, 502);
 		}
 	});
 
