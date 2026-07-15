@@ -12,6 +12,8 @@ import type {
 	AssistantContentBlock,
 	AssistantMsg,
 	ChatMessage,
+	HandoffMsg,
+	HandoffOriginMsg,
 	ImageBlock,
 	NoticeMsg,
 	QueuedPrompt,
@@ -330,6 +332,34 @@ export function applyEvent(state: SessionUi, event: AgentSessionEventJson): Sess
 			}
 			return next;
 		}
+		// T-32: deck-synthetic marker for a completed auto-handoff — see
+		// `bridge/in-process.ts`'s `session_handoff` emission doc comment.
+		// Appended alongside (not instead of) the `auto_compaction_end` case
+		// above, which already cleared `compaction`/`status`.
+		case "session_handoff": {
+			const handoffMsg: HandoffMsg = {
+				id: nextId("handoff"),
+				role: "handoff",
+				reason: String((event as any).reason ?? ""),
+				previousSessionId: String((event as any).previousSessionId ?? ""),
+				previousSessionFile:
+					typeof (event as any).previousSessionFile === "string" ? (event as any).previousSessionFile : undefined,
+				newSessionId: String((event as any).newSessionId ?? ""),
+				newSessionFile: typeof (event as any).newSessionFile === "string" ? (event as any).newSessionFile : undefined,
+				timestamp: typeof (event as any).timestamp === "number" ? (event as any).timestamp : Date.now(),
+			};
+			return {
+				...state,
+				messages: [...state.messages, handoffMsg],
+				// This tab's own `sessionId` deliberately stays put (see server
+				// docs) — the live handle keeps streaming into this SAME
+				// subscription — but `sessionFile`/`parentSessionPath` must follow
+				// the swap so the header's origin breadcrumb and any path-based
+				// API call reflect the session this tab now actually represents.
+				...(handoffMsg.newSessionFile ? { sessionFile: handoffMsg.newSessionFile } : {}),
+				...(handoffMsg.previousSessionFile ? { parentSessionPath: handoffMsg.previousSessionFile } : {}),
+			};
+		}
 		case "auto_retry_start":
 			return {
 				...state,
@@ -572,6 +602,23 @@ function ingestMessage(state: SessionUi, msg: any, srcIndex?: number): void {
 						startedAt: Date.now(),
 						endedAt: Date.now(),
 					};
+			return;
+		}
+		// T-32: the SDK persists the transferred summary a session began with
+		// (because it continues an earlier one via auto-handoff) as a
+		// `role: "custom", customType: "handoff"` entry — the FIRST message of
+		// the new session. Reconstructed here so it survives reloads and
+		// server restarts alike (see HandoffOriginMsg doc comment).
+		case "custom": {
+			if (msg.customType !== "handoff") return;
+			const raw = extractText(msg.content);
+			const match = /^<handoff-context>\n([\s\S]*?)\n<\/handoff-context>/.exec(raw);
+			state.messages.push({
+				id: nextId("handoff-origin"),
+				role: "handoff_origin",
+				document: match?.[1] ?? raw,
+				timestamp: typeof msg.timestamp === "number" ? msg.timestamp : Date.now(),
+			} satisfies HandoffOriginMsg);
 			return;
 		}
 		default:

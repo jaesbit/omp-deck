@@ -18,6 +18,7 @@ import type {
 	DiscardDelegationArtifactRequest,
 	DiscardDelegationArtifactResponse,
 	GetDelegationSettingsResponse,
+	GetSessionHandoffSuccessorResponse,
 	InternalTaskModelResponse,
 	ListAutoWorkRunsResponse,
 	ListDirResponse,
@@ -103,6 +104,14 @@ export const api = {
 			method: "POST",
 			body: JSON.stringify(body),
 		});
+	},
+	/** T-32: best-effort lookup of the session an automatic context handoff
+	 *  continued into, if any. Bridge-independent — works for a purely
+	 *  historical (non-live) session too. */
+	getHandoffSuccessor(cwd: string, sessionFile: string): Promise<GetSessionHandoffSuccessorResponse> {
+		return request<GetSessionHandoffSuccessorResponse>(
+			`/sessions/handoff-successor?cwd=${encodeURIComponent(cwd)}&sessionFile=${encodeURIComponent(sessionFile)}`,
+		);
 	},
 	createSession(body: CreateSessionRequest): Promise<CreateSessionResponse> {
 		return request<CreateSessionResponse>("/sessions", {

@@ -3,6 +3,7 @@ import type {
 	AgentMessageJson,
 	CreateSessionRequest,
 	CreateSessionResponse,
+	GetSessionHandoffSuccessorResponse,
 	ListModelsResponse,
 	ListSessionsResponse,
 	ListSessionMonitorResponse,
@@ -32,6 +33,7 @@ import { resolveIntegrationPrompt } from "./integration-prompts.ts";
 import { waitForAutoWorkSessionTerminal } from "./auto-work/engine.ts";
 import { getModelCatalogOverlay } from "./model-catalog-overlay.ts";
 import { listSessionMonitor } from "./session-monitor.ts";
+import { findHandoffSuccessor } from "./bridge/session-handoff.ts";
 import { deriveLabel } from "./workspace-label.ts";
 
 const log = logger("routes");
@@ -195,6 +197,36 @@ export function buildRouter(
 			return c.json(body);
 		} catch (err) {
 			log.error(`list session monitor failed`, err);
+			return c.json({ error: String(err) }, 500);
+		}
+	});
+
+	/**
+	 * T-32: best-effort forward link for a session's automatic context
+	 * handoff, if any — see `bridge/session-handoff.ts`. Registered before
+	 * `/sessions/:id/...` so Hono doesn't swallow this static path as an id.
+	 * Bridge-independent (disk-only lookup): works for a live OR a purely
+	 * historical session, since it only needs `cwd` + the session's own file
+	 * path, both already known to any client that has listed or opened it.
+	 */
+	app.get("/sessions/handoff-successor", async (c) => {
+		const cwd = c.req.query("cwd");
+		const sessionFile = c.req.query("sessionFile");
+		if (!cwd || !sessionFile) {
+			return c.json({ error: "cwd and sessionFile query params are required" }, 400);
+		}
+		if (!isCwdAllowed(cwd)) {
+			return c.json(
+				{ error: `cwd does not exist, isn't a directory, or is outside the home directory: ${cwd}` },
+				400,
+			);
+		}
+		try {
+			const successor = await findHandoffSuccessor(cwd, sessionFile);
+			const body: GetSessionHandoffSuccessorResponse = { successor: successor ?? null };
+			return c.json(body);
+		} catch (err) {
+			log.error(`findHandoffSuccessor failed`, err);
 			return c.json({ error: String(err) }, 500);
 		}
 	});

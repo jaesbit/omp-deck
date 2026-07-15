@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { ChevronDown, GitBranch, Plus, X } from "lucide-react";
+import { ChevronDown, CornerLeftUp, CornerRightDown, GitBranch, Plus, X } from "lucide-react";
 import type { SessionUi } from "@/lib/types";
 import { selectActiveSession, useStore } from "@/lib/store";
 import { launchSession } from "@/lib/first-prompt";
@@ -8,7 +8,7 @@ import { ContextIndicator } from "./ContextIndicator";
 import { ModelPickerModal } from "./ModelPickerModal";
 import { SessionLaunchModal, type SessionLaunchOpts } from "./SessionLaunchModal";
 import { SessionTreeModal } from "./SessionTreeModal";
-import type { ModelInfo } from "@omp-deck/protocol";
+import type { ModelInfo, SessionHandoffSuccessor } from "@omp-deck/protocol";
 import { api } from "@/lib/api";
 
 /**
@@ -43,6 +43,27 @@ function useCurrentModelInfo(
 	return info;
 }
 
+/**
+ * T-32: best-effort lookup of the session an automatic context handoff
+ * continued this one into, if any. Disk-only + bridge-independent, so it
+ * resolves for a purely historical (non-live) session too — see
+ * `GET /sessions/handoff-successor`. `undefined` while loading or when none
+ * is found; never throws into the header.
+ */
+function useHandoffSuccessor(cwd: string, sessionFile: string | undefined): SessionHandoffSuccessor | undefined {
+	const [successor, setSuccessor] = useState<SessionHandoffSuccessor | undefined>();
+	useEffect(() => {
+		let cancelled = false;
+		setSuccessor(undefined);
+		if (!sessionFile) return;
+		api.getHandoffSuccessor(cwd, sessionFile).then((res) => {
+			if (!cancelled) setSuccessor(res.successor ?? undefined);
+		}).catch(() => {});
+		return () => { cancelled = true; };
+	}, [cwd, sessionFile]);
+	return successor;
+}
+
 function Inner({ session }: { session: SessionUi }) {
 	const renameSession = useStore((s) => s.renameSession);
 	const createSession = useStore((s) => s.createSession);
@@ -52,6 +73,7 @@ function Inner({ session }: { session: SessionUi }) {
 	const sessionsById = useStore((s) => s.sessionsById);
 	const actOnGoal = useStore((s) => s.actOnGoal);
 	const closeActiveSession = useStore((s) => s.closeActiveSession);
+	const handoffSuccessor = useHandoffSuccessor(session.cwd, session.sessionFile);
 
 	const [editing, setEditing] = useState(false);
 	const [draft, setDraft] = useState(session.sessionName ?? "");
@@ -132,6 +154,15 @@ function Inner({ session }: { session: SessionUi }) {
 		} finally {
 			setThinkingBusy(false);
 			setThinkingPickerOpen(false);
+		}
+	}
+
+	async function openHandoffSession(resumeFromPath: string): Promise<void> {
+		try {
+			await createSession({ cwd: session.cwd, resumeFromPath });
+		} catch (err) {
+			console.error(err);
+			alert(`Failed to resume: ${String(err)}`);
 		}
 	}
 
@@ -224,15 +255,32 @@ function Inner({ session }: { session: SessionUi }) {
 			>
 				{shortPath(session.cwd, 36)}
 			</span>
+
+			{/* T-32: open this session's origin (fork or auto-handoff source)
+			    and intentionally select it. The original remains in the session
+			    tree, so the user can follow the chain in either direction. */}
 			{session.parentSessionPath ? (
 				<button
 					type="button"
-					onClick={() => void createSession({ cwd: session.cwd, resumeFromPath: session.parentSessionPath })}
-					title="Esta sesión es una bifurcación de otra — click para ir a la sesión origen"
-					className="hidden h-6 shrink-0 items-center gap-1 rounded-md border border-line bg-paper-2/60 px-1.5 font-mono text-2xs uppercase tracking-meta text-ink-3 hover:border-accent/40 hover:text-accent sm:flex"
+					onClick={() => void openHandoffSession(session.parentSessionPath!)}
+					title="Open the session this one continues from"
+					aria-label="Open origin session"
+					className="inline-flex h-6 shrink-0 items-center gap-1 rounded-md border border-line bg-paper-2/60 px-1.5 font-mono text-2xs uppercase tracking-meta text-ink-3 hover:border-ink/30 hover:text-ink"
 				>
-					<GitBranch className="h-3 w-3" />
-					bifurcada
+					<CornerLeftUp className="h-3 w-3" />
+					<span className="hidden sm:inline">origin</span>
+				</button>
+			) : null}
+			{handoffSuccessor ? (
+				<button
+					type="button"
+					onClick={() => void openHandoffSession(handoffSuccessor.sessionFile)}
+					title="Open the session an automatic context handoff continued this one into"
+					aria-label="Open continuation session"
+					className="inline-flex h-6 shrink-0 items-center gap-1 rounded-md border border-line bg-paper-2/60 px-1.5 font-mono text-2xs uppercase tracking-meta text-ink-3 hover:border-ink/30 hover:text-ink"
+				>
+					<CornerRightDown className="h-3 w-3" />
+					<span className="hidden sm:inline">continuation</span>
 				</button>
 			) : null}
 

@@ -41,6 +41,7 @@ function makeSessionManager(sessionId: string) {
 	return {
 		getArtifactsDir: () => null,
 		getSessionId: () => sessionId,
+		getSessionFile: () => undefined,
 		buildSessionContext: () => ({}),
 		appendModeChange: () => {},
 	};

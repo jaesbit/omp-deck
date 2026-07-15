@@ -1,3 +1,4 @@
+import * as path from "node:path";
 import { prepareCodebaseMemoryMcpRuntime } from "../codebase-memory-mcp.ts";
 import {
 	createAgentSession,
@@ -200,13 +201,6 @@ interface Active {
 	goalBridge: GoalModeBridge;
 }
 
-function readSessionManagerId(sessionManager: unknown): string | undefined {
-	if (!sessionManager || typeof sessionManager !== "object" || !("getSessionId" in sessionManager)) return undefined;
-	const getSessionId = sessionManager.getSessionId;
-	if (typeof getSessionId !== "function") return undefined;
-	const sessionId = getSessionId.call(sessionManager);
-	return typeof sessionId === "string" ? sessionId : undefined;
-}
 
 export class InProcessAgentBridge implements AgentBridge {
 	private active = new Map<string, Active>();
@@ -280,15 +274,24 @@ export class InProcessAgentBridge implements AgentBridge {
 	}
 
 	async resumeSession(opts: ResumeSessionOpts): Promise<SessionHandle> {
-		const sessionManager = await SessionManager.open(opts.sessionPath);
-		const existingSessionId = readSessionManagerId(sessionManager);
-		if (existingSessionId) {
-			const existing = this.active.get(existingSessionId);
-			if (existing) {
-				log.info(`resume requested for active session ${existingSessionId}; retaining the live instance`);
-				return existing.handle;
+		// T-32: an auto-handoff mid-session leaves a NEW file actively being
+		// written by an already-live handle whose own `sessionId` (and this
+		// bridge's `active` map key) stays pinned to the PRE-handoff id — so
+		// matching by id alone can both miss the live continuation (its file
+		// moved, id didn't) and wrongly return it for an id that matches but
+		// whose file has since diverged (e.g. resuming the handoff's ORIGIN
+		// file, whose own on-disk id is unchanged). Match by CURRENT file
+		// only — see attach()'s collision handling for the id-collision half
+		// of this (a fresh attach for a diverged id gets a disambiguated key
+		// instead of superseding the still-live handle).
+		const resolvedTarget = path.resolve(opts.sessionPath);
+		for (const active of this.active.values()) {
+			if (active.handle.sessionFile && path.resolve(active.handle.sessionFile) === resolvedTarget) {
+				log.info(`resume requested for a file already live under session ${active.handle.sessionId}; retaining the live instance`);
+				return active.handle;
 			}
 		}
+		const sessionManager = await SessionManager.open(opts.sessionPath);
 		const cwd = (sessionManager.getCwd?.() as string | undefined) ?? process.cwd();
 		const modelRegistry = await this.ensureModelRegistry();
 		const result = await createAgentSession({
@@ -605,7 +608,28 @@ export class InProcessAgentBridge implements AgentBridge {
 		setToolUIContext: CreateAgentSessionResult["setToolUIContext"],
 		hasUI: boolean,
 	): Promise<InProcessSessionHandle> {
-		const sessionId = (session as any).sessionId as string;
+		const naturalSessionId = (session as any).sessionId as string;
+		// T-32: disambiguate a collision where the existing `active` entry is a
+		// LIVE session that has since auto-handed-off onto a DIFFERENT file —
+		// its own map key stays pinned to its pre-handoff id by design (see
+		// session-handoff.ts docs), so a fresh attach for that id's ORIGINAL
+		// file (e.g. the handoff banner's "origin" link, or any independent
+		// resume of it) collides on id alone. That's a legitimate, INDEPENDENT
+		// reattachment, not a duplicate — give it its own identity instead of
+		// falling into the supersede/dispose path below, which would kill the
+		// still-live continuation. A genuine duplicate attach (same file,
+		// same id) is unaffected and still supersedes as before.
+		const existingForNaturalId = this.active.get(naturalSessionId);
+		const thisAttachFile = sessionManager.getSessionFile();
+		const isDivergedHandoffOrigin =
+			existingForNaturalId !== undefined &&
+			existingForNaturalId.handle.sessionFile !== undefined &&
+			thisAttachFile !== undefined &&
+			path.resolve(existingForNaturalId.handle.sessionFile) !== path.resolve(thisAttachFile);
+		// Plain fresh UUID, not `${naturalSessionId}-<suffix>` — the web
+		// router builds `/c/${sessionId}` unencoded, so any separator with URL
+		// significance (`#`, `?`, `/`) would corrupt navigation/route parsing.
+		const sessionId = isDivergedHandoffOrigin ? Bun.randomUUIDv7() : naturalSessionId;
 		const uiBridge = new ExtensionUIBridge(sessionId);
 		// Internal backend sessions expose no interactive UI to SDK tools.
 		setToolUIContext(uiBridge, hasUI);
@@ -695,6 +719,9 @@ export class InProcessAgentBridge implements AgentBridge {
 
 		// Bridge SDK events to handle's listeners, AND to bridge-internal activity
 		// tracking so the reaper sees real agent work and won't kill an in-flight turn.
+		// T-32: tracks an in-flight auto-handoff between its start and end event
+		// (see PendingHandoff doc comment).
+		let pendingHandoff: PendingHandoff | undefined;
 		unsubscribe = session.subscribe((event) => {
 			const entry = this.active.get(sessionId);
 			if (entry) {
@@ -710,6 +737,43 @@ export class InProcessAgentBridge implements AgentBridge {
 			// changes: a turn finishing (fresh assistant usage now available)
 			// or a compaction completing (post-compaction context shrunk).
 			const type = (event as { type?: string })?.type;
+			// T-32: auto-handoff compaction (`compaction.strategy = "handoff"`)
+			// generates a summary and swaps the live session onto a brand-new
+			// file+id via the SDK's own `SessionManager.newSession()` — invisible
+			// to the deck otherwise. Stash the pre-swap identity on start, then
+			// emit a deck-synthetic `session_handoff` event on a successful end so
+			// the web client can show why/when it happened and the new identity
+			// (this handle's live `sessionFile` getter DOES follow the swap — used
+			// below for `newSessionFile` — but its `sessionId` and this bridge's
+			// `active` map key deliberately stay pinned to the pre-handoff id; see
+			// session-handoff.ts module docs for why re-keying the live
+			// registration is out of scope).
+			if (type === "auto_compaction_start" && readStringField(event, "action") === "handoff") {
+				pendingHandoff = {
+					// The FILE-level id right now, not the outer `sessionId` closure
+					// (pinned once at attach() time, for WS-routing purposes only) —
+					// a SECOND handoff on the same live handle must report the id the
+					// first one produced as "previous", not the original pre-any-
+					// handoff id.
+					previousSessionId: sessionManager.getSessionId(),
+					previousSessionFile: handle.sessionFile,
+					reason: readStringField(event, "reason") ?? "",
+				};
+			} else if (type === "auto_compaction_end" && readStringField(event, "action") === "handoff") {
+				const handoff = pendingHandoff;
+				pendingHandoff = undefined;
+				if (handoff && readBooleanField(event, "aborted") !== true) {
+					handle.emit({
+						type: "session_handoff",
+						reason: handoff.reason,
+						previousSessionId: handoff.previousSessionId,
+						previousSessionFile: handoff.previousSessionFile,
+						newSessionId: sessionManager.getSessionId(),
+						newSessionFile: handle.sessionFile,
+						timestamp: Date.now(),
+					} as unknown as AgentSessionEventJson);
+				}
+			}
 			if (type === "turn_end" || type === "agent_end" || type === "compaction_complete") {
 				const usage = handle.getContextUsage();
 				if (usage) {
@@ -993,6 +1057,29 @@ function readStringField(value: unknown, key: string): string | undefined {
 	const v = (value as Record<string, unknown>)[key];
 	return typeof v === "string" ? v : undefined;
 }
+
+function readBooleanField(value: unknown, key: string): boolean | undefined {
+	if (!value || typeof value !== "object") return undefined;
+	if (!(key in value)) return undefined;
+	const v = (value as Record<string, unknown>)[key];
+	return typeof v === "boolean" ? v : undefined;
+}
+
+/**
+ * T-32: mutable in-flight marker for an auto-handoff compaction. Stashed on
+ * `auto_compaction_start` (action "handoff", while `handle.sessionFile`
+ * still points at the pre-handoff file) and consumed on the matching
+ * `auto_compaction_end` once the SDK's `newSession()` swap has completed —
+ * at that point `handle.sessionFile`/`sessionManager.getSessionId()` report
+ * the new identity. Scoped per `attach()` call (one live handle), never
+ * shared across sessions.
+ */
+interface PendingHandoff {
+	previousSessionId: string;
+	previousSessionFile?: string;
+	reason: string;
+}
+
 export class InProcessSessionHandle implements SessionHandle {
 	readonly sessionId: string;
 	readonly cwd: string;
@@ -1136,6 +1223,11 @@ export class InProcessSessionHandle implements SessionHandle {
 			// entries retain the latest list for reconnects and snapshots.
 			todoPhases: getLatestTodoPhasesFromEntries(this.sessionManager.getBranch()) as unknown as Array<Record<string, unknown>>,
 		};
+		// T-32: this session's origin file, if it was forked or continues an
+		// automatic context handoff. Sync/free — `getHeader()` reads the
+		// already-loaded in-memory header, no disk I/O.
+		const parentSessionPath = this.sessionManager.getHeader()?.parentSession;
+		if (parentSessionPath) snap.parentSessionPath = parentSessionPath;
 		if (usage) snap.contextUsage = usage;
 		const planMode = this.planBridge.getPlanModeContext();
 		if (planMode) {

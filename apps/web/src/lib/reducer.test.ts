@@ -33,6 +33,109 @@ function userMessageStart(text: string, synthetic = false) {
 	} as never;
 }
 
+describe("reducer session_handoff event (T-32)", () => {
+	function handoffEvent(over: Partial<Record<string, unknown>> = {}) {
+		return {
+			type: "session_handoff",
+			reason: "threshold",
+			previousSessionId: "old-id",
+			previousSessionFile: "/tmp/old.jsonl",
+			newSessionId: "new-id",
+			newSessionFile: "/tmp/new.jsonl",
+			timestamp: 1700000000000,
+			...over,
+		} as never;
+	}
+
+	test("appends a HandoffMsg carrying the why/when/new-identity", () => {
+		const state = applyEvent(fresh(), handoffEvent());
+
+		expect(state.messages).toHaveLength(1);
+		expect(state.messages[0]).toMatchObject({
+			role: "handoff",
+			reason: "threshold",
+			previousSessionId: "old-id",
+			previousSessionFile: "/tmp/old.jsonl",
+			newSessionId: "new-id",
+			newSessionFile: "/tmp/new.jsonl",
+			timestamp: 1700000000000,
+		});
+	});
+
+	test("this tab's own sessionId never changes, but sessionFile/parentSessionPath follow the swap", () => {
+		const before = fresh();
+		const state = applyEvent(before, handoffEvent());
+
+		expect(state.sessionId).toBe(before.sessionId);
+		expect(state.sessionFile).toBe("/tmp/new.jsonl");
+		expect(state.parentSessionPath).toBe("/tmp/old.jsonl");
+	});
+
+	test("a second handoff on the same tab keeps appending and keeps sessionFile current", () => {
+		let state = applyEvent(fresh(), handoffEvent());
+		state = applyEvent(
+			state,
+			handoffEvent({ reason: "overflow", previousSessionId: "new-id", previousSessionFile: "/tmp/new.jsonl", newSessionId: "newer-id", newSessionFile: "/tmp/newer.jsonl" }),
+		);
+
+		expect(state.messages.filter((m) => m.role === "handoff")).toHaveLength(2);
+		expect(state.sessionFile).toBe("/tmp/newer.jsonl");
+		expect(state.parentSessionPath).toBe("/tmp/new.jsonl");
+	});
+});
+
+describe("reducer handoff_origin ingestion (T-32)", () => {
+	test("reconstructs the transferred summary from the persisted custom_message handoff marker", () => {
+		const state = initSession({
+			sessionId: "s1",
+			cwd: "/tmp/x",
+			isStreaming: false,
+			todoPhases: [],
+			messages: [
+				{
+					role: "custom",
+					customType: "handoff",
+					content: "<handoff-context>\nWe were mid-refactor on foo.ts.\n</handoff-context>\n\nThe above is a handoff document from a previous session. Use this context to continue the work seamlessly.",
+					timestamp: 1700000000000,
+				} as never,
+			],
+		});
+
+		expect(state.messages).toHaveLength(1);
+		expect(state.messages[0]).toMatchObject({
+			role: "handoff_origin",
+			document: "We were mid-refactor on foo.ts.",
+			timestamp: 1700000000000,
+		});
+	});
+
+	test("falls back to the raw content when the wrapper tags are absent (forward-compat)", () => {
+		const state = initSession({
+			sessionId: "s1",
+			cwd: "/tmp/x",
+			isStreaming: false,
+			todoPhases: [],
+			messages: [
+				{ role: "custom", customType: "handoff", content: "plain text, no wrapper", timestamp: 1 } as never,
+			],
+		});
+
+		expect(state.messages[0]).toMatchObject({ role: "handoff_origin", document: "plain text, no wrapper" });
+	});
+
+	test("ignores a custom message of any other customType", () => {
+		const state = initSession({
+			sessionId: "s1",
+			cwd: "/tmp/x",
+			isStreaming: false,
+			todoPhases: [],
+			messages: [{ role: "custom", customType: "advisor", content: "some note", timestamp: 1 } as never],
+		});
+
+		expect(state.messages).toHaveLength(0);
+	});
+});
+
 describe("reducer queue lifecycle", () => {
 	test("prompt_queued appends a QueuedPrompt with the server id", () => {
 		const s1 = applyEvent(fresh(), queueEvent("first", "abc"));

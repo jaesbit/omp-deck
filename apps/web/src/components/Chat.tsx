@@ -12,6 +12,7 @@ import { TtsrLine } from "./messages/TtsrLine";
 import { IrcLine } from "./messages/IrcLine";
 import { QueuedMessage } from "./messages/QueuedMessage";
 import { PlanApproval } from "./messages/PlanApproval";
+import { HandoffLine, HandoffOrigin } from "./messages/HandoffLine";
 
 /**
  * Scroll position captured immediately before requesting an older history
@@ -158,6 +159,10 @@ export function Chat() {
 									return <TtsrLine key={m.id} msg={m} />;
 								case "irc":
 									return <IrcLine key={m.id} msg={m} />;
+								case "handoff":
+									return <HandoffLine key={m.id} msg={m} />;
+								case "handoff_origin":
+									return <HandoffOrigin key={m.id} msg={m} />;
 								default:
 									return null;
 							}
