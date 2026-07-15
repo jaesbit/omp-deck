@@ -45,6 +45,7 @@ import type {
 	SessionSnapshot,
 	UsageRollupWire,
 	SessionSummary,
+	SessionTreeResponse,
 } from "@omp-deck/protocol";
 
 
@@ -62,6 +63,7 @@ import { PlanModeBridge } from "./plan-mode-bridge.ts";
 import type { PersistedPlanModeData, PlanModelController, PlanModeSessionSurface } from "./plan-mode-bridge.ts";
 import { getPlanModel } from "../db/server-settings.ts";
 import { summarizeSession } from "./session-normalizer.ts";
+import { forkSessionFile, readSessionTree } from "./session-tree.ts";
 import type {
 	AgentBridge,
 	CreateSessionOpts,
@@ -330,13 +332,9 @@ export class InProcessAgentBridge implements AgentBridge {
 	 */
 	async deleteSession(sessionId: string): Promise<{ deleted: boolean; sessionPath?: string }> {
 		const active = this.active.get(sessionId);
-		let sessionPath = active?.handle.sessionFile;
+		const sessionPath = await this.resolveSessionPath(sessionId);
 		if (active) {
 			await active.handle.dispose();
-		}
-		if (!sessionPath) {
-			const persisted = await this.listAllSessionsForDelete();
-			sessionPath = persisted.find((s) => s.id === sessionId)?.path;
 		}
 		if (!sessionPath) {
 			return { deleted: false };
@@ -348,6 +346,33 @@ export class InProcessAgentBridge implements AgentBridge {
 			if ((err as NodeJS.ErrnoException)?.code !== "ENOENT") throw err;
 		}
 		return { deleted: true, sessionPath };
+	}
+
+	/**
+	 * Resolve `sessionId` to its `.jsonl` path without disturbing a live
+	 * handle: the live handle's `sessionFile` first, else a
+	 * `listAllSessionsForDelete()` match for a persisted-only session.
+	 * Shared by `deleteSession`, `getSessionTree` and `forkSessionAt`.
+	 */
+	private async resolveSessionPath(sessionId: string): Promise<string | undefined> {
+		const live = this.active.get(sessionId)?.handle.sessionFile;
+		if (live) return live;
+		const persisted = await this.listAllSessionsForDelete();
+		return persisted.find((s) => s.id === sessionId)?.path;
+	}
+
+	/** @inheritdoc */
+	async getSessionTree(sessionId: string): Promise<SessionTreeResponse | undefined> {
+		const sessionPath = await this.resolveSessionPath(sessionId);
+		if (!sessionPath) return undefined;
+		return readSessionTree(sessionPath);
+	}
+
+	/** @inheritdoc */
+	async forkSessionAt(sessionId: string, entryId: string): Promise<{ sessionFile: string; cwd: string } | undefined> {
+		const sessionPath = await this.resolveSessionPath(sessionId);
+		if (!sessionPath) return undefined;
+		return forkSessionFile(sessionPath, entryId);
 	}
 
 	/**

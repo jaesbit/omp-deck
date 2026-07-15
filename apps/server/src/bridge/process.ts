@@ -15,12 +15,14 @@ import type {
 	SessionHistoryResponse,
 	SessionSnapshot,
 	SessionSummary,
+	SessionTreeResponse,
 } from "@omp-deck/protocol";
 
 import { broadcastBus } from "../broadcast-bus.ts";
 import { logger } from "../log.ts";
 import { resolveBunExecutable } from "../runtime-bun.ts";
 import { InProcessAgentBridge } from "./in-process.ts";
+import { forkSessionFile, readSessionTree } from "./session-tree.ts";
 import type { GoalAction } from "./goal-mode-bridge.ts";
 import type {
 	SerializedWorkerError,
@@ -153,6 +155,24 @@ export class ProcessAgentBridge implements AgentBridge {
 		const live = this.active.get(sessionId)?.handle;
 		if (live) await live.dispose();
 		return this.sessionlessBridge.deleteSession(sessionId);
+	}
+
+	/**
+	 * Reads directly off the live worker's `sessionFile` when the session is
+	 * active (never disposes it — this is a read, not a delete), otherwise
+	 * falls back to the sessionless bridge's persisted-listing resolution.
+	 */
+	getSessionTree(sessionId: string): Promise<SessionTreeResponse | undefined> {
+		const liveFile = this.active.get(sessionId)?.handle?.sessionFile;
+		if (liveFile) return readSessionTree(liveFile);
+		return this.sessionlessBridge.getSessionTree(sessionId);
+	}
+
+	/** Same live/persisted resolution as {@link getSessionTree}, never disposes the live handle. */
+	forkSessionAt(sessionId: string, entryId: string): Promise<{ sessionFile: string; cwd: string } | undefined> {
+		const liveFile = this.active.get(sessionId)?.handle?.sessionFile;
+		if (liveFile) return forkSessionFile(liveFile, entryId);
+		return this.sessionlessBridge.forkSessionAt(sessionId, entryId);
 	}
 
 	trackSubscriberAdded(sessionId: string, connectionId: string): void {
