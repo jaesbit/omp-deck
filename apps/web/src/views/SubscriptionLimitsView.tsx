@@ -209,43 +209,54 @@ function SubscriptionLimitsContent({
 
 	return (
 		<div className="space-y-3">
-			{usage.limits.map((limit) => {
-				const pct = Math.min(100, Math.max(0, limit.pctUsed));
-				const resetDate = new Date(limit.resetAt);
-				const resetLabel = Number.isNaN(resetDate.getTime())
-					? limit.resetAt
-					: resetDate.toLocaleString(undefined, {
-						month: "short",
-						day: "numeric",
-						hour: "2-digit",
-						minute: "2-digit",
-					});
-				return (
-					<section key={limit.label} className="rounded-md border border-line bg-paper-2 p-4">
-						<div className="mb-3 flex items-baseline justify-between gap-3">
+		{usage.limits.map((limit) => {
+			const pct = Math.min(100, Math.max(0, limit.pctUsed));
+			const resetDate = new Date(limit.resetAt);
+			const resetLabel = Number.isNaN(resetDate.getTime())
+				? limit.resetAt
+				: resetDate.toLocaleString(undefined, {
+					month: "short",
+					day: "numeric",
+					hour: "2-digit",
+					minute: "2-digit",
+				});
+			// Always show account context. Fall back to "–" for pre-T128 payloads
+			// that lack the field, so no bar is ever silently missing the line.
+			const accountLabel = limit.account ?? "–";
+			const providerLabel = limit.provider ?? "–";
+			// Composite key: same window label can appear for different accounts.
+			const cardKey = `${providerLabel}:${accountLabel}:${limit.label}`;
+			return (
+				<section key={cardKey} className="rounded-md border border-line bg-paper-2 p-4">
+					<div className="mb-3 flex items-start justify-between gap-3">
+						<div className="min-w-0">
 							<h2 className="text-sm font-medium text-ink">{limit.label}</h2>
-							<span
-								className={cn(
-									"text-lg font-semibold tabular-nums",
-									pct >= 90 ? "text-red-400" : pct >= 75 ? "text-yellow-400" : "text-ink",
-								)}
-							>
-								{pct.toFixed(0)}%
-							</span>
+							<p className="mt-0.5 text-2xs text-ink-3 truncate" title={`${providerLabel} · ${accountLabel}`}>
+								{providerLabel} · {accountLabel}
+							</p>
 						</div>
-						<div className="h-2 w-full overflow-hidden rounded-full bg-paper-3">
-							<div
-								className={cn(
-									"h-full rounded-full transition-all",
-									pct >= 90 ? "bg-red-500" : pct >= 75 ? "bg-yellow-500" : "bg-accent",
-								)}
-								style={{ width: `${pct}%` }}
-							/>
-						</div>
-						<p className="mt-2 text-xs text-ink-3">Resets {resetLabel}</p>
-					</section>
-				);
-			})}
+						<span
+							className={cn(
+								"shrink-0 text-lg font-semibold tabular-nums",
+								pct >= 90 ? "text-red-400" : pct >= 75 ? "text-yellow-400" : "text-ink",
+							)}
+						>
+							{pct.toFixed(0)}%
+						</span>
+					</div>
+					<div className="h-2 w-full overflow-hidden rounded-full bg-paper-3">
+						<div
+							className={cn(
+								"h-full rounded-full transition-all",
+								pct >= 90 ? "bg-red-500" : pct >= 75 ? "bg-yellow-500" : "bg-accent",
+							)}
+							style={{ width: `${pct}%` }}
+						/>
+					</div>
+					<p className="mt-2 text-xs text-ink-3">Resets {resetLabel}</p>
+				</section>
+			);
+		})}
 		</div>
 	);
 }
