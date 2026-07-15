@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { ChevronDown, Plus, X } from "lucide-react";
+import { ChevronDown, GitBranch, Plus, X } from "lucide-react";
 import type { SessionUi } from "@/lib/types";
 import { selectActiveSession, useStore } from "@/lib/store";
 import { launchSession } from "@/lib/first-prompt";
@@ -7,6 +7,7 @@ import { cn, shortPath } from "@/lib/utils";
 import { ContextIndicator } from "./ContextIndicator";
 import { ModelPickerModal } from "./ModelPickerModal";
 import { SessionLaunchModal, type SessionLaunchOpts } from "./SessionLaunchModal";
+import { SessionTreeModal } from "./SessionTreeModal";
 import type { ModelInfo } from "@omp-deck/protocol";
 import { api } from "@/lib/api";
 
@@ -58,6 +59,7 @@ function Inner({ session }: { session: SessionUi }) {
 	const [switcherOpen, setSwitcherOpen] = useState(false);
 	const [modelOpen, setModelOpen] = useState(false);
 	const [launchOpen, setLaunchOpen] = useState(false);
+	const [treeOpen, setTreeOpen] = useState(false);
 	const switcherRef = useRef<HTMLDivElement>(null);
 	const thinkingPickerRef = useRef<HTMLDivElement>(null);
 	const [thinkingPickerOpen, setThinkingPickerOpen] = useState(false);
@@ -222,6 +224,17 @@ function Inner({ session }: { session: SessionUi }) {
 			>
 				{shortPath(session.cwd, 36)}
 			</span>
+			{session.parentSessionPath ? (
+				<button
+					type="button"
+					onClick={() => void createSession({ cwd: session.cwd, resumeFromPath: session.parentSessionPath })}
+					title="Esta sesión es una bifurcación de otra — click para ir a la sesión origen"
+					className="hidden h-6 shrink-0 items-center gap-1 rounded-md border border-line bg-paper-2/60 px-1.5 font-mono text-2xs uppercase tracking-meta text-ink-3 hover:border-accent/40 hover:text-accent sm:flex"
+				>
+					<GitBranch className="h-3 w-3" />
+					bifurcada
+				</button>
+			) : null}
 
 			{session.model ? (
 				<button
@@ -341,6 +354,17 @@ function Inner({ session }: { session: SessionUi }) {
 				</div>
 			) : null}
 
+			{/* Session-tree / timeline view (T-31) — navigate/branch history. */}
+			<button
+				type="button"
+				onClick={() => setTreeOpen(true)}
+				className="btn-ghost h-7 w-7 p-0"
+				aria-label="Session tree"
+				title="Ver árbol de sesión / bifurcar"
+			>
+				<GitBranch className="h-3.5 w-3.5" />
+			</button>
+
 			{/* Context-window indicator — clickable popover with manual /compact. */}
 			<ContextIndicator sessionId={session.sessionId} usage={session.contextUsage} />
 
@@ -431,6 +455,7 @@ function Inner({ session }: { session: SessionUi }) {
 					setLaunchOpen(false);
 				}}
 			/>
+			<SessionTreeModal open={treeOpen} sessionId={session.sessionId} onClose={() => setTreeOpen(false)} />
 		</div>
 	);
 }
