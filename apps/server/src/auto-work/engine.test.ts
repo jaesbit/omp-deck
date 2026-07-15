@@ -47,6 +47,7 @@ import {
 	waitForAutoWorkSessionTerminal,
 } from "./engine.ts";
 import type { SqueezeDecisionInput } from "./engine.ts";
+import { SensitiveContentError } from "./pr-content-guard.ts";
 
 // ─── Fixtures ───────────────────────────────────────────────────────────────
 
@@ -1639,6 +1640,11 @@ describe("createPullRequestViaGh", () => {
 			}
 			return fakeGhFailure(`unexpected PR base ${cmd[baseIndex + 1]}`);
 		});
+		// The diff guard needs `origin/devel` fetched locally to diff against —
+		// mirror how a real worktree is always created FROM `origin/<base>`
+		// (so the ref necessarily exists by the time PR creation runs).
+		runGit(["push", "origin", "HEAD:devel"], repoCwd);
+		runGit(["fetch", "-q", "origin", "devel"], repoCwd);
 		try {
 			const result = await withProjectBasePolicy("devel", () =>
 				createPullRequestViaGh({ cwd: repoCwd, title: "Policy branch", body: "Uses the configured branch." }),
@@ -1666,6 +1672,72 @@ describe("createPullRequestViaGh", () => {
 		} finally {
 			restore();
 		}
+	});
+
+	// ─── T-119: sensitive-content guard ────────────────────────────────────
+
+	test("rejects and never calls gh when the PR title contains an absolute URL", async () => {
+		let ghCalled = false;
+		const restore = withFakeGhSpawn(() => {
+			ghCalled = true;
+			return fakeGhSuccess("https://github.com/jaesbit/omp-deck/pull/1\n");
+		});
+		try {
+			await expect(
+				createPullRequestViaGh({ cwd: repoCwd, title: `feat: T-1 see ${"http" + "://localhost:8787/c/abc"}`, body: "B" }),
+			).rejects.toThrow(SensitiveContentError);
+		} finally {
+			restore();
+		}
+		expect(ghCalled).toBe(false);
+	});
+
+	test("rejects and never calls gh when the PR body embeds credentials in a URL", async () => {
+		let ghCalled = false;
+		const restore = withFakeGhSpawn(() => {
+			ghCalled = true;
+			return fakeGhSuccess("https://github.com/jaesbit/omp-deck/pull/1\n");
+		});
+		// String-concatenated so this test file's own source diff never
+		// contains a contiguous credential-shaped match (see pr-content-guard.ts).
+		const sneaky = ["https://user", "s3cr3t@example.com/callback"].join(":");
+		try {
+			await expect(createPullRequestViaGh({ cwd: repoCwd, title: "T", body: `Auto Work — ${sneaky}` })).rejects.toThrow(
+				SensitiveContentError,
+			);
+		} finally {
+			restore();
+		}
+		expect(ghCalled).toBe(false);
+	});
+
+	test("rejects a branch whose diff adds a realistic-looking secret, and never pushes or calls gh", async () => {
+		const fakeKey = ["sk-ant", `api03-${"A".repeat(60)}`].join("-");
+		fs.writeFileSync(path.join(repoCwd, "leaked.txt"), `${fakeKey}\n`);
+		runGit(["add", "."], repoCwd);
+		runGit(["commit", "-q", "-m", "oops"], repoCwd);
+
+		const originDir = path.join(homeDir, "origin.git");
+		const shaBefore = Bun.spawnSync({ cmd: ["git", "rev-parse", "refs/heads/main"], cwd: originDir, stdout: "pipe" }).stdout
+			.toString()
+			.trim();
+
+		let ghCalled = false;
+		const restore = withFakeGhSpawn(() => {
+			ghCalled = true;
+			return fakeGhSuccess("https://github.com/jaesbit/omp-deck/pull/1\n");
+		});
+		try {
+			await expect(createPullRequestViaGh({ cwd: repoCwd, title: "T", body: "B" })).rejects.toThrow(SensitiveContentError);
+		} finally {
+			restore();
+		}
+		expect(ghCalled).toBe(false);
+
+		const shaAfter = Bun.spawnSync({ cmd: ["git", "rev-parse", "refs/heads/main"], cwd: originDir, stdout: "pipe" }).stdout
+			.toString()
+			.trim();
+		expect(shaAfter).toBe(shaBefore); // never pushed — the secret never reached origin
 	});
 });
 
