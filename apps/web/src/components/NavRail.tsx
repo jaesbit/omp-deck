@@ -1,4 +1,4 @@
-import { Activity, BookOpen, BotMessageSquare, ChartNoAxesCombined, Clock, FolderCog, Inbox, KanbanSquare, MessagesSquare, Plug, Settings, Sparkles, Store } from "lucide-react";
+import { Activity, BookOpen, BotMessageSquare, ChartNoAxesCombined, Clock, Database, FolderCog, Inbox, KanbanSquare, MessagesSquare, Plug, Settings, Sparkles, Store } from "lucide-react";
 import { NavLink } from "react-router-dom";
 import { cn } from "@/lib/utils";
 
@@ -18,6 +18,7 @@ const ITEMS: ReadonlyArray<{
 	{ to: "/integrations", label: "Integrations", icon: Plug },
 	{ to: "/auto-work", label: "Auto Work", icon: BotMessageSquare },
 	{ to: "/project-config", label: "Project Config", icon: FolderCog },
+	{ to: "/codebase-memory", label: "Codebase Memory", icon: Database },
 	{ to: "/subscription-limits", label: "Subscription limits", icon: ChartNoAxesCombined },
 ];
 
