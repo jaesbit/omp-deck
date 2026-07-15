@@ -811,6 +811,15 @@ export interface SubscriptionUsageLimit {
 	resetAt: string;
 	/** Window duration in milliseconds, when the provider reports it. */
 	windowDurationMs?: number;
+	/** Provider identifier (e.g. "anthropic", "openai"). */
+	provider?: string;
+	/**
+	 * Account, org or project label scoping this limit — derived server-side as
+	 * `scope.accountId ?? orgId ?? projectId ?? tier ?? "(shared)"`, so it is
+	 * always a non-empty string when the field is present. Absent only on very
+	 * old cached responses from pre-T128 servers.
+	 */
+	account?: string;
 }
 
 /**
