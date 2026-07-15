@@ -43,6 +43,7 @@ import {
 	appendAgentHistoryEntry,
 	failAutoWorkRun,
 	hasActiveAutoWorkRunFinalizer,
+	markRunIntentionallyStopped,
 	reconcileInactiveAutoWorkRuns,
 	runGlobalAutoWorkCycle,
 	createPullRequestViaGh,
@@ -179,6 +180,7 @@ export function buildAutoWorkRouter(bridge: AgentBridge, config: Config, cycleOp
 		const handle = bridge.getSession(run.sessionId);
 		if (handle && hasActiveAutoWorkRunFinalizer(runId)) {
 			try {
+				markRunIntentionallyStopped(runId);
 				await handle.abort();
 			} catch (err) {
 				log.error(`run ${runId}: stop failed`, err);

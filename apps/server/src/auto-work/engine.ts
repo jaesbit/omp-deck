@@ -93,6 +93,18 @@ export function hasActiveAutoWorkRunFinalizer(runId: string): boolean {
 	return activeRunIds.has(runId);
 }
 
+/** Run ids explicitly stopped by the user or operator, preventing within-run abort retries for those runs. */
+const intentionallyStoppedRunIds = new Set<string>();
+
+/**
+ * Called by the stop route before `handle.abort()` so the live finalizer
+ * knows the abort was intentional and skips the within-run retry path for
+ * `aborted` terminal events.
+ */
+export function markRunIntentionallyStopped(runId: string): void {
+	intentionallyStoppedRunIds.add(runId);
+}
+
 // ─── Pure decision logic ────────────────────────────────────────────────────
 
 export interface AutoWorkPreflightInput {
@@ -720,6 +732,14 @@ async function resumePriorFailedRunSession(
  */
 export const MAX_AUTO_WORK_TASK_ATTEMPTS = 3;
 
+/**
+ * How many times a live run may resend a continuation prompt to the same
+ * session after an unexpected `aborted` terminal event before the run is
+ * written off as failed. Intentional stops (`markRunIntentionallyStopped`)
+ * bypass this limit and never retry.
+ */
+export const MAX_SAME_RUN_ABORT_RETRIES = 1;
+
 interface FailedRunRouting {
 	/** Consecutive failures including the run just closed. */
 	attempts: number;
@@ -794,7 +814,10 @@ function finalizeAutoWorkRun(params: {
 	startPct: number | null;
 }): Promise<AutoWorkCycleResult> {
 	activeRunIds.add(params.runId);
-	return settleAutoWorkRun(params).finally(() => activeRunIds.delete(params.runId));
+	return settleAutoWorkRun(params).finally(() => {
+		activeRunIds.delete(params.runId);
+		intentionallyStoppedRunIds.delete(params.runId);
+	});
 }
 
 async function settleAutoWorkRun(params: {
@@ -812,7 +835,33 @@ async function settleAutoWorkRun(params: {
 }): Promise<AutoWorkCycleResult> {
 	const { runId, task, session, worktreePath, timeoutMinutes, startTurn, resolveDeckBaseUrl, createPullRequest, notify, usageLookup, startPct } =
 		params;
-	const terminal = await waitForAutoWorkSessionTerminalResult(session, timeoutMinutes * 60_000, startTurn);
+	// Same-run abort retry: an unexpected `aborted` terminal event is retried
+	// once within the same run by sending a continuation prompt to the same
+	// session. Intentional stops (via `markRunIntentionallyStopped`) bypass this
+	// so the user's explicit stop is always respected. Non-abort failures
+	// (`max_tokens`, `length`, `refusal`, `error`) are never retried in-run.
+	let currentStartTurn: (() => Promise<unknown>) | undefined = startTurn;
+	let terminal!: AutoWorkTerminalResult;
+	let sameRunAborts = 0;
+	do {
+		terminal = await waitForAutoWorkSessionTerminalResult(session, timeoutMinutes * 60_000, currentStartTurn);
+		currentStartTurn = undefined;
+		if (
+			terminal.outcome === "failed" &&
+			terminal.failureReason === "agent turn ended with stop reason: aborted" &&
+			!intentionallyStoppedRunIds.has(runId) &&
+			sameRunAborts < MAX_SAME_RUN_ABORT_RETRIES
+		) {
+			sameRunAborts++;
+			log.warn(
+				`run ${runId}: turn aborted unexpectedly — sending continuation prompt (same-run retry ${sameRunAborts}/${MAX_SAME_RUN_ABORT_RETRIES})`,
+			);
+			currentStartTurn = () =>
+				session.prompt(
+					`El turno anterior fue interrumpido inesperadamente. Revisa el estado del worktree y continúa el trabajo desde donde lo dejaste.`,
+				);
+		}
+	} while (currentStartTurn !== undefined);
 
 	// Capture real token usage for this run (T-80). Both calls run concurrently;
 	// failures are logged and default to null — missing usage is never fatal.
@@ -1259,6 +1308,7 @@ function terminalOutcomeFromEvent(event: unknown): AutoWorkTerminalResult | unde
 	if (stopReason === "end_turn" || stopReason === "stop") return { outcome: "completed" };
 	return { outcome: "failed", failureReason: `agent turn ended with stop reason: ${stopReason}` };
 }
+
 
 /**
  * Wait for a terminal event while retaining the exact failure condition for

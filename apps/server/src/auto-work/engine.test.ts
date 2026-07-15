@@ -1864,7 +1864,20 @@ describe("runAutoWorkCycle", () => {
         }
     });
 
-	test("records an aborted agent turn as failed instead of completed", async () => {
+	/** Yields microtasks until `handle.prompts` reaches `count`, then returns.
+	 *  Throws after 50 iterations so a regression produces a clear error rather
+	 *  than an infinite hang. */
+	async function waitForPromptCount(handle: FakeSessionHandle, count: number): Promise<void> {
+		for (let i = 0; i < 50; i++) {
+			if (handle.prompts.length >= count) return;
+			await Promise.resolve();
+		}
+		throw new Error(
+			`waitForPromptCount: expected ${count} prompt(s) but got ${handle.prompts.length} after 50 microtask yields`,
+		);
+	}
+
+	test("records an aborted agent turn as failed after exhausting same-run retries", async () => {
 		setAutoWorkConfig(repoCwd, { ...DEFAULT_AUTO_WORK_VALUES, enabled: true });
 		const task = createTask({ title: "Agent cancellation", cwd: repoCwd, priority: "P5", autoWork: true });
 		const handle = new FakeSessionHandle("sess_aborted", null);
@@ -1876,10 +1889,60 @@ describe("runAutoWorkCycle", () => {
 		});
 		await handle.subscriptionStarted;
 		handle.emit({ type: "turn_end", message: { stopReason: "aborted" } });
+		// Wait until the engine's retry loop has enqueued the continuation prompt.
+		await waitForPromptCount(handle, 2);
+		handle.emit({ type: "turn_end", message: { stopReason: "aborted" } });
 		const result = await cycle;
 
 		expect(result.outcome).not.toBe("completed");
 		expect(listAutoWorkRuns({ taskId: task.id })[0]?.status).toBe("failed");
+		expect(handle.prompts.length).toBe(2); // initial + one continuation retry
+	});
+
+	describe("same-run abort retry", () => {
+		test("first aborted → continuation prompt sent → end_turn on retry → run completes", async () => {
+			setAutoWorkConfig(repoCwd, { ...DEFAULT_AUTO_WORK_VALUES, enabled: true });
+			const task = createTask({ title: "Retry succeeds", cwd: repoCwd, priority: "P5", autoWork: true });
+			const handle = new FakeSessionHandle("sess_abort_retry_ok", null);
+			const cycle = runAutoWorkCycle(repoCwd, fakeBridge(handle), {
+				getSubscriptionUsage: async () => ({ available: true, weeklyPct: 5 }),
+				createPullRequest: stubCreatePullRequest,
+			});
+			await handle.subscriptionStarted;
+			handle.emit({ type: "turn_end", message: { stopReason: "aborted" } });
+			// Wait until the engine's retry loop has enqueued the continuation prompt.
+			await waitForPromptCount(handle, 2);
+			// Continuation turn completes successfully.
+			handle.emit({ type: "turn_end", message: { stopReason: "end_turn" } });
+			const result = await cycle;
+
+			expect(result.outcome).toBe("completed");
+			expect(handle.prompts.length).toBe(2); // initial + continuation
+			const run = listAutoWorkRuns({ taskId: task.id })[0];
+			expect(run?.status).toBe("completed");
+		});
+
+		test("two consecutive aborts exhaust retry budget: run fails and task routes to backlog", async () => {
+			setAutoWorkConfig(repoCwd, { ...DEFAULT_AUTO_WORK_VALUES, enabled: true });
+			const task = createTask({ title: "Retry exhausted", cwd: repoCwd, priority: "P5", autoWork: true });
+			const handle = new FakeSessionHandle("sess_abort_retry_fail", null);
+			const cycle = runAutoWorkCycle(repoCwd, fakeBridge(handle), {
+				getSubscriptionUsage: async () => ({ available: true, weeklyPct: 5 }),
+				createPullRequest: async () => { throw new Error("no PR on failed run"); },
+			});
+			await handle.subscriptionStarted;
+			handle.emit({ type: "turn_end", message: { stopReason: "aborted" } });
+			await waitForPromptCount(handle, 2);
+			handle.emit({ type: "turn_end", message: { stopReason: "aborted" } });
+			const result = await cycle;
+
+			expect(result.outcome).toBe("failed");
+			expect(handle.prompts.length).toBe(2); // initial + one retry
+			const run = listAutoWorkRuns({ taskId: task.id })[0];
+			expect(run?.status).toBe("failed");
+			// Task returns to backlog (retry budget not yet exhausted at the cross-cycle level).
+			expect(getTask(task.id)?.stateId).toBe("s_backlog");
+		});
 	});
 
 	test("fails a max_tokens terminal turn, preserving its stop reason without creating a PR", async () => {
@@ -2432,7 +2495,7 @@ describe("runAutoWorkCycle", () => {
 			createPullRequest: async () => { throw new Error("should not be called"); },
 		});
 		await handle.subscriptionStarted;
-		handle.emit({ type: "turn_end", message: { stopReason: "aborted" } });
+		handle.emit({ type: "turn_end", message: { stopReason: "error" } });
 		const result = await cycle;
 
 		expect(result.outcome).toBe("failed");
@@ -3252,7 +3315,7 @@ describe("runAutoWorkCycle token and pct recording (T-80)", () => {
 			},
 		});
 		await handle.subscriptionStarted;
-		handle.emit({ type: "turn_end", message: { stopReason: "aborted" } });
+		handle.emit({ type: "turn_end", message: { stopReason: "error" } });
 		const result = await cycle;
 
 		expect(result.outcome).toBe("failed");

@@ -806,6 +806,55 @@ describe("POST /auto-work/runs/:id/stop", () => {
 		expect(getAutoWorkRun(runId)?.status).toBe("failed");
 	});
 
+	test("200: stop route marks the run intentionally stopped so the live finalizer does not send a continuation retry", async () => {
+		const task = createTask({ title: "Stop prevents retry", cwd: "/tmp/wt-stop-no-retry" });
+		const runId = startAutoWorkRun({
+			taskId: task.id,
+			taskPriority: "P2",
+			sessionId: "sess-stop-no-retry",
+			worktreePath: "/tmp/wt-stop-no-retry",
+		});
+
+		let promptCalls = 0;
+		const subscribed = Promise.withResolvers<void>();
+		let terminalListener: EventListener | undefined;
+		const handle = {
+			subscribe(listener: EventListener) {
+				terminalListener = listener;
+				subscribed.resolve();
+				return () => {};
+			},
+			prompt() {
+				promptCalls++;
+				return new Promise<void>(() => {}); // never resolves on its own
+			},
+			async abort() {
+				terminalListener?.({ type: "turn_end", message: { stopReason: "aborted" } } as never);
+			},
+			async isStreamingNow() { return false; },
+			async dispose() {},
+			async snapshot() { return { messages: [] }; },
+		};
+		const app = buildAutoWorkRouter(fakeBridgeWithSession("sess-stop-no-retry", handle), fakeConfig(), {
+			createPullRequest: stubCreatePullRequest,
+			getSubscriptionUsage: async () => ({ available: true, weeklyPct: 5 }),
+		});
+
+		const triggerPromise = app.request("/auto-work/trigger", { method: "POST" });
+		await subscribed.promise;
+
+		// The stop route calls markRunIntentionallyStopped(runId) before abort(),
+		// so the finalizer receives the `aborted` event and settles without retry.
+		const stopRes = await app.request(`/auto-work/runs/${runId}/stop`, { method: "POST" });
+		expect(stopRes.status).toBe(200);
+
+		await triggerPromise;
+
+		expect(promptCalls).toBe(1); // initial prompt only, no continuation retry
+		expect(getAutoWorkRun(runId)?.status).toBe("failed");
+	});
+
+
 	test("500 when handle.abort() rejects on a genuinely live session, and the underlying finalizer still settles the run on its own", async () => {
 		const task = createTask({ title: "Abort rejects", cwd: "/tmp/wt-stop-abort-fails" });
 		const runId = startAutoWorkRun({
