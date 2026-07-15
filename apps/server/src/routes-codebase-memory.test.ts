@@ -9,6 +9,11 @@ import type { Config } from "./config.ts";
 import type { KbService } from "./kb-service.ts";
 import type { MarketplaceService } from "./marketplace-service.ts";
 import { buildRouter } from "./routes.ts";
+import {
+	CodebaseMemoryMcpDisabledError,
+	CodebaseMemoryMcpUnavailableError,
+} from "./codebase-memory-explorer.ts";
+import { buildCodebaseMemoryRouter } from "./routes-codebase-memory.ts";
 import type { RoutinesRunner } from "./routines-runner.ts";
 import type { SkillsService } from "./skills-service.ts";
 
@@ -103,5 +108,124 @@ describe("codebase-memory-mcp project toggle (T-111)", () => {
 			body: JSON.stringify({ enabled: "false" }),
 		});
 		expect(response.status).toBe(400);
+	});
+});
+
+describe("codebase-memory explorer routes (T-118)", () => {
+	const cwd = "/workspaces/alpha";
+	const overview = {
+		cwd,
+		state: "ready" as const,
+		tools: [{ name: "search_graph", inputSchema: { type: "object" } }],
+		catalog: [{ type: "text" as const, text: "alpha\n" }],
+	};
+
+	test("returns the bounded catalog supplied by the read-only explorer", async () => {
+		const calls: string[] = [];
+		const app = buildCodebaseMemoryRouter(
+			(candidate) => candidate === cwd,
+			{
+				async getOverview(candidate) {
+					calls.push(candidate);
+					return overview;
+				},
+				async query() {
+					throw new Error("not used");
+				},
+			},
+		);
+
+		const response = await app.request(`/workspace-mcp/codebase-memory/overview?cwd=${encodeURIComponent(cwd)}`);
+		expect(response.status).toBe(200);
+		expect(await response.json()).toEqual(overview);
+		expect(calls).toEqual([cwd]);
+	});
+
+	test("passes only a JSON-object query payload to the explorer", async () => {
+		const queries: Array<{ cwd: string; tool: string; arguments: Record<string, unknown> }> = [];
+		const app = buildCodebaseMemoryRouter(
+			(candidate) => candidate === cwd,
+			{
+				async getOverview() {
+					throw new Error("not used");
+				},
+				async query(queryCwd, request) {
+					queries.push({ cwd: queryCwd, ...request });
+					return { content: [{ type: "text", text: "match" }], isError: false };
+				},
+			},
+		);
+
+		const response = await app.request(`/workspace-mcp/codebase-memory/query?cwd=${encodeURIComponent(cwd)}`, {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ tool: "search_graph", arguments: { project: "alpha", name_pattern: "main" } }),
+		});
+		expect(response.status).toBe(200);
+		expect(await response.json()).toEqual({ content: [{ type: "text", text: "match" }], isError: false });
+		expect(queries).toEqual([{ cwd, tool: "search_graph", arguments: { project: "alpha", name_pattern: "main" } }]);
+
+		const invalid = await app.request(`/workspace-mcp/codebase-memory/query?cwd=${encodeURIComponent(cwd)}`, {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ tool: "search_graph", arguments: [] }),
+		});
+		expect(invalid.status).toBe(400);
+		expect(queries).toHaveLength(1);
+	});
+
+	test("reports a disabled integration without invoking MCP tools", async () => {
+		const app = buildCodebaseMemoryRouter(
+			(candidate) => candidate === cwd,
+			{
+				async getOverview() {
+					throw new CodebaseMemoryMcpDisabledError();
+				},
+				async query() {
+					throw new CodebaseMemoryMcpDisabledError();
+				},
+			},
+		);
+
+		const overviewResponse = await app.request(`/workspace-mcp/codebase-memory/overview?cwd=${encodeURIComponent(cwd)}`);
+		expect(overviewResponse.status).toBe(200);
+		expect(await overviewResponse.json()).toEqual({
+			cwd,
+			state: "disabled",
+			message: "Codebase Memory MCP is disabled for this project",
+			tools: [],
+			catalog: [],
+		});
+
+		const queryResponse = await app.request(`/workspace-mcp/codebase-memory/query?cwd=${encodeURIComponent(cwd)}`, {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ tool: "search_graph", arguments: {} }),
+		});
+		expect(queryResponse.status).toBe(409);
+	});
+
+	test("reports an unavailable MCP without falling back to an unbounded response", async () => {
+		const app = buildCodebaseMemoryRouter(
+			(candidate) => candidate === cwd,
+			{
+				async getOverview() {
+					throw new CodebaseMemoryMcpUnavailableError("MCP executable did not start");
+				},
+				async query() {
+					throw new CodebaseMemoryMcpUnavailableError("MCP executable did not start");
+				},
+			},
+		);
+
+		const overviewResponse = await app.request(`/workspace-mcp/codebase-memory/overview?cwd=${encodeURIComponent(cwd)}`);
+		expect(overviewResponse.status).toBe(200);
+		expect(await overviewResponse.json()).toEqual({
+			cwd,
+			state: "unavailable",
+			message: "MCP executable did not start",
+			tools: [],
+			catalog: [],
+		});
 	});
 });

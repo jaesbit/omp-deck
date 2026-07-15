@@ -1,9 +1,4 @@
-import * as os from "node:os";
-import * as path from "node:path";
-import { existsSync } from "node:fs";
-
-import { injectOmpExtensionCliRoots } from "@oh-my-pi/pi-coding-agent/discovery/omp-extension-roots";
-import { getCodebaseMemoryMcpExtensionPath } from "../codebase-memory-mcp.ts";
+import { prepareCodebaseMemoryMcpRuntime } from "../codebase-memory-mcp.ts";
 import {
 	createAgentSession,
 	ModelRegistry,
@@ -79,25 +74,7 @@ import type {
 	SlashDispatchResult,
 } from "./types.ts";
 
-let codebaseMemoryMcpRuntimePrepared = false;
 
-function prepareCodebaseMemoryMcpRuntime(): void {
-	if (codebaseMemoryMcpRuntimePrepared) return;
-	codebaseMemoryMcpRuntimePrepared = true;
-
-	injectOmpExtensionCliRoots([getCodebaseMemoryMcpExtensionPath()], os.homedir(), process.cwd());
-
-	const binDirs = [
-		path.resolve(import.meta.dir, "../node_modules/.bin"),
-		path.resolve(import.meta.dir, "../../node_modules/.bin"),
-		path.resolve(import.meta.dir, "../../../node_modules/.bin"),
-		path.resolve(import.meta.dir, "../../../../node_modules/.bin"),
-	].filter(existsSync);
-	if (binDirs.length > 0) {
-		const currentPath = process.env.PATH ?? "";
-		process.env.PATH = [...binDirs, currentPath].filter(Boolean).join(path.delimiter);
-	}
-}
 
 const log = logger("bridge:in-process");
 

@@ -276,6 +276,16 @@ export function ProjectConfigView() {
 										: "Loading…"}
 								</span>
 							</label>
+							{selectedCodebaseMemoryMcp?.enabled ? (
+								<Button
+									className="mt-3"
+									variant="ghost"
+									size="sm"
+									onClick={() => navigate(`/codebase-memory?cwd=${encodeURIComponent(selectedCwd)}`)}
+								>
+									Explore indexed memory →
+								</Button>
+							) : null}
 							<p className="mt-2 text-2xs text-ink-4">
 								The override is stored in <code>.omp/mcp.json</code> and applies after the next session restart.
 							</p>

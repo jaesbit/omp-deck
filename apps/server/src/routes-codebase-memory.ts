@@ -2,7 +2,13 @@ import { mkdir } from "node:fs/promises";
 import * as path from "node:path";
 
 import { Hono } from "hono";
-import type { CodebaseMemoryMcpStatus, SetCodebaseMemoryMcpRequest } from "@omp-deck/protocol";
+import type {
+	CodebaseMemoryOverview,
+	CodebaseMemoryQueryResult,
+	CodebaseMemoryMcpStatus,
+	QueryCodebaseMemoryRequest,
+	SetCodebaseMemoryMcpRequest,
+} from "@omp-deck/protocol";
 
 import {
 	getCodebaseMemoryMcpStatus,
@@ -11,7 +17,21 @@ import {
 	type ProjectMcpConfig,
 } from "./codebase-memory-mcp.ts";
 
-export function buildCodebaseMemoryRouter(isCwdAllowed: (cwd: string) => boolean): Hono {
+import {
+	CodebaseMemoryExplorer,
+	CodebaseMemoryMcpDisabledError,
+	CodebaseMemoryMcpUnavailableError,
+} from "./codebase-memory-explorer.ts";
+
+export interface CodebaseMemoryExplorerApi {
+	getOverview(cwd: string): Promise<CodebaseMemoryOverview>;
+	query(cwd: string, request: QueryCodebaseMemoryRequest): Promise<CodebaseMemoryQueryResult>;
+}
+
+export function buildCodebaseMemoryRouter(
+	isCwdAllowed: (cwd: string) => boolean,
+	explorer: CodebaseMemoryExplorerApi = new CodebaseMemoryExplorer(),
+): Hono {
 	const app = new Hono();
 
 	app.get("/workspace-mcp/codebase-memory", async (c) => {
@@ -25,6 +45,62 @@ export function buildCodebaseMemoryRouter(isCwdAllowed: (cwd: string) => boolean
 			return c.json(status);
 		} catch (error) {
 			return c.json({ error: `invalid project MCP config: ${String(error)}` }, 500);
+		}
+	});
+
+	app.get("/workspace-mcp/codebase-memory/overview", async (c) => {
+		const cwd = c.req.query("cwd")?.trim();
+		if (!cwd) return c.json({ error: "cwd query param is required" }, 400);
+		if (!isCwdAllowed(cwd)) return c.json({ error: "cwd is not an allowed workspace" }, 400);
+
+		try {
+			return c.json(await explorer.getOverview(cwd));
+		} catch (error) {
+			if (error instanceof CodebaseMemoryMcpDisabledError || error instanceof CodebaseMemoryMcpUnavailableError) {
+				const overview: CodebaseMemoryOverview = {
+					cwd,
+					state: error instanceof CodebaseMemoryMcpDisabledError ? "disabled" : "unavailable",
+					message: error.message,
+					tools: [],
+					catalog: [],
+				};
+				return c.json(overview);
+			}
+			return c.json({ error: `could not read Codebase Memory: ${String(error)}` }, 502);
+		}
+	});
+
+	app.post("/workspace-mcp/codebase-memory/query", async (c) => {
+		const cwd = c.req.query("cwd")?.trim();
+		if (!cwd) return c.json({ error: "cwd query param is required" }, 400);
+		if (!isCwdAllowed(cwd)) return c.json({ error: "cwd is not an allowed workspace" }, 400);
+
+		let body: QueryCodebaseMemoryRequest;
+		try {
+			body = (await c.req.json()) as QueryCodebaseMemoryRequest;
+		} catch {
+			return c.json({ error: "invalid json body" }, 400);
+		}
+		if (
+			typeof body.tool !== "string" ||
+			!body.arguments ||
+			typeof body.arguments !== "object" ||
+			Array.isArray(body.arguments)
+		) {
+			return c.json({ error: "tool must be a string and arguments must be an object" }, 400);
+		}
+
+		try {
+			const result: CodebaseMemoryQueryResult = await explorer.query(cwd, body);
+			return c.json(result);
+		} catch (error) {
+			if (error instanceof CodebaseMemoryMcpDisabledError) {
+				return c.json({ error: error.message }, 409);
+			}
+			if (error instanceof CodebaseMemoryMcpUnavailableError) {
+				return c.json({ error: error.message }, 503);
+			}
+			return c.json({ error: `could not query Codebase Memory: ${String(error)}` }, 502);
 		}
 	});
 

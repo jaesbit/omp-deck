@@ -10,6 +10,8 @@ import type {
 	CreateSessionRequest,
 	CreateSessionResponse,
 	CodebaseMemoryMcpStatus,
+	CodebaseMemoryOverview,
+	CodebaseMemoryQueryResult,
 	DeckBaseUrlResponse,
 	DelegationArtifactResponse,
 	DiscardDelegationArtifactRequest,
@@ -29,6 +31,7 @@ import type {
 	ModelRef,
 	PatchDelegationSettingsRequest,
 	PatchDelegationSettingsResponse,
+	QueryCodebaseMemoryRequest,
 	RewriteTaskRequest,
 	RewriteTaskResponse,
 	SessionHistoryResponse,
@@ -167,6 +170,15 @@ export const api = {
 		return request<CodebaseMemoryMcpStatus>(`/workspace-mcp/codebase-memory?cwd=${encodeURIComponent(cwd)}`, {
 			method: "PUT",
 			body: JSON.stringify({ enabled }),
+		});
+	},
+	getCodebaseMemoryOverview(cwd: string): Promise<CodebaseMemoryOverview> {
+		return request<CodebaseMemoryOverview>(`/workspace-mcp/codebase-memory/overview?cwd=${encodeURIComponent(cwd)}`);
+	},
+	queryCodebaseMemory(cwd: string, body: QueryCodebaseMemoryRequest): Promise<CodebaseMemoryQueryResult> {
+		return request<CodebaseMemoryQueryResult>(`/workspace-mcp/codebase-memory/query?cwd=${encodeURIComponent(cwd)}`, {
+			method: "POST",
+			body: JSON.stringify(body),
 		});
 	},
 	getDeckBaseUrl(): Promise<DeckBaseUrlResponse> {

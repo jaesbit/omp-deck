@@ -139,6 +139,37 @@ export interface SetCodebaseMemoryMcpRequest {
 	enabled: boolean;
 }
 
+export interface CodebaseMemoryTool {
+	name: string;
+	description?: string;
+	inputSchema: Record<string, unknown>;
+}
+
+export interface CodebaseMemoryContentBlock {
+	type: "text" | "resource";
+	text?: string;
+	uri?: string;
+	mimeType?: string;
+}
+
+export interface CodebaseMemoryOverview {
+	cwd: string;
+	state: "ready" | "disabled" | "unavailable";
+	message?: string;
+	tools: CodebaseMemoryTool[];
+	catalog: CodebaseMemoryContentBlock[];
+}
+
+export interface QueryCodebaseMemoryRequest {
+	tool: string;
+	arguments: Record<string, unknown>;
+}
+
+export interface CodebaseMemoryQueryResult {
+	content: CodebaseMemoryContentBlock[];
+	isError: boolean;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Settings / managed environment
 // ─────────────────────────────────────────────────────────────────────────────
