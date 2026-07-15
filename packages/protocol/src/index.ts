@@ -846,6 +846,8 @@ export interface SessionUsageSummary {
 	id: string;
 	path: string;
 	cwd: string;
+	/** Human-readable label for the workspace (account), derived from cwd the same way as WorkspaceEntry.label. */
+	accountLabel: string;
 	title?: string;
 	updatedAt: string;
 	/** Sum of `usage.totalTokens` across every assistant message in the transcript. */
@@ -853,6 +855,12 @@ export interface SessionUsageSummary {
 	/** Sum of `usage.cost.total` (USD) across every assistant message, when the transcript recorded cost. */
 	costUsd: number;
 	messageCount: number;
+	/**
+	 * AI provider for this session, derived from the first `model_change` entry in the transcript
+	 * (format `"provider/modelId"`) or from the `provider` field on the first assistant message.
+	 * Absent when the transcript records no model information.
+	 */
+	provider?: string;
 }
 
 export interface ListSessionUsageResponse {

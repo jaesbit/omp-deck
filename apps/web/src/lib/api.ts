@@ -24,6 +24,7 @@ import type {
 	ListModelsResponse,
 	ListSessionsResponse,
 	ListSessionMonitorResponse,
+	ListSessionUsageResponse,
 	ListSlashCommandsResponse,
 	ListTasksResponse,
 	ListWorkspacePreferencesResponse,
@@ -258,6 +259,9 @@ export const api = {
 	},
 	getAccountSpendSummary(): Promise<SpendSummaryResponse> {
 		return request<SpendSummaryResponse>(`/usage/spend`);
+	},
+	listSessionUsage(limit = 20): Promise<ListSessionUsageResponse> {
+		return request<ListSessionUsageResponse>(`/usage/sessions?limit=${limit}`);
 	},
 	listTasks(): Promise<ListTasksResponse> {
 		return request<ListTasksResponse>("/tasks");
