@@ -68,6 +68,7 @@ import { getSubscriptionUsage } from "../usage-subscription.ts";
 import { estimateTaskCostPct } from "./estimate.ts";
 import { broadcastBus } from "../broadcast-bus.ts";
 import { getModelCatalogOverlay } from "../model-catalog-overlay.ts";
+import { assertNoSecretsInDiff, assertNoSensitiveContent } from "./pr-content-guard.ts";
 
 const log = logger("auto-work:engine");
 
@@ -906,8 +907,7 @@ async function settleAutoWorkRun(params: {
 	try {
 		const pr = await createPullRequest({
 			cwd: worktreePath,
-			title: `feat: T-${task.displayId} ${task.title}`,
-			body: `Auto Work completed T-${task.displayId}: ${task.title}\n\nSession: ${sessionUrl}`,
+			...buildAutoWorkPrMessage(task, session.sessionId),
 		});
 		prNumber = pr.number;
 		prStatus = pr.prStatus;
@@ -1518,6 +1518,22 @@ export interface CreatePullRequestResult {
 }
 
 /**
+ * Builds the PR title/body Auto Work sends to `gh pr create` (T-119).
+ * Deliberately does NOT embed the deck session URL (or any other link) — a
+ * public GitHub PR description is not the place for a link into the deck's
+ * own (often `localhost`, or otherwise internal) UI. The session stays
+ * traceable through its short id instead; the full clickable link lives
+ * only in the task's kanban-card note (`completeRunNote` below), which
+ * never leaves the deck.
+ */
+export function buildAutoWorkPrMessage(task: Pick<Task, "displayId" | "title">, sessionId: string): { title: string; body: string } {
+	return {
+		title: `feat: T-${task.displayId} ${task.title}`,
+		body: `Auto Work completed T-${task.displayId}: ${task.title}\n\nSession: ${sessionId.slice(0, 8)}`,
+	};
+}
+
+/**
  * Resolves Auto Work's base branch consistently for worktree creation, commit
  * detection, and PR creation. A valid matching `kb://projects/` policy wins.
  * Without one, use the remote symbolic HEAD, then the local origin/HEAD ref.
@@ -1657,17 +1673,50 @@ async function findExistingPullRequest(cwd: string): Promise<{ url: string; numb
 }
 
 /**
+ * The diff the branch would introduce against its resolved base — the same
+ * input a GitHub PR review would show. Scoped to `assertNoSecretsInDiff`
+ * (T-119): scanned for credential-shaped ADDED content before the branch is
+ * pushed or a PR is opened.
+ */
+async function diffAgainstBase(cwd: string, baseBranch: string): Promise<string> {
+	const proc = Bun.spawn(
+		["git", "diff", `origin/${baseBranch}...HEAD`],
+		{ cwd, stdin: "ignore", stdout: "pipe", stderr: "pipe", windowsHide: true },
+	);
+	const [stdout, stderr, exitCode] = await Promise.all([
+		new Response(proc.stdout).text(),
+		new Response(proc.stderr).text(),
+		proc.exited,
+	]);
+	if (exitCode !== 0) {
+		// Fails closed — an unreadable diff must not silently skip the secret
+		// scan, so this surfaces as an actionable PR-creation failure instead.
+		throw new Error(`git diff origin/${baseBranch}...HEAD failed (exit ${exitCode}): ${stderr.trim()}`);
+	}
+	return stdout;
+}
+
+/**
  * `gh pr create --base <base-branch> --title <title> --body <body>`, run from
  * the worktree directory so `gh` infers the PR head from the checked-out task
  * branch. The same project-aware base resolver used by worktree creation and
  * commit detection also covers explicit PR retries through this function.
  */
 export async function createPullRequestViaGh(params: CreatePullRequestParams): Promise<CreatePullRequestResult> {
-	// Push first so the head ref exists on origin even when the agent didn't
-	// push during its turn. Idempotent — "Everything up-to-date" is success.
-	await gitPushSetUpstream(params.cwd);
+	// Message guard first — cheap, synchronous, and 100% engine-controlled
+	// input, so there's no reason to pay for a diff/push before catching it.
+	assertNoSensitiveContent("PR title", params.title);
+	assertNoSensitiveContent("PR body", params.body);
 
 	const baseBranch = await resolveBaseBranch(params.cwd);
+	// Diff guard before the push below — nothing the branch adds reaches
+	// `origin` (or a public PR) once this rejects (T-119).
+	assertNoSecretsInDiff(await diffAgainstBase(params.cwd, baseBranch));
+
+	// Push only after both guards pass. Idempotent — "Everything up-to-date"
+	// is success — so this stays safe to call twice on retry.
+	await gitPushSetUpstream(params.cwd);
+
 	let proc: Subprocess<"ignore", "pipe", "pipe">;
 	try {
 		proc = Bun.spawn(

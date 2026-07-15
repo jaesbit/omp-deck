@@ -46,9 +46,9 @@ import {
 	reconcileInactiveAutoWorkRuns,
 	runGlobalAutoWorkCycle,
 	createPullRequestViaGh,
+	buildAutoWorkPrMessage,
 } from "./auto-work/engine.ts";
 import type { RunAutoWorkCycleOptions } from "./auto-work/engine.ts";
-import { buildSessionUrl } from "./deck-links.ts";
 import { broadcastBus } from "./broadcast-bus.ts";
 import { getScheduleStatus, updateGlobalSchedule, recordManualTrigger } from "./auto-work/scheduler.ts";
 import { logger } from "./log.ts";
@@ -225,15 +225,11 @@ export function buildAutoWorkRouter(bridge: AgentBridge, config: Config, cycleOp
 		const task = getTask(run.taskId);
 		if (!task) return c.json({ error: "task not found for run" }, 404);
 
-		const deckBaseUrl = getServerDeckBaseUrl(config).deckBaseUrl;
-		const sessionUrl = buildSessionUrl(deckBaseUrl, run.sessionId);
-
 		try {
 			const createPr = cycleOptions.createPullRequest ?? createPullRequestViaGh;
 			const pr = await createPr({
 				cwd: run.worktreePath,
-				title: `feat: T-${task.displayId} ${task.title}`,
-				body: `Auto Work completed T-${task.displayId}: ${task.title}\n\nSession: ${sessionUrl}`,
+				...buildAutoWorkPrMessage(task, run.sessionId),
 			});
 
 			completeAutoWorkRun(runId, {
