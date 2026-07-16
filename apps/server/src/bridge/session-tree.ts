@@ -110,6 +110,9 @@ function toWireEntry(entry: SessionEntry, label: string | undefined): SessionTre
 		timestamp: entry.timestamp,
 		preview,
 		...(label ? { label } : {}),
+		// T-35: carry the injected rule names so the deck can explain a TTSR
+		// interruption against the current rule inventory, not just preview text.
+		...(entry.type === "ttsr_injection" ? { injectedRules: entry.injectedRules } : {}),
 	};
 }
 

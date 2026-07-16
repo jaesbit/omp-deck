@@ -1294,6 +1294,7 @@ function stopReasonFromEvent(event: { message?: unknown; messages?: unknown; sto
 	return undefined;
 }
 
+
 function terminalOutcomeFromEvent(event: unknown): AutoWorkTerminalResult | undefined {
 	if (!event || typeof event !== "object" || !("type" in event)) return undefined;
 	if (event.type !== "turn_end" && event.type !== "agent_end") return undefined;
@@ -1303,6 +1304,22 @@ function terminalOutcomeFromEvent(event: unknown): AutoWorkTerminalResult | unde
 	// An intermediate `turn_end` inside a multi-tool-call task — the agent is
 	// still working towards `agent_end`, not actually done yet.
 	if (event.type === "turn_end" && stopReason && TOOL_CONTINUATION_STOP_REASONS[stopReason]) return undefined;
+	if (stopReason === "aborted") {
+		// TTSR deliberately aborts a stream, injects the matched rule, and retries
+		// it within the same agent turn. Its local abort reason is propagated as
+		// `errorMessage`, so wait for the retry's actual terminal outcome.
+		const candidates = [
+			event,
+			"message" in event ? event.message : undefined,
+			...("messages" in event && Array.isArray(event.messages) ? event.messages : []),
+		];
+		const ttsrInterruption = candidates.some((candidate) => {
+			if (!candidate || typeof candidate !== "object" || !("errorMessage" in candidate)) return false;
+			return typeof candidate.errorMessage === "string" && candidate.errorMessage.startsWith("TTSR matched rule");
+		});
+		if (ttsrInterruption) return undefined;
+	}
+
 
 	if (!stopReason) return { outcome: "failed", failureReason: "agent turn ended without a stop reason" };
 	if (stopReason === "end_turn" || stopReason === "stop") return { outcome: "completed" };

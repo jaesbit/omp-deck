@@ -14,6 +14,7 @@ import {
 	horizontalListSortingStrategy,
 } from "@dnd-kit/sortable";
 import { Archive, ArrowDownWideNarrow, Settings2 } from "lucide-react";
+import { DirBrowserModal } from "@/components/DirBrowserModal";
 
 import type { ModelRef, Task, TaskDifficulty, TaskPriority, TaskState } from "@omp-deck/protocol";
 
@@ -57,6 +58,7 @@ export function TasksView() {
 	>();
 	const [showStateConfig, setShowStateConfig] = useState(false);
 	const [showArchivedModal, setShowArchivedModal] = useState(false);
+	const [cwdPickerTask, setCwdPickerTask] = useState<Task | null>(null);
 	const { colors: projectColors, setColor: setProjectColor } = useProjectColors();
 
 	const sensors = useSensors(
@@ -290,6 +292,18 @@ export function TasksView() {
 		await refresh();
 	}
 
+	async function pickCwd(path: string): Promise<void> {
+		if (!cwdPickerTask) return;
+		const taskId = cwdPickerTask.id;
+		setCwdPickerTask(null);
+		try {
+			const updated = await tasksApi.update(taskId, { cwd: path });
+			setTasks((prev) => prev.map((t) => (t.id === updated.id ? updated : t)));
+		} catch (e) {
+			setError(String(e));
+		}
+	}
+
 	function openInChat(task: Task): void {
 		setLaunchTarget({ task, draft: "full" });
 	}
@@ -451,6 +465,7 @@ export function TasksView() {
 												projectColors={projectColors}
 												onCreate={(stateId, title) => void onCreate(stateId, title)}
 												onOpen={(t) => setOpenTask(t)}
+												onPickCwd={(t) => setCwdPickerTask(t)}
 												onRenameRequest={() => {
 													setShowStateConfig(true);
 													setInspectorOpen(true);
@@ -550,6 +565,12 @@ export function TasksView() {
 				onClose={() => setShowArchivedModal(false)}
 				states={states}
 				onRestored={() => void refresh()}
+			/>
+			<DirBrowserModal
+				open={cwdPickerTask !== null}
+				initialPath={cwdPickerTask?.cwd ?? undefined}
+				onClose={() => setCwdPickerTask(null)}
+				onSelect={(path) => void pickCwd(path)}
 			/>
 		</>
 	);
