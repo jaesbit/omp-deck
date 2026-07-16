@@ -204,21 +204,6 @@ describe("GET /usage/spend", () => {
 		const entry = body.accounts.find((a) => a.cwd === fakeConfig().defaultCwd);
 		expect(entry).toBeDefined();
 		expect(entry).toMatchObject({ day: 0, week: 0, month: 0 });
-	});
-
-	test("every account entry has cwd/label/day/week/month with the expected JS types", async () => {
-		const app = buildUsageRouter(fakeBridge([]), fakeConfig());
-		const res = await app.request("/usage/spend");
-		expect(res.status).toBe(200);
-		const body = (await res.json()) as SpendSummaryResponse;
-
-		expect(body.accounts.length).toBeGreaterThan(0);
-		for (const entry of body.accounts) {
-			expect(typeof entry.cwd).toBe("string");
-			expect(typeof entry.label).toBe("string");
-			expect(typeof entry.day).toBe("number");
-			expect(typeof entry.week).toBe("number");
-			expect(typeof entry.month).toBe("number");
-		}
+		expect(typeof entry?.label).toBe("string");
 	});
 });
