@@ -17,10 +17,10 @@ omp-deck ya implementa Karpathy-style llm-wiki sobre cualquier directorio de Mar
 frontmatter YAML y `[[wikilinks]]`. Un vault de Obsidian es compatible en ≥95% con el
 formato que `KbService` ya consume: misma sintaxis de wikilinks, mismo esquema de
 frontmatter, mismo YAML. La integración más directa — apuntar `OMP_DECK_KB_ROOT` al vault —
-requiere añadir `.obsidian` a la lista de exclusión y cero código adicional. Las únicas
-funciones de Obsidian que hoy no se indexan (tags inline, aliases, block refs) son mejoras
-no bloqueantes. **Recomendación: implementar el montaje directo (Opción A), con una tarea de
-seguimiento pequeña para las tres deltas de parsing.**
+**no requiere cambios de código**; `walk()` sólo indexa `.md` y los ficheros JSON de
+`.obsidian/` son invisibles para el índice. Las únicas funciones de Obsidian que hoy no
+se indexan (tags inline, aliases, block refs) son mejoras no bloqueantes.
+**Recomendación: implementar el montaje directo (Opción A).**
 
 ---
 
@@ -69,12 +69,12 @@ El startup **no tiene health gate**, y tiene un riesgo de enmascaramiento activo
 | `[[target|alias]]` labels | ✅ soportado | ✅ idéntico | Compatible |
 | `frontmatter.tags: [...]` | ✅ indexado | ✅ idéntico | Compatible |
 | Archivos `.md` en árbol | ✅ walk recursivo | ✅ idéntico | Compatible |
-| `.obsidian/` config dir | ❌ NO en SKIP_DIR_NAMES | ✅ siempre presente | **Gap — 1 línea** |
+| `.obsidian/` config dir | No en `SKIP_DIR_NAMES`, pero `walk()` ignora todo lo que no sea `.md` | ✅ siempre presente (JSON) | Higiene recomendable — no bloqueante. Aparece como dir vacío en tree UI; añadirlo a `SKIP_DIR_NAMES` lo oculta |
 | Tags inline `#tag` | ❌ no indexados | ✅ usados frecuentemente | Delta (nice-to-have) |
 | `aliases:` frontmatter | ❌ ignorado por KbService | ✅ Obsidian los usa para resolución | Delta (nice-to-have) |
-| Block refs `[[file#^blockid]]` | ❌ produce wikilink unresolved | ✅ referencia a bloque | Delta (graceful: incrementa `unresolvedCount`) |
-| Archivos adjuntos (PNG, PDF…) | ✅ walk solo coge `.md` | ✅ carpeta `Assets/` | Compatible (ignorados) |
-| `![[embed]]` | Regex extrae `[[embed]]` del prefijo `!` | ✅ embeds de Obsidian | Semi-gap: procesado como wikilink, `!` queda en texto |
+| Block refs `[[file#^blockid]]` | ❌ produce wikilink unresolved | ✅ referencia a bloque | Delta graceful: incrementa `unresolvedCount` en logs |
+| Archivos adjuntos (PNG, PDF…) | `walk()` ignora todo lo que no sea `.md` | ✅ carpeta `Assets/` | Compatible (ignorados) |
+| `![[embed]]` | Regex extrae `[[embed]]` del prefijo `!` | ✅ embeds de Obsidian | Semi-gap: procesado como wikilink ordinario, `!` queda en texto |
 
 ---
 
@@ -82,35 +82,36 @@ El startup **no tiene health gate**, y tiene un riesgo de enmascaramiento activo
 
 ### Opción A — Montaje directo del vault (recomendada)
 
-Apuntar `OMP_DECK_KB_ROOT=/ruta/al/vault/obsidian` y añadir `.obsidian` a `SKIP_DIR_NAMES`.
+Apuntar `OMP_DECK_KB_ROOT=/ruta/al/vault/obsidian`. **Sin cambios de código.**
+`walk()` sólo indexa `.md`; los ficheros JSON de `.obsidian/` son invisibles para el índice.
 
-**Cambios de código necesarios:**
-- `kb-service.ts`: añadir `".obsidian"` y `".trash"` a `SKIP_DIR_NAMES` — 1 línea.
-- `index.ts`: antes de `seedKbTemplates`, comprobar si el root ya contiene contenido
-  del usuario (`.obsidian/` presente o `.md` pre-existentes) y omitir el seed en ese
-  caso — evita el riesgo de enmascaramiento descrito arriba.
+**Cambio de higiene recomendado (no requisito funcional):**
+Añadir `".obsidian"` y `".trash"` a `SKIP_DIR_NAMES` en `kb-service.ts` para que no
+aparezcan como directorios vacíos en el tree UI. No afecta al índice de ficheros.
 
 **Pros:**
 - Cero latencia. Single source of truth. Watcher ya existente invalida el índice.
-- Esfuerzo mínimo: 2–3 líneas de código + var de entorno.
+- Esfuerzo mínimo: sólo var de entorno.
 
 **Contras:**
 - Tags inline `#tag` no se indexan hasta implementar parser adicional.
-- Aliases de Obsidian no se usan para wikilink resolution.
+- Aliases de Obsidian no se usan para wikilink resolution; links que Obsidian resuelve
+  por alias quedarán como `unresolved` en el grafo.
 - Block refs generan ruido de `unresolvedCount` en logs.
 
-**Esfuerzo:** bajo. **Mantenimiento:** mínimo. **Frescura:** inmediata.
+**Esfuerzo:** mínimo (config). **Mantenimiento:** mínimo. **Frescura:** inmediata.
 
 ---
 
 ### Opción B — Script de sync periódico (patrón `kb_sync.py`)
 
-Copia y normaliza el vault Obsidian → `~/kb` en cron o pre-start hook.
+Copia y normaliza el vault Obsidian → `~/kb` en cron o pre-start hook, transformando
+inline tags → frontmatter, expandiendo aliases, descartando block refs.
 
 **Pros:** Puede resolver todas las deltas de parsing. Desacopla el vault del deck.
 
-**Contras:** Latencia de sync. Dual source of truth. Mantenimiento del script. Primer
-sync lento en vaults grandes.
+**Contras:** Latencia de sync. Dual source of truth (editar desde el cockpit no
+se refleja en Obsidian). Mantenimiento del script. Primer sync lento en vaults grandes.
 
 **Esfuerzo:** medio. **Mantenimiento:** alto. **Frescura:** con lag.
 
@@ -131,56 +132,64 @@ Implementación más compleja.
 
 ## Recomendación
 
-**Implementar Opción A (montaje directo).**
-
-El único gap bloqueante es `.obsidian/` en la lista de exclusión (1 línea). El riesgo
-principal es el enmascaramiento de `seedKbTemplates` ante un path incorrecto, resoluble
-con una comprobación de 5 líneas. El resto son deltas deferibles. Las Opciones B y C
-añaden complejidad operacional sin beneficio material.
+**Implementar Opción A (montaje directo).** No se necesita código nuevo para que el vault
+funcione: `walk()` sólo indexa `.md` y el frontmatter YAML de Obsidian es directamente
+compatible. El riesgo principal es el enmascaramiento de `seedKbTemplates` ante un path
+incorrecto, resoluble con una comprobación de 5 líneas. Añadir `.obsidian` a
+`SKIP_DIR_NAMES` es higiene recomendable, no prerequisito. Las Opciones B y C añaden
+complejidad operacional sin beneficio material.
 
 ---
 
 ## Riesgos y preguntas abiertas
 
-1. **`seedKbTemplates` ante path incorrecto**: si `OMP_DECK_KB_ROOT` está mal, el
-   servidor crea el directorio y siembra plantillas, enmascarando la misconfiguration.
-2. **Escritura bidireccional concurrente**: last-write-wins. Riesgo bajo en uso típico.
+1. **`seedKbTemplates` ante path incorrecto**: si `OMP_DECK_KB_ROOT` está mal (typo, path
+   sin montar), el servidor crea el directorio y siembra plantillas, enmascarando la
+   misconfiguration. El usuario sólo lo descubre cuando ve que sus notas no están.
+2. **Escritura bidireccional concurrente**: last-write-wins si el usuario edita el mismo
+   fichero desde el cockpit y Obsidian simultáneamente. Riesgo bajo en uso típico.
 3. **Obsidian Sync / iCloud**: ficheros de conflicto aparecerán en el árbol del cockpit.
-   Cubiertos por `OMP_DECK_KB_EXCLUDE_DIRS` si se nombran.
+   Cubiertos por `OMP_DECK_KB_EXCLUDE_DIRS` si se nombran explícitamente.
 4. **Tags inline**: `#tag` en cuerpo no se indexan. ¿Bloqueante para el caso concreto?
-5. **Aliases de wikilinks**: ¿cuántos links dependen de resolución por alias en el vault?
+5. **Aliases de wikilinks**: ¿cuántos links en el vault dependen de resolución por alias?
+   Si es alto, Opción A produce un grafo con muchos unresolved.
 
 ---
 
 ## Prerrequisitos y siguientes pasos
 
-### Prerrequisitos
+### Prerrequisitos antes de implementar
 
 - [ ] Confirmar ruta del vault Obsidian objetivo (`OMP_DECK_KB_ROOT=?`).
 - [ ] Verificar que el vault ya existe en esa ruta antes de arrancar el servidor.
 - [ ] Medir porcentaje de tags inline vs frontmatter tags en el vault real.
 - [ ] Decidir si aliases son blocking o deferrable.
-- [ ] Verificar si Obsidian Sync está activo.
+- [ ] Verificar si Obsidian Sync está activo (añade riesgo de conflictos).
 
 ### Pasos accionables (Opción A)
 
-1. **T-nueva (bajo, ~30 min)**: Añadir `".obsidian"` y `".trash"` a `SKIP_DIR_NAMES`
-   en `kb-service.ts`. Documentar `OMP_DECK_KB_EXCLUDE_DIRS` en `docs/configuration.md`.
+1. **Configurar** (inmediato): Setear `OMP_DECK_KB_ROOT=/ruta/vault` en el entorno
+   de arranque (systemd unit, `.env`, etc.).
 2. **T-nueva (bajo, ~30 min)**: Guard en `seedKbTemplates` — omitir seed si el root
-   apunta a un vault externo (presencia de `.obsidian/` o `.md` pre-existentes).
+   ya contiene contenido ajeno al deck (presencia de `.obsidian/` o `.md` pre-existentes),
+   para evitar el riesgo de enmascaramiento de misconfiguration.
 3. **T-nueva (bajo, ~15 min)**: Log ERROR en `index.ts` si el root configurado no
-   existe tras el seed (actualmente sólo `log.warn` en el watcher).
-4. **Configurar**: Setear `OMP_DECK_KB_ROOT=/ruta/vault` en el entorno de arranque.
-5. **T-nueva (medio, deferrable, ~2–4h)**: Parser de tags inline `#tag`.
+   existe justo después del seed (actualmente sólo `log.warn` en el watcher).
+4. **T-nueva (bajo, ~30 min, higiene)**: Añadir `".obsidian"` y `".trash"` a
+   `SKIP_DIR_NAMES` en `kb-service.ts` para limpiar el tree UI. No es requisito funcional.
+5. **T-nueva (medio, deferrable, ~2–4h)**: Parser de tags inline `#tag` en
+   `kb-service.ts` para indexar tags de cuerpo además de frontmatter.
 6. **T-nueva (medio, deferrable, ~3–5h)**: Soporte de `aliases:` frontmatter en
-   resolución de wikilinks.
+   resolución de wikilinks (leer array `aliases` en `buildIndex`, añadir a `byStem`).
 
-### Estimación core (pasos 1–4)
+### Estimación core (pasos 1–3, requisitos funcionales)
 
 | Tarea | Esfuerzo |
 |-------|----------|
-| SKIP_DIR_NAMES + docs | 30 min |
+| Config entorno | 5 min |
 | Guard en seedKbTemplates | 30 min |
 | Log ERROR startup | 15 min |
-| Config entorno | 5 min |
-| **Total** | **~80 min** |
+| **Total** | **~50 min** |
+| SKIP_DIR_NAMES (higiene, opcional) | +30 min |
+| Tags inline (deferrable) | +2–4 h |
+| Aliases (deferrable) | +3–5 h |
