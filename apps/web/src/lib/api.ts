@@ -18,6 +18,22 @@ import type {
 	DiscardDelegationArtifactRequest,
 	DiscardDelegationArtifactResponse,
 	GetDelegationSettingsResponse,
+	CreateHindsightMentalModelRequest,
+	CreateHindsightMentalModelResponse,
+	DeleteHindsightDocumentResponse,
+	DeleteHindsightMentalModelResponse,
+	GetMemorySettingsResponse,
+	HindsightDocument,
+	HindsightListDocumentsResponse,
+	HindsightListMemoriesResponse,
+	HindsightRecallRequest,
+	HindsightRecallResponse,
+	ListHindsightMentalModelsResponse,
+	MemoryScopeStatus,
+	PatchMemorySettingsRequest,
+	PatchMemorySettingsResponse,
+	RefreshHindsightMentalModelResponse,
+	UpdateHindsightDocumentRequest,
 	GetSessionHandoffSuccessorResponse,
 	InternalTaskModelResponse,
 	ListAutoWorkRunsResponse,
@@ -337,5 +353,69 @@ export const api = {
 			method: "POST",
 			body: JSON.stringify(body),
 		});
+	},
+	getMemorySettings(): Promise<GetMemorySettingsResponse> {
+		return request<GetMemorySettingsResponse>("/memory/settings");
+	},
+	patchMemorySettings(body: PatchMemorySettingsRequest): Promise<PatchMemorySettingsResponse> {
+		return request<PatchMemorySettingsResponse>("/memory/settings", {
+			method: "PATCH",
+			body: JSON.stringify(body),
+		});
+	},
+	getMemoryScope(cwd: string): Promise<MemoryScopeStatus> {
+		return request<MemoryScopeStatus>(`/memory/scope?cwd=${encodeURIComponent(cwd)}`);
+	},
+	listHindsightMemories(cwd: string, params: { q?: string; type?: string; limit?: number; offset?: number } = {}): Promise<HindsightListMemoriesResponse> {
+		const q = new URLSearchParams({ cwd });
+		if (params.q) q.set("q", params.q);
+		if (params.type) q.set("type", params.type);
+		if (params.limit !== undefined) q.set("limit", String(params.limit));
+		if (params.offset !== undefined) q.set("offset", String(params.offset));
+		return request<HindsightListMemoriesResponse>(`/memory/hindsight/memories?${q.toString()}`);
+	},
+	recallHindsightMemory(cwd: string, body: HindsightRecallRequest): Promise<HindsightRecallResponse> {
+		return request<HindsightRecallResponse>(`/memory/hindsight/recall?cwd=${encodeURIComponent(cwd)}`, {
+			method: "POST",
+			body: JSON.stringify(body),
+		});
+	},
+	listHindsightDocuments(cwd: string, params: { limit?: number; offset?: number } = {}): Promise<HindsightListDocumentsResponse> {
+		const q = new URLSearchParams({ cwd });
+		if (params.limit !== undefined) q.set("limit", String(params.limit));
+		if (params.offset !== undefined) q.set("offset", String(params.offset));
+		return request<HindsightListDocumentsResponse>(`/memory/hindsight/documents?${q.toString()}`);
+	},
+	updateHindsightDocument(cwd: string, documentId: string, body: UpdateHindsightDocumentRequest): Promise<HindsightDocument> {
+		return request<HindsightDocument>(`/memory/hindsight/documents/${encodeURIComponent(documentId)}?cwd=${encodeURIComponent(cwd)}`, {
+			method: "PATCH",
+			body: JSON.stringify(body),
+		});
+	},
+	deleteHindsightDocument(cwd: string, documentId: string): Promise<DeleteHindsightDocumentResponse> {
+		return request<DeleteHindsightDocumentResponse>(`/memory/hindsight/documents/${encodeURIComponent(documentId)}?cwd=${encodeURIComponent(cwd)}`, {
+			method: "DELETE",
+		});
+	},
+	listHindsightMentalModels(cwd: string): Promise<ListHindsightMentalModelsResponse> {
+		return request<ListHindsightMentalModelsResponse>(`/memory/hindsight/mental-models?cwd=${encodeURIComponent(cwd)}`);
+	},
+	createHindsightMentalModel(cwd: string, body: CreateHindsightMentalModelRequest): Promise<CreateHindsightMentalModelResponse> {
+		return request<CreateHindsightMentalModelResponse>(`/memory/hindsight/mental-models?cwd=${encodeURIComponent(cwd)}`, {
+			method: "POST",
+			body: JSON.stringify(body),
+		});
+	},
+	refreshHindsightMentalModel(cwd: string, mentalModelId: string): Promise<RefreshHindsightMentalModelResponse> {
+		return request<RefreshHindsightMentalModelResponse>(
+			`/memory/hindsight/mental-models/${encodeURIComponent(mentalModelId)}/refresh?cwd=${encodeURIComponent(cwd)}`,
+			{ method: "POST" },
+		);
+	},
+	deleteHindsightMentalModel(cwd: string, mentalModelId: string): Promise<DeleteHindsightMentalModelResponse> {
+		return request<DeleteHindsightMentalModelResponse>(
+			`/memory/hindsight/mental-models/${encodeURIComponent(mentalModelId)}?cwd=${encodeURIComponent(cwd)}`,
+			{ method: "DELETE" },
+		);
 	},
 };
