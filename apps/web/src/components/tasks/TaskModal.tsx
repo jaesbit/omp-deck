@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Archive, Bot, CheckCircle2, Circle, Link2, MessageSquarePlus, RotateCcw, Trash2, Wand2, X, Zap } from "lucide-react";
+import { Archive, Bot, CheckCircle2, Circle, FolderOpen, Link2, MessageSquarePlus, RotateCcw, Trash2, Wand2, X, Zap } from "lucide-react";
 import type { Task, TaskDifficulty, TaskPriority, TaskState } from "@omp-deck/protocol";
 
 import { MarkdownEdit } from "@/components/MarkdownEdit";
@@ -7,6 +7,7 @@ import { Modal } from "@/components/ui/Modal";
 import { candidateDependencyTasks, resolveDependencyTasks, resolveDependentTasks } from "@/lib/task-dependencies";
 import { api } from "@/lib/api";
 import { cn } from "@/lib/utils";
+import { DirBrowserModal } from "@/components/DirBrowserModal";
 
 const PRIORITIES: TaskPriority[] = ["P0", "P1", "P2", "P3", "P4", "P5"];
 const DIFFICULTIES: { value: TaskDifficulty; label: string }[] = [
@@ -64,6 +65,7 @@ export function TaskModal({
 	const [title, setTitle] = useState("");
 	const [stateId, setStateId] = useState("");
 	const [cwd, setCwd] = useState("");
+	const [cwdBrowserOpen, setCwdBrowserOpen] = useState(false);
 
 	useEffect(() => {
 		if (!task) return;
@@ -160,6 +162,7 @@ export function TaskModal({
 	const isArchived = Boolean(task.archivedAt);
 
 	return (
+		<>
 		<Modal open={open} onClose={onClose} widthClass="max-w-3xl">
 			{/* Single scrollable wrapper — only the action bar (sticky) stays visible at all
 			    viewport heights; title, metadata, and body all scroll together so the body
@@ -276,14 +279,22 @@ export function TaskModal({
 						<span className="text-ink-4">updated</span>
 						<span>{new Date(task.updatedAt).toLocaleString()}</span>
 						<span className="text-ink-4">cwd</span>
-						<span className="col-span-3">
+						<span className="col-span-3 flex items-center gap-1">
 							<input
 								value={cwd}
 								onChange={(e) => setCwd(e.target.value)}
 								onBlur={commitCwd}
 								placeholder="(defaults to server cwd)"
-								className="w-full bg-transparent font-mono text-2xs text-ink placeholder:text-ink-4 focus:outline-none"
+								className="min-w-0 flex-1 bg-transparent font-mono text-2xs text-ink placeholder:text-ink-4 focus:outline-none"
 							/>
+							<button
+								type="button"
+								onClick={() => setCwdBrowserOpen(true)}
+								className="shrink-0 rounded p-0.5 text-ink-4 hover:text-ink"
+								title="Browse for folder"
+							>
+								<FolderOpen className="h-3.5 w-3.5" />
+							</button>
 						</span>
 						<span className="text-ink-4">auto work</span>
 						<span className="col-span-3">
@@ -458,6 +469,19 @@ export function TaskModal({
 				</div>
 			</div>
 		</Modal>
+		<DirBrowserModal
+			open={cwdBrowserOpen}
+			initialPath={cwd || undefined}
+			onClose={() => setCwdBrowserOpen(false)}
+			onSelect={(selected) => {
+				setCwdBrowserOpen(false);
+				setCwd(selected);
+				if (!task) return;
+				const next = selected.trim() || undefined;
+				if ((task.cwd ?? "") !== (next ?? "")) onSave({ cwd: next });
+			}}
+		/>
+		</>
 	);
 }
 
