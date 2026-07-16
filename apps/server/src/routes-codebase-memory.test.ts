@@ -207,6 +207,10 @@ describe("codebase-memory explorer routes (T-118)", () => {
 
 		const disallowed = await app.request("/workspace-mcp/codebase-memory/index?cwd=/outside", { method: "POST" });
 		expect(disallowed.status).toBe(400);
+		expect(await disallowed.json()).toEqual({
+			error:
+				"cwd is not an allowed workspace. It must be an existing directory under $HOME or a root in OMP_DECK_WORKSPACES. Configure additional workspace roots in Settings → Env → OMP_DECK_WORKSPACES.",
+		});
 		expect(indexed).toEqual([cwd]);
 	});
 

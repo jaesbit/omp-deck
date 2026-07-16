@@ -184,6 +184,10 @@ describe("GET /fs/browse", () => {
 		try {
 			const res = await app.request(`/fs/browse?path=${encodeURIComponent(outside)}`);
 			expect(res.status).toBe(403);
+			expect(await res.json()).toEqual({
+				error:
+					"path is not under an allowed workspace root. Configure additional workspace roots in Settings → Env → OMP_DECK_WORKSPACES.",
+			});
 		} finally {
 			rmSync(outside, { recursive: true, force: true });
 		}

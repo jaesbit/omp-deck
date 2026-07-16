@@ -23,6 +23,8 @@ import {
 	CodebaseMemoryMcpDisabledError,
 	CodebaseMemoryMcpUnavailableError,
 } from "./codebase-memory-explorer.ts";
+import { cwdNotAllowedMessage } from "./routes-fs.ts";
+
 
 export interface CodebaseMemoryExplorerApi {
 	getOverview(cwd: string): Promise<CodebaseMemoryOverview>;
@@ -39,7 +41,7 @@ export function buildCodebaseMemoryRouter(
 	app.get("/workspace-mcp/codebase-memory", async (c) => {
 		const cwd = c.req.query("cwd")?.trim();
 		if (!cwd) return c.json({ error: "cwd query param is required" }, 400);
-		if (!isCwdAllowed(cwd)) return c.json({ error: "cwd is not an allowed workspace" }, 400);
+		if (!isCwdAllowed(cwd)) return c.json({ error: cwdNotAllowedMessage() }, 400);
 
 		try {
 			const config = await readProjectMcpConfig(cwd);
@@ -53,7 +55,7 @@ export function buildCodebaseMemoryRouter(
 	app.get("/workspace-mcp/codebase-memory/overview", async (c) => {
 		const cwd = c.req.query("cwd")?.trim();
 		if (!cwd) return c.json({ error: "cwd query param is required" }, 400);
-		if (!isCwdAllowed(cwd)) return c.json({ error: "cwd is not an allowed workspace" }, 400);
+		if (!isCwdAllowed(cwd)) return c.json({ error: cwdNotAllowedMessage() }, 400);
 
 		try {
 			return c.json(await explorer.getOverview(cwd));
@@ -75,7 +77,7 @@ export function buildCodebaseMemoryRouter(
 	app.post("/workspace-mcp/codebase-memory/index", async (c) => {
 		const cwd = c.req.query("cwd")?.trim();
 		if (!cwd) return c.json({ error: "cwd query param is required" }, 400);
-		if (!isCwdAllowed(cwd)) return c.json({ error: "cwd is not an allowed workspace" }, 400);
+		if (!isCwdAllowed(cwd)) return c.json({ error: cwdNotAllowedMessage() }, 400);
 
 		try {
 			const result = await explorer.index(cwd);
@@ -94,7 +96,7 @@ export function buildCodebaseMemoryRouter(
 	app.post("/workspace-mcp/codebase-memory/query", async (c) => {
 		const cwd = c.req.query("cwd")?.trim();
 		if (!cwd) return c.json({ error: "cwd query param is required" }, 400);
-		if (!isCwdAllowed(cwd)) return c.json({ error: "cwd is not an allowed workspace" }, 400);
+		if (!isCwdAllowed(cwd)) return c.json({ error: cwdNotAllowedMessage() }, 400);
 
 		let body: QueryCodebaseMemoryRequest;
 		try {
@@ -128,7 +130,7 @@ export function buildCodebaseMemoryRouter(
 	app.put("/workspace-mcp/codebase-memory", async (c) => {
 		const cwd = c.req.query("cwd")?.trim();
 		if (!cwd) return c.json({ error: "cwd query param is required" }, 400);
-		if (!isCwdAllowed(cwd)) return c.json({ error: "cwd is not an allowed workspace" }, 400);
+		if (!isCwdAllowed(cwd)) return c.json({ error: cwdNotAllowedMessage() }, 400);
 
 		let body: SetCodebaseMemoryMcpRequest;
 		try {
