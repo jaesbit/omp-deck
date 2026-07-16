@@ -1,6 +1,15 @@
-import { useCallback, useEffect, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { AlertCircle, FolderGit2, RefreshCw } from "lucide-react";
-import type { SessionUsageSummary, SpendSummaryResponse, SubscriptionUsageResponse } from "@omp-deck/protocol";
+import type {
+	AggregatedStatsResponse,
+	HistoricalModelStats,
+	OmpStatsRange,
+	SessionDrillDownLink,
+	SessionUsageSummary,
+	SpendSummaryResponse,
+	SubscriptionUsageResponse,
+} from "@omp-deck/protocol";
+import { useNavigate } from "react-router-dom";
 
 import { Layout } from "@/components/Layout";
 import { Sidebar } from "@/components/Sidebar";
@@ -96,6 +105,7 @@ export function SubscriptionLimitsView() {
 								onGranularityChange={setGranularity}
 							/>
 							<SessionListSection sessions={sessions} loading={loading} error={sessionsError} />
+							<AggregatedStatsSection />
 						</div>
 					</div>
 				</div>
@@ -373,5 +383,326 @@ function SessionListSection({
 				</div>
 			)}
 		</section>
+	);
+}
+
+// ---------------------------------------------------------------------------
+// T-37: Aggregated historical stats section (omp-stats backed)
+// ---------------------------------------------------------------------------
+
+const RANGE_LABELS: Record<OmpStatsRange, string> = {
+	"1h": "1 hour",
+	"24h": "24 hours",
+	"7d": "7 days",
+	"30d": "30 days",
+	"90d": "90 days",
+	all: "All time",
+};
+
+const AGENT_TYPE_LABEL: Record<string, string> = {
+	main: "Main",
+	subagent: "Subagent",
+	advisor: "Advisor",
+};
+
+/** Filterable aggregated stats from the omp-stats SQLite DB (session data only). */
+function AggregatedStatsSection() {
+	const navigate = useNavigate();
+	const [range, setRange] = usePersistedViewState<OmpStatsRange>("stats.range", "7d");
+	const [filterCwd, setFilterCwd] = usePersistedViewState<string>("stats.filterCwd", "");
+	const [filterModel, setFilterModel] = usePersistedViewState<string>("stats.filterModel", "");
+	const [filterAgentType, setFilterAgentType] = usePersistedViewState<string>("stats.filterAgentType", "");
+	const [expandedModel, setExpandedModel] = useState<string | null>(null);
+	const [data, setData] = useState<AggregatedStatsResponse | null>(null);
+	const [statsError, setStatsError] = useState<string | undefined>();
+	const [statsLoading, setStatsLoading] = useState(true);
+	// Track in-flight request to avoid stale updates on rapid filter changes.
+	const fetchSeq = useRef(0);
+
+	const load = useCallback(async (r: OmpStatsRange, cwd: string, model: string, agentType: string) => {
+		const seq = ++fetchSeq.current;
+		setStatsLoading(true);
+		try {
+			const result = await api.getAggregatedStats({
+				range: r,
+				...(cwd ? { cwd } : {}),
+				...(model ? { model } : {}),
+				...(agentType ? { agentType: agentType as "main" | "subagent" | "advisor" } : {}),
+			});
+			if (seq !== fetchSeq.current) return;
+			setData(result);
+			setStatsError(undefined);
+		} catch (err) {
+			if (seq !== fetchSeq.current) return;
+			setStatsError(err instanceof Error ? err.message : String(err));
+		} finally {
+			if (seq === fetchSeq.current) setStatsLoading(false);
+		}
+	}, []);
+
+	useEffect(() => {
+		void load(range, filterCwd, filterModel, filterAgentType);
+	}, [load, range, filterCwd, filterModel, filterAgentType]);
+
+	// Workspace and model lists come from the unfiltered dimension.
+	const workspaces = data?.byWorkspace ?? [];
+	const models = data?.byModel ?? [];
+
+	return (
+		<section className="rounded-md border border-line bg-paper-2 p-4">
+			{/* Header */}
+			<div className="mb-3 flex flex-wrap items-start justify-between gap-3">
+				<div>
+					<h2 className="text-sm font-medium text-ink">Historical stats</h2>
+					<p className="text-2xs text-ink-3">
+						Agent-session data · source: omp-stats
+						{data?.syncInProgress && (
+							<span className="ml-2 rounded bg-accent/10 px-1 py-0.5 text-2xs text-accent">syncing…</span>
+						)}
+					</p>
+				</div>
+				{/* Range picker */}
+				<div className="flex items-center gap-0.5 rounded-md border border-line bg-paper p-0.5">
+					{(Object.keys(RANGE_LABELS) as OmpStatsRange[]).map((r) => (
+						<button
+							key={r}
+							type="button"
+							onClick={() => setRange(r)}
+							className={cn(
+								"rounded px-2 py-1 text-2xs font-medium transition-colors",
+								range === r ? "bg-accent text-white" : "text-ink-3 hover:text-ink",
+							)}
+						>
+							{r}
+						</button>
+					))}
+				</div>
+			</div>
+
+			{/* Filters */}
+			<div className="mb-3 flex flex-wrap gap-2">
+				<select
+					value={filterCwd}
+					onChange={(e) => { setFilterCwd(e.target.value); setExpandedModel(null); }}
+					className="h-6 rounded border border-line bg-paper px-1.5 text-2xs text-ink"
+				>
+					<option value="">All workspaces</option>
+					{workspaces.map((ws) => (
+						<option key={ws.cwd} value={ws.cwd}>{ws.label}</option>
+					))}
+				</select>
+				<select
+					value={filterModel}
+					onChange={(e) => { setFilterModel(e.target.value); setExpandedModel(null); }}
+					className="h-6 rounded border border-line bg-paper px-1.5 text-2xs text-ink"
+				>
+					<option value="">All models</option>
+					{models.map((m) => (
+						<option key={`${m.provider}/${m.model}`} value={m.model}>{m.model}</option>
+					))}
+				</select>
+				<select
+					value={filterAgentType}
+					onChange={(e) => { setFilterAgentType(e.target.value); setExpandedModel(null); }}
+					className="h-6 rounded border border-line bg-paper px-1.5 text-2xs text-ink"
+				>
+					<option value="">All agent types</option>
+					<option value="main">Main</option>
+					<option value="subagent">Subagent</option>
+					<option value="advisor">Advisor</option>
+				</select>
+				{(filterCwd || filterModel || filterAgentType) && (
+					<button
+						type="button"
+						onClick={() => { setFilterCwd(""); setFilterModel(""); setFilterAgentType(""); setExpandedModel(null); }}
+						className="h-6 rounded border border-line bg-paper px-1.5 text-2xs text-ink-3 hover:text-ink"
+					>
+						Clear filters
+					</button>
+				)}
+			</div>
+
+			{statsLoading && data === null ? (
+				<div className="py-6 text-center text-xs text-ink-3">Loading stats…</div>
+			) : statsError ? (
+				<p className="py-6 text-center text-xs text-ink-3">Could not load stats: {statsError}</p>
+			) : !data || (data.byModel.length === 0 && data.byWorkspace.length === 0) ? (
+				<p className="py-6 text-center text-xs text-ink-3">
+					No data yet. Stats populate after the first omp-stats sync completes.
+				</p>
+			) : (
+				<div className="space-y-4">
+					{/* Total summary */}
+					<div className="flex gap-4 text-xs text-ink-2">
+						<span>{data.total.requests.toLocaleString()} requests</span>
+						<span>{data.total.totalTokens.toLocaleString()} tokens</span>
+						{data.total.costUsd > 0 && <span className="font-mono tabular-nums">{formatCost(data.total.costUsd)}</span>}
+					</div>
+
+					{/* By model */}
+					{data.byModel.length > 0 && (
+						<div>
+							<p className="mb-1 text-2xs font-semibold uppercase tracking-wide text-ink-3">By model</p>
+							<table className="w-full text-xs">
+								<thead>
+									<tr className="border-b border-line/60">
+										<th className="pb-1 pr-3 text-left font-medium text-ink-3">Model</th>
+										<th className="pb-1 pr-3 text-left font-medium text-ink-3">Provider</th>
+										<th className="pb-1 pr-3 text-right font-medium text-ink-3">Reqs</th>
+										<th className="pb-1 pr-3 text-right font-medium text-ink-3">Tokens</th>
+										<th className="pb-1 text-right font-medium text-ink-3">Cost</th>
+									</tr>
+								</thead>
+								<tbody>
+									{data.byModel.map((row) => (
+										<ModelRow
+											key={`${row.provider}/${row.model}`}
+											row={row}
+											expanded={expandedModel === `${row.provider}/${row.model}`}
+											onToggle={() =>
+												setExpandedModel(
+													expandedModel === `${row.provider}/${row.model}`
+														? null
+														: `${row.provider}/${row.model}`,
+												)
+											}
+											onNavigate={(id) => navigate(`/c/${id}`)}
+										/>
+									))}
+								</tbody>
+							</table>
+						</div>
+					)}
+
+					{/* By workspace */}
+					{data.byWorkspace.length > 0 && (
+						<div>
+							<p className="mb-1 text-2xs font-semibold uppercase tracking-wide text-ink-3">By workspace</p>
+							<table className="w-full text-xs">
+								<thead>
+									<tr className="border-b border-line/60">
+										<th className="pb-1 pr-3 text-left font-medium text-ink-3">Workspace</th>
+										<th className="pb-1 pr-3 text-right font-medium text-ink-3">Reqs</th>
+										<th className="pb-1 pr-3 text-right font-medium text-ink-3">Tokens</th>
+										<th className="pb-1 text-right font-medium text-ink-3">Cost</th>
+									</tr>
+								</thead>
+								<tbody>
+									{data.byWorkspace.map((ws) => (
+										<tr key={ws.cwd} className="border-t border-line/60 first:border-t-0">
+											<td className="py-1.5 pr-3 text-ink-2" title={ws.cwd}>{ws.label}</td>
+											<td className="py-1.5 pr-3 text-right tabular-nums text-ink">{ws.requests.toLocaleString()}</td>
+											<td className="py-1.5 pr-3 text-right tabular-nums text-ink">{ws.totalTokens.toLocaleString()}</td>
+											<td className="py-1.5 text-right font-mono tabular-nums text-ink">
+												{ws.costUsd > 0 ? formatCost(ws.costUsd) : <span className="text-ink-4">—</span>}
+											</td>
+										</tr>
+									))}
+								</tbody>
+							</table>
+						</div>
+					)}
+
+					{/* By agent type — explicit session/routine separation label */}
+					{data.byAgentType.length > 0 && (
+						<div>
+							<p className="mb-1 text-2xs font-semibold uppercase tracking-wide text-ink-3">
+								By agent role <span className="normal-case font-normal text-ink-4">(session data only — routine costs not included)</span>
+							</p>
+							<table className="w-full text-xs">
+								<tbody>
+									{data.byAgentType.map((entry) => (
+										<tr key={entry.agentType} className="border-t border-line/60 first:border-t-0">
+											<td className="py-1.5 pr-3 text-ink-2">
+												{AGENT_TYPE_LABEL[entry.agentType] ?? entry.agentType}
+											</td>
+											<td className="py-1.5 pr-3 text-right tabular-nums text-ink">{entry.requests.toLocaleString()} reqs</td>
+											<td className="py-1.5 pr-3 text-right tabular-nums text-ink">{entry.totalTokens.toLocaleString()} tok</td>
+											<td className="py-1.5 text-right font-mono tabular-nums text-ink">
+												{entry.costUsd > 0 ? formatCost(entry.costUsd) : <span className="text-ink-4">—</span>}
+											</td>
+										</tr>
+									))}
+								</tbody>
+							</table>
+						</div>
+					)}
+				</div>
+			)}
+		</section>
+	);
+}
+
+/** One model row, expandable to show session drill-down links. */
+function ModelRow({
+	row,
+	expanded,
+	onToggle,
+	onNavigate,
+}: {
+	row: HistoricalModelStats;
+	expanded: boolean;
+	onToggle: () => void;
+	onNavigate: (sessionId: string) => void;
+}) {
+	return (
+		<>
+			<tr
+				className={cn(
+					"border-t border-line/60 first:border-t-0",
+					row.sessionLinks.length > 0 && "cursor-pointer hover:bg-paper-3/40",
+				)}
+				onClick={row.sessionLinks.length > 0 ? onToggle : undefined}
+			>
+				<td className="py-1.5 pr-3 text-ink-2">
+					<span className="flex items-center gap-1">
+						{row.model}
+						{row.sessionLinks.length > 0 && (
+							<span className="text-2xs text-ink-4">{expanded ? "▲" : "▼"} {row.sessionLinks.length}</span>
+						)}
+					</span>
+				</td>
+				<td className="py-1.5 pr-3 text-ink-3">{row.provider}</td>
+				<td className="py-1.5 pr-3 text-right tabular-nums text-ink">{row.requests.toLocaleString()}</td>
+				<td className="py-1.5 pr-3 text-right tabular-nums text-ink">{row.totalTokens.toLocaleString()}</td>
+				<td className="py-1.5 text-right font-mono tabular-nums text-ink">
+					{row.costUsd > 0 ? formatCost(row.costUsd) : <span className="text-ink-4">—</span>}
+				</td>
+			</tr>
+			{expanded && (
+				<tr className="border-t border-line/60">
+					<td colSpan={5} className="pb-2 pt-1 pl-3">
+						<div className="flex flex-wrap gap-1.5">
+							{row.sessionLinks.map((link) => (
+								<SessionLinkChip key={link.sessionId} link={link} onNavigate={onNavigate} />
+							))}
+						</div>
+					</td>
+				</tr>
+			)}
+		</>
+	);
+}
+
+/** Clickable chip for one resolved Deck session link. */
+function SessionLinkChip({
+	link,
+	onNavigate,
+}: {
+	link: SessionDrillDownLink;
+	onNavigate: (sessionId: string) => void;
+}) {
+	return (
+		<button
+			type="button"
+			onClick={() => onNavigate(link.sessionId)}
+			title={`${link.cwd} · ${AGENT_TYPE_LABEL[link.agentType] ?? link.agentType}`}
+			className="inline-flex items-center gap-1 rounded border border-line bg-paper px-1.5 py-0.5 text-2xs text-ink-2 hover:border-accent hover:text-ink"
+		>
+			<span className="max-w-[160px] truncate">{link.title ?? link.sessionId.slice(0, 12)}</span>
+			{link.agentType !== "main" && (
+				<span className="text-ink-4">{AGENT_TYPE_LABEL[link.agentType] ?? link.agentType}</span>
+			)}
+		</button>
 	);
 }
