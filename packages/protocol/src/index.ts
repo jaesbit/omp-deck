@@ -920,6 +920,106 @@ export interface SpendSummaryResponse {
 	accounts: AccountSpendEntry[];
 }
 
+// ---------------------------------------------------------------------------
+// T-37: Aggregated historical OMP stats (via @oh-my-pi/omp-stats)
+// ---------------------------------------------------------------------------
+
+/**
+ * Valid range strings accepted by `GET /api/usage/stats?range=`.
+ * Mirrors omp-stats' internal TimeRange.
+ */
+export type OmpStatsRange = "1h" | "24h" | "7d" | "30d" | "90d" | "all";
+
+/**
+ * A resolved Deck session link, returned inside `HistoricalModelStats.sessionLinks`.
+ * All resolution happens server-side; no raw filesystem paths are sent to the client.
+ */
+export interface SessionDrillDownLink {
+	/** Deck session ID — can be used to navigate to `/c/:sessionId`. */
+	sessionId: string;
+	/** Session title, if one has been generated. */
+	title?: string;
+	/** Workspace cwd that owns this session. */
+	cwd: string;
+	/**
+	 * Agent role that generated the stats rows linking to this session.
+	 * `main` = top-level agent session; `subagent` = task subagent;
+	 * `advisor` = advisor transcript nested inside a session.
+	 */
+	agentType: "main" | "subagent" | "advisor";
+}
+
+/** Per-model aggregate within an `AggregatedStatsResponse`. */
+export interface HistoricalModelStats {
+	model: string;
+	provider: string;
+	costUsd: number;
+	totalTokens: number;
+	requests: number;
+	/** Up to 20 resolved Deck session links for drill-down. */
+	sessionLinks: SessionDrillDownLink[];
+}
+
+/** Per-workspace aggregate within an `AggregatedStatsResponse`. */
+export interface HistoricalWorkspaceStats {
+	/** Workspace path (maps to omp-stats `messages.folder`). */
+	cwd: string;
+	/** Human-readable label derived the same way as `WorkspaceEntry.label`. */
+	label: string;
+	costUsd: number;
+	totalTokens: number;
+	requests: number;
+}
+
+/**
+ * Per-agent-type aggregate within an `AggregatedStatsResponse`.
+ * Satisfies the acceptance criterion "session and routine data are not mixed
+ * without explicit labeling": this breakdown shows the distribution across
+ * main agent sessions, subagents, and advisors within the session dataset.
+ * Deck `routine_runs` are a separate data source and are NOT included here.
+ */
+export interface HistoricalAgentTypeStats {
+	/** Agent role: main session, task subagent, or advisor transcript. */
+	agentType: "main" | "subagent" | "advisor";
+	costUsd: number;
+	totalTokens: number;
+	requests: number;
+}
+
+/**
+ * `GET /api/usage/stats` — aggregated historical OMP usage stats backed by
+ * the @oh-my-pi/omp-stats SQLite DB.
+ *
+ * `source: "sessions"` is explicit: only agent-session transcript data is
+ * included.  Deck routine_runs are a separate data source; if they are ever
+ * added they will appear under a separate `sourceType: "routine"` breakdown
+ * to avoid mixing without labeling.
+ *
+ * Filters (all optional, combinable):
+ *   - `range`     — time window (1h | 24h | 7d | 30d | 90d | all)
+ *   - `cwd`       — restrict to one workspace
+ *   - `model`     — restrict to one model
+ *   - `agentType` — restrict to one agent role
+ */
+export interface AggregatedStatsResponse {
+	range: OmpStatsRange;
+	/**
+	 * Explicit data-source label. Always "sessions" today.
+	 * A future `sourceType: "routine"` entry would carry routine costs.
+	 */
+	source: "sessions";
+	/** True while a background omp-stats sync is in progress. */
+	syncInProgress: boolean;
+	total: {
+		costUsd: number;
+		totalTokens: number;
+		requests: number;
+	};
+	byModel: HistoricalModelStats[];
+	byWorkspace: HistoricalWorkspaceStats[];
+	byAgentType: HistoricalAgentTypeStats[];
+}
+
 /**
  * Effective model override applied while a session is in Plan Mode. Distinct
  * from the session's persistent model (which stays what the user configured):

@@ -2,17 +2,19 @@ import type {
 	ApplyDelegationArtifactRequest,
 	ApplyDelegationArtifactResponse,
 	AdvisorSettingsResponse,
+	AggregatedStatsResponse,
 	AutoWorkConfig,
 	AutoWorkCycleResult,
 	AutoWorkGlobalConfig,
 	AutoWorkRunStatus,
 	AutoWorkScheduleStatus,
-	CreateSessionRequest,
-	CreateSessionResponse,
-	CodebaseMemoryMcpStatus,
+	BranchSessionRequest,
 	CodebaseMemoryIndexResult,
+	CodebaseMemoryMcpStatus,
 	CodebaseMemoryOverview,
 	CodebaseMemoryQueryResult,
+	CreateSessionRequest,
+	CreateSessionResponse,
 	DeckBaseUrlResponse,
 	DelegationArtifactResponse,
 	DiscardDelegationArtifactRequest,
@@ -32,23 +34,23 @@ import type {
 	ListWorkspacePreferencesResponse,
 	ListWorkspacesResponse,
 	ModelRef,
+	OmpStatsRange,
 	PatchDelegationSettingsRequest,
 	PatchDelegationSettingsResponse,
+	PlanModelResponse,
 	QueryCodebaseMemoryRequest,
 	RewriteTaskRequest,
 	RewriteTaskResponse,
 	SessionHistoryResponse,
 	SessionTreeResponse,
-	BranchSessionRequest,
+	SetAdvisorSettingsRequest,
 	SetAutoWorkConfigRequest,
 	SetAutoWorkGlobalConfigRequest,
 	SetDeckBaseUrlRequest,
 	SetInternalTaskModelRequest,
-	PlanModelResponse,
 	SetPlanModelRequest,
-	SpendSummaryResponse,
 	SetTaskRewriteModelRequest,
-	SetAdvisorSettingsRequest,
+	SpendSummaryResponse,
 	SubscriptionUsageResponse,
 	TaskPriority,
 	TaskRewriteModelResponse,
@@ -277,6 +279,20 @@ export const api = {
 	},
 	listSessionUsage(limit = 20): Promise<ListSessionUsageResponse> {
 		return request<ListSessionUsageResponse>(`/usage/sessions?limit=${limit}`);
+	},
+	getAggregatedStats(opts: {
+		range?: OmpStatsRange;
+		cwd?: string;
+		model?: string;
+		agentType?: "main" | "subagent" | "advisor";
+	} = {}): Promise<AggregatedStatsResponse> {
+		const params = new URLSearchParams();
+		if (opts.range) params.set("range", opts.range);
+		if (opts.cwd) params.set("cwd", opts.cwd);
+		if (opts.model) params.set("model", opts.model);
+		if (opts.agentType) params.set("agentType", opts.agentType);
+		const qs = params.toString();
+		return request<AggregatedStatsResponse>(`/usage/stats${qs ? `?${qs}` : ""}`);
 	},
 	listTasks(): Promise<ListTasksResponse> {
 		return request<ListTasksResponse>("/tasks");
