@@ -13,7 +13,7 @@ import {
 	SortableContext,
 	horizontalListSortingStrategy,
 } from "@dnd-kit/sortable";
-import { ArrowDownWideNarrow, Settings2 } from "lucide-react";
+import { Archive, ArrowDownWideNarrow, Settings2 } from "lucide-react";
 
 import type { ModelRef, Task, TaskDifficulty, TaskPriority, TaskState } from "@omp-deck/protocol";
 
@@ -23,6 +23,7 @@ import { TaskCardBody } from "@/components/tasks/TaskCard";
 import { TaskModal } from "@/components/tasks/TaskModal";
 import { SessionLaunchModal, type SessionLaunchOpts } from "@/components/chat/SessionLaunchModal";
 import { StateConfig } from "@/components/tasks/StateConfig";
+import { ArchivedTasksModal } from "@/components/tasks/ArchivedTasksModal";
 import { projectColorForCwd, useProjectColors } from "@/lib/project-colors";
 import {
 	filterTasksByWorkspace,
@@ -55,6 +56,7 @@ export function TasksView() {
 		{ task: Task; draft: "full" | "short"; suggestedModel?: ModelRef } | undefined
 	>();
 	const [showStateConfig, setShowStateConfig] = useState(false);
+	const [showArchivedModal, setShowArchivedModal] = useState(false);
 	const { colors: projectColors, setColor: setProjectColor } = useProjectColors();
 
 	const sensors = useSensors(
@@ -408,6 +410,15 @@ export function TasksView() {
 								<Settings2 className="h-3.5 w-3.5" />
 								Board
 							</button>
+							<button
+								type="button"
+								onClick={() => setShowArchivedModal(true)}
+								className="btn-ghost h-7 px-2 text-xs"
+								title="Ver tareas archivadas"
+							>
+								<Archive className="h-3.5 w-3.5" />
+								Archived
+							</button>
 						</div>
 
 						{error ? (
@@ -533,6 +544,12 @@ export function TasksView() {
 				showInitialPrompt={false}
 				onCancel={() => setLaunchTarget(undefined)}
 				onConfirm={confirmLaunch}
+			/>
+			<ArchivedTasksModal
+				open={showArchivedModal}
+				onClose={() => setShowArchivedModal(false)}
+				states={states}
+				onRestored={() => void refresh()}
 			/>
 		</>
 	);
