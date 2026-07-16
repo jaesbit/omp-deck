@@ -69,6 +69,19 @@ function rowToState(r: StateRow): TaskState {
 
 // ─── Dependencies (T-57) ───────────────────────────────────────────────────
 
+/**
+ * Stable ids of the four system-seeded task states (001-init.sql,
+ * 015-validate-state.sql). These are the only states in which a task is
+ * eligible to appear as a dependency candidate, and they are protected from
+ * deletion and rename so the constraint stays enforceable across renames.
+ */
+export const SYSTEM_STATE_IDS: Record<string, true> = {
+	s_backlog: true,
+	s_active: true,
+	s_blocked: true,
+	s_validate: true,
+};
+
 function listDependenciesFor(taskId: string): string[] {
 	const rows = getDb()
 		.query<{ depends_on_task_id: string }, [string]>(
@@ -95,15 +108,43 @@ function listAllDependencies(): Map<string, string[]> {
 }
 
 /**
- * Dedupes `dependsOn`, rejects self-reference, and rejects any id that isn't
- * an existing task. Does not check for cycles — see {@link wouldCreateCycle}.
+ * Dedupes `dependsOn`, then validates every candidate id:
+ * - must exist
+ * - must not be `taskId` itself
+ * - newly-added ids (not in `existingIds`) must be in a dependency-eligible
+ *   state (SYSTEM_STATE_IDS); retained ids skip the state check so that an
+ *   unrelated patch (e.g. adding a new dep) never rejects pre-existing deps
+ *   that have since moved to `done`.
+ * - all ids must belong to the same project (`cwd`) as the caller
+ *
+ * Does not check for cycles — see {@link wouldCreateCycle}.
  */
-function validateDependencyIds(db: Database, taskId: string, dependsOn: string[]): string[] {
+function validateDependencyIds(
+	db: Database,
+	taskId: string,
+	dependsOn: string[],
+	callerCwd: string | null,
+	existingIds: Set<string> = new Set(),
+): string[] {
 	const unique = Array.from(new Set(dependsOn));
 	if (unique.includes(taskId)) throw new Error("a task cannot depend on itself");
 	for (const dep of unique) {
-		const exists = db.query<{ id: string }, [string]>("SELECT id FROM tasks WHERE id = ?").get(dep);
-		if (!exists) throw new Error(`unknown dependency task id: ${dep}`);
+		const row = db
+			.query<{ id: string; state_id: string; cwd: string | null }, [string]>(
+				"SELECT id, state_id, cwd FROM tasks WHERE id = ?",
+			)
+			.get(dep) as { id: string; state_id: string; cwd: string | null } | null;
+		if (!row) throw new Error(`unknown dependency task id: ${dep}`);
+		// State check only for newly-added ids — retained deps keep their
+		// existing edge even if they have since moved to a non-eligible state.
+		if (!existingIds.has(dep) && !Object.hasOwn(SYSTEM_STATE_IDS, row.state_id)) {
+			throw new Error(
+				`dependency task ${dep} is in a state that is not eligible for dependencies`,
+			);
+		}
+		if ((row.cwd ?? null) !== callerCwd) {
+			throw new Error(`dependency task ${dep} belongs to a different project`);
+		}
 	}
 	return unique;
 }
@@ -206,6 +247,11 @@ export function updateState(
 	stateId: string,
 	patch: { name?: string; color?: string; position?: number },
 ): TaskState | undefined {
+	if (Object.hasOwn(SYSTEM_STATE_IDS, stateId) && patch.name !== undefined) {
+		throw new Error(
+			`state "${stateId}" is required by the dependency system and cannot be renamed`,
+		);
+	}
 	const existing = getState(stateId);
 	if (!existing) return undefined;
 	const next = { ...existing, ...patch };
@@ -264,6 +310,11 @@ export function deleteState(stateId: string): { reassigned: number } {
 	const db = getDb();
 	const target = getState(stateId);
 	if (!target) return { reassigned: 0 };
+	if (Object.hasOwn(SYSTEM_STATE_IDS, stateId)) {
+		throw new Error(
+			`state "${stateId}" is required by the dependency system and cannot be deleted`,
+		);
+	}
 	if (target.isDefault) throw new Error("cannot delete the default state");
 	const fallback = getDefaultState();
 
@@ -335,7 +386,7 @@ export function createTaskInTransaction(input: {
 
 	const taskId = `t_${id().toLowerCase().slice(0, 18)}`;
 	const now = nowIso();
-	const dependsOn = input.dependsOn ? validateDependencyIds(db, taskId, input.dependsOn) : [];
+	const dependsOn = input.dependsOn ? validateDependencyIds(db, taskId, input.dependsOn, input.cwd ?? null) : [];
 	const seqRow = db
 		.query<{ value: number }, []>(
 			"UPDATE sequences SET value = value + 1 WHERE name = 'tasks' RETURNING value",
@@ -399,8 +450,21 @@ export function updateTask(
 	const stateEnteredAt = stateChanged ? nowIso() : existing.stateEnteredAt;
 	// Validate before mutating so a bad dependency patch never leaves the
 	// primary row updated but the dependency set untouched (or vice versa).
+	// Use the effective cwd after applying the patch — a cwd change can make
+	// existing dependencies cross-project.
+	const effectiveCwd = (patch.cwd !== undefined ? patch.cwd : existing.cwd) ?? null;
+	const cwdChanged = patch.cwd !== undefined && effectiveCwd !== (existing.cwd ?? null);
+	const existingDepSet = new Set(existing.dependsOn);
 	const nextDependsOn =
-		patch.dependsOn !== undefined ? validateDependencyIds(db, taskId, patch.dependsOn) : undefined;
+		patch.dependsOn !== undefined
+			? validateDependencyIds(db, taskId, patch.dependsOn, effectiveCwd, existingDepSet)
+			: undefined;
+	// If only cwd is changing, verify existing deps still belong to the same
+	// project. Pass existingDepSet so state eligibility is not re-checked
+	// (they were already accepted; only the project boundary matters here).
+	if (cwdChanged && patch.dependsOn === undefined && existing.dependsOn.length > 0) {
+		validateDependencyIds(db, taskId, existing.dependsOn, effectiveCwd, existingDepSet);
+	}
 	if (nextDependsOn !== undefined && wouldCreateCycle(db, taskId, nextDependsOn)) {
 		throw new Error("dependency change would create a cycle");
 	}
