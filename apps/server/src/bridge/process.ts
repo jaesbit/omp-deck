@@ -19,6 +19,7 @@ import type {
 } from "@omp-deck/protocol";
 
 import { broadcastBus } from "../broadcast-bus.ts";
+import { recordExtensionLoadErrors } from "../governance-service.ts";
 import { logger } from "../log.ts";
 import { resolveBunExecutable } from "../runtime-bun.ts";
 import { InProcessAgentBridge } from "./in-process.ts";
@@ -398,6 +399,13 @@ export class ProcessAgentBridge implements AgentBridge {
 			const handle = new ProcessSessionHandle(this, { ...metadata, sessionId: registrationId });
 			record.sessionId = registrationId;
 			record.handle = handle;
+			if (metadata.extensionErrors?.length) {
+				try {
+					recordExtensionLoadErrors(metadata.cwd, registrationId, metadata.extensionErrors);
+				} catch (err) {
+					log.warn(`failed to record extension load errors for session ${registrationId}`, err);
+				}
+			}
 			if (previous && !isDivergedHandoffOrigin) {
 				await this.disposeRecord(previous);
 			}

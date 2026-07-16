@@ -17,6 +17,7 @@ import { CodebaseMemoryView } from "./views/CodebaseMemoryView";
 import { MemoryView } from "./views/MemoryView";
 import { SubscriptionLimitsView } from "./views/SubscriptionLimitsView";
 import { SessionsView } from "./views/SessionsView";
+import { GovernanceView } from "./views/GovernanceView";
 import { onboardingApi } from "./lib/onboarding-api";
 
 /**
@@ -66,6 +67,7 @@ const router = createBrowserRouter([
 			{ path: "/codebase-memory", element: <CodebaseMemoryView /> },
 			{ path: "/memory", element: <MemoryView /> },
 			{ path: "/sessions", element: <SessionsView /> },
+			{ path: "/governance", element: <GovernanceView /> },
 			{ path: "/subscription-limits", element: <SubscriptionLimitsView /> },
 			{ path: "/settings", element: <SettingsView /> },
 			{ path: "/onboarding", element: <OnboardingView /> },

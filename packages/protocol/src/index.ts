@@ -1238,6 +1238,8 @@ export interface SessionTreeEntryWire {
 	preview: string;
 	/** User-defined bookmark label on this entry, when set. */
 	label?: string;
+	/** Rule names injected by this entry, present only for `kind: "ttsr_injection"` (T-35). */
+	injectedRules?: string[];
 }
 
 export interface SessionTreeNodeWire {
@@ -1265,6 +1267,173 @@ export interface SessionTreeResponse {
 export interface BranchSessionRequest {
 	/** Entry id (from `SessionTreeResponse`) to branch from. */
 	entryId: string;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Governance: rules, TTSR, hooks/extensions (T-35)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Which bucket a rule falls into once loaded — mirrors the SDK's
+ *  `bucketRules` precedence (TTSR > always-apply > rulebook > inactive).
+ *  `inactive` means the rule loaded but has neither a TTSR condition, an
+ *  `alwaysApply` flag, nor a `description` — the SDK silently drops it. */
+export type RuleBucket = "ttsr" | "always-apply" | "rulebook" | "inactive";
+
+export type RuleInterruptMode = "never" | "prose-only" | "tool-only" | "always";
+
+export type RuleDisabledReason = "rule-disabled" | "provider-disabled" | "shadowed";
+
+export interface GovernanceSource {
+	provider: string;
+	providerName: string;
+	level: "user" | "project" | "native";
+}
+
+export interface RuleInfo {
+	name: string;
+	path: string;
+	description?: string;
+	scope?: string[];
+	condition?: string[];
+	astCondition?: string[];
+	alwaysApply?: boolean;
+	/** Effective interrupt mode: the rule's own override, or the global `ttsr.interruptMode`. */
+	interruptMode: RuleInterruptMode;
+	/** True when this rule declares its own `interruptMode` (vs. inheriting the global default). */
+	interruptModeOverridden: boolean;
+	bucket: RuleBucket;
+	source: GovernanceSource;
+	enabled: boolean;
+	disabledReason?: RuleDisabledReason;
+	shadowedBy?: string;
+}
+
+export interface TtsrGlobalSettings {
+	enabled: boolean;
+	interruptMode: RuleInterruptMode;
+	builtinRules: boolean;
+	contextMode: "discard" | "keep";
+	repeatMode: "once" | "after-gap";
+	repeatGap: number;
+}
+
+export interface ListRulesResponse {
+	rules: RuleInfo[];
+	ttsr: TtsrGlobalSettings;
+	warnings: string[];
+}
+
+export interface SetRuleEnabledRequest {
+	enabled: boolean;
+}
+
+export interface SetRuleEnabledResponse {
+	rule: RuleInfo;
+	audit: GovernanceAuditEntry;
+}
+
+/** Governed extension kinds — the SDK's Extension Control Center covers more
+ *  (skills, mcp, context-files, ...); T-35 scopes governance to the two
+ *  kinds the task explicitly names: extension modules and pre/post hooks. */
+export type GovernedExtensionKind = "extension-module" | "hook";
+
+export type ExtensionState = "active" | "disabled" | "shadowed";
+
+export type ExtensionDisabledReason = "item-disabled" | "provider-disabled" | "shadowed";
+
+export interface ExtensionInfo {
+	/** Canonical `${kind}:${name}` id — same scheme the SDK's own Extension
+	 *  Control Center uses for `disabledExtensions` entries. */
+	id: string;
+	kind: GovernedExtensionKind;
+	name: string;
+	path: string;
+	source: GovernanceSource;
+	state: ExtensionState;
+	disabledReason?: ExtensionDisabledReason;
+	shadowedBy?: string;
+	/** Hook-only: `pre`/`post` + the tool it applies to (e.g. `pre:edit`). */
+	trigger?: string;
+}
+
+export interface ExtensionLoadErrorInfo {
+	id: string;
+	occurredAt: string;
+	sessionId?: string;
+	cwd?: string;
+	path: string;
+	message: string;
+}
+
+export interface ListExtensionsResponse {
+	extensions: ExtensionInfo[];
+	loadErrors: ExtensionLoadErrorInfo[];
+	warnings: string[];
+}
+
+export interface SetExtensionEnabledRequest {
+	enabled: boolean;
+}
+
+export interface SetExtensionEnabledResponse {
+	extension: ExtensionInfo;
+	audit: GovernanceAuditEntry;
+}
+
+/** Best-effort explanation for one rule named by a persisted TTSR injection
+ *  entry — looked up against the *current* rule inventory, so `found: false`
+ *  is possible when the rule file has since been edited away or renamed. */
+export interface TtsrRuleExplain {
+	name: string;
+	found: boolean;
+	description?: string;
+	condition?: string[];
+	astCondition?: string[];
+	scope?: string[];
+	interruptMode?: RuleInterruptMode;
+}
+
+export interface TtsrHistoryEntry {
+	sessionId: string;
+	sessionPath: string;
+	cwd: string;
+	sessionTitle?: string;
+	entryId: string;
+	occurredAt: string;
+	ruleNames: string[];
+	rules: TtsrRuleExplain[];
+}
+
+export interface ListTtsrHistoryResponse {
+	entries: TtsrHistoryEntry[];
+	/** True when the session scan hit `limit` and older sessions weren't checked. */
+	truncated: boolean;
+}
+
+export type GovernanceAuditKind = "rule" | "extension" | "extension_load_error";
+export type GovernanceAuditAction = "enable" | "disable" | "load_error";
+export type GovernanceAuditResult = "ok" | "error";
+
+/** One row of the governance audit trail (T-35). Config changes (rule/extension
+ *  enable-disable) and extension runtime load errors both land here so the UI
+ *  has one place to explain "what changed and why". */
+export interface GovernanceAuditEntry {
+	id: string;
+	occurredAt: string;
+	kind: GovernanceAuditKind;
+	targetId: string;
+	action: GovernanceAuditAction;
+	actor: string;
+	cwd?: string;
+	sessionId?: string;
+	before?: unknown;
+	after?: unknown;
+	result: GovernanceAuditResult;
+	error?: string;
+}
+
+export interface ListGovernanceAuditResponse {
+	entries: GovernanceAuditEntry[];
 }
 
 /**
