@@ -34,6 +34,9 @@ import type {
 	ModelRef,
 	PatchDelegationSettingsRequest,
 	PatchDelegationSettingsResponse,
+	GetPolicySettingsResponse,
+	PatchPolicySettingsRequest,
+	PatchPolicySettingsResponse,
 	QueryCodebaseMemoryRequest,
 	RewriteTaskRequest,
 	RewriteTaskResponse,
@@ -319,6 +322,15 @@ export const api = {
 	},
 	patchDelegationSettings(body: PatchDelegationSettingsRequest): Promise<PatchDelegationSettingsResponse> {
 		return request<PatchDelegationSettingsResponse>("/delegation/settings", {
+			method: "PATCH",
+			body: JSON.stringify(body),
+		});
+	},
+	getPolicySettings(): Promise<GetPolicySettingsResponse> {
+		return request<GetPolicySettingsResponse>("/policies/settings");
+	},
+	patchPolicySettings(body: PatchPolicySettingsRequest): Promise<PatchPolicySettingsResponse> {
+		return request<PatchPolicySettingsResponse>("/policies/settings", {
 			method: "PATCH",
 			body: JSON.stringify(body),
 		});

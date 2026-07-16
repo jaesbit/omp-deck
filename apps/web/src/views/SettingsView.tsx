@@ -29,6 +29,7 @@ import { Button } from "@/components/ui/Button";
 import { Modal } from "@/components/ui/Modal";
 import { OAuthFlowModal } from "@/components/settings/OAuthFlowModal";
 import { DelegationSection } from "@/components/settings/DelegationSection";
+import { PoliciesSection } from "@/components/settings/PoliciesSection";
 import { AdvisorsSection } from "@/components/settings/AdvisorsSection";
 import { AgentPickerModal, shortWorkspacePath } from "@/components/settings/AgentPickerModals";
 import { api } from "@/lib/api";
@@ -53,6 +54,7 @@ const SECTIONS = [
 	{ id: "orientation", label: "Internal prompts", description: "System prompts and session lifecycle" },
 	{ id: "appearance", label: "Appearance", description: "Themes, colors, fonts" },
 	{ id: "delegation", label: "Delegation", description: "Subagent concurrency, isolation, integration" },
+	{ id: "policies", label: "Policies", description: "Models, retries, fallbacks, context compaction" },
 	{ id: "autowork", label: "Auto Work", description: "Unattended runs — enable, window, spend limits" },
 	{ id: "notifications", label: "Notifications", description: "Idle alerts and quiet hours" },
 	{ id: "about", label: "About", description: "Version, paths, diagnostics" },
@@ -118,6 +120,8 @@ export function SettingsView() {
 								<NotificationsSection />
 							) : selected === "delegation" ? (
 								<DelegationSection />
+							) : selected === "policies" ? (
+								<PoliciesSection />
 							) : selected === "autowork" ? (
 								<AutoWorkSection />
 							) : (
