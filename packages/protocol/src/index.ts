@@ -2624,3 +2624,190 @@ export interface DiscardDelegationArtifactResponse {
 	ok: boolean;
 	message: string;
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Memory governance (T-34)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * The OMP agent's own session-memory subsystem (Hindsight remote / Mnemopi
+ * local SQLite / local rollout summaries) — distinct from the deck's KB
+ * (`kb-service.ts`), which is hand-tended long-term knowledge. Governed the
+ * same way as delegation settings (T-28): the single source of truth is
+ * OMP's own settings store, the deck never persists a copy. Deliberately a
+ * narrow, curated key list — never every `memory.*`/`mnemopi.*`/`hindsight.*`
+ * schema entry — so credential-shaped fields (`hindsight.apiToken`,
+ * `mnemopi.llmApiKey`, `mnemopi.embeddingApiKey`) can never be read or
+ * written through this surface.
+ */
+export type MemorySettingKey =
+	| "memory.backend"
+	| "mnemopi.scoping"
+	| "mnemopi.autoRecall"
+	| "mnemopi.autoRetain"
+	| "hindsight.apiUrl"
+	| "hindsight.bankId"
+	| "hindsight.scoping"
+	| "hindsight.autoRecall"
+	| "hindsight.autoRetain"
+	| "hindsight.mentalModelsEnabled";
+
+/** One selectable value for an enum-typed governed memory setting. */
+export interface MemorySettingOption {
+	value: string;
+	label: string;
+	description?: string;
+}
+
+/** Current value + OMP schema metadata for one governed memory setting. */
+export interface MemorySettingEntry {
+	key: MemorySettingKey;
+	type: "string" | "number" | "enum" | "boolean";
+	value: number | string | boolean;
+	/** Schema default, `null` when the schema declares none. */
+	defaultValue: number | string | boolean | null;
+	/** True when explicitly set in OMP config (vs falling back to the schema default). */
+	configured: boolean;
+	label: string;
+	description: string;
+	options?: MemorySettingOption[];
+}
+
+/** `GET /api/memory/settings` response. */
+export interface GetMemorySettingsResponse {
+	settings: MemorySettingEntry[];
+	/** Absolute path of the OMP config file these values persist to. */
+	configPath: string;
+}
+
+/** `PATCH /api/memory/settings` request. Unknown keys are rejected. */
+export interface PatchMemorySettingsRequest {
+	updates: Partial<Record<MemorySettingKey, number | string | boolean>>;
+}
+
+/** `PATCH /api/memory/settings` response — fresh post-write state. */
+export type PatchMemorySettingsResponse = GetMemorySettingsResponse;
+
+export type MemoryBackendId = "off" | "local" | "hindsight" | "mnemopi";
+
+/**
+ * `GET /api/memory/scope?cwd=` response. Reports which backend is active
+ * process-wide and, for the currently explorable one (Hindsight — the only
+ * backend with a sessionless, credential-safe HTTP API), the bank a given
+ * project resolves to under the configured scoping policy.
+ *
+ * Mnemopi (local SQLite) and the local summary pipeline have no sessionless
+ * read/write seam in the SDK — data-level browsing there requires a live
+ * OMP agent session, which the deck does not fabricate. `explorable` is
+ * `false` for those, with `message` explaining why.
+ */
+export interface MemoryScopeStatus {
+	cwd: string;
+	backend: MemoryBackendId;
+	/** True when the active backend has a sessionless read/write API this deck can call. */
+	explorable: boolean;
+	/** Hindsight only: resolved bank id for this project under the current scoping policy. */
+	bankId?: string;
+	scoping?: string;
+	message?: string;
+}
+
+/** One Hindsight recall hit — mirrors the SDK's `RecallResult` verbatim. */
+export interface HindsightRecallItem {
+	id?: string;
+	text: string;
+	type?: string | null;
+	mentioned_at?: string | null;
+	[key: string]: unknown;
+}
+
+/** `POST /api/memory/hindsight/recall?cwd=` response — traceable recall results for a query. */
+export interface HindsightRecallResponse {
+	bankId: string;
+	query: string;
+	results: HindsightRecallItem[];
+}
+
+/** `POST /api/memory/hindsight/recall?cwd=` request. */
+export interface HindsightRecallRequest {
+	query: string;
+	budget?: "low" | "mid" | "high";
+	maxTokens?: number;
+}
+
+/**
+ * `GET /api/memory/hindsight/memories?cwd=` response. Raw pass-through of
+ * the Hindsight bulk-list endpoint — the SDK's own client leaves this shape
+ * as `[key: string]: unknown`, so the deck renders it generically rather
+ * than fabricating a stronger contract the upstream API doesn't guarantee.
+ */
+export interface HindsightListMemoriesResponse {
+	bankId: string;
+	[key: string]: unknown;
+}
+
+/** `GET /api/memory/hindsight/documents?cwd=` response — same pass-through rationale. */
+export interface HindsightListDocumentsResponse {
+	bankId: string;
+	[key: string]: unknown;
+}
+
+/** A single Hindsight document, as returned by get/update. */
+export interface HindsightDocument {
+	[key: string]: unknown;
+}
+
+/** `PATCH /api/memory/hindsight/documents/:id?cwd=` request — the only mutable field is tags. */
+export interface UpdateHindsightDocumentRequest {
+	tags: string[];
+}
+
+/** `DELETE /api/memory/hindsight/documents/:id?cwd=` response. */
+export interface DeleteHindsightDocumentResponse {
+	ok: boolean;
+}
+
+/** One Hindsight mental model — mirrors the SDK's `MentalModelSummary` verbatim. */
+export interface HindsightMentalModel {
+	id: string;
+	bank_id: string;
+	name: string;
+	tags?: string[];
+	last_refreshed_at?: string | null;
+	created_at?: string | null;
+	source_query?: string;
+	content?: string;
+	max_tokens?: number;
+	[key: string]: unknown;
+}
+
+/** `GET /api/memory/hindsight/mental-models?cwd=` response. */
+export interface ListHindsightMentalModelsResponse {
+	bankId: string;
+	items: HindsightMentalModel[];
+}
+
+/** `POST /api/memory/hindsight/mental-models?cwd=` request. */
+export interface CreateHindsightMentalModelRequest {
+	name: string;
+	sourceQuery: string;
+	tags?: string[];
+	maxTokens?: number;
+}
+
+/** `POST /api/memory/hindsight/mental-models?cwd=` response. */
+export interface CreateHindsightMentalModelResponse {
+	operation_id?: string;
+	[key: string]: unknown;
+}
+
+/** `POST /api/memory/hindsight/mental-models/:id/refresh?cwd=` response. */
+export interface RefreshHindsightMentalModelResponse {
+	operation_id?: string;
+	[key: string]: unknown;
+}
+
+/** `DELETE /api/memory/hindsight/mental-models/:id?cwd=` response. */
+export interface DeleteHindsightMentalModelResponse {
+	ok: boolean;
+}
