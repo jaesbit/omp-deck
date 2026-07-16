@@ -79,6 +79,9 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
+	getAppTitle(): Promise<{ title: string }> {
+		return request<{ title: string }>("/health");
+	},
 	listWorkspaces(): Promise<ListWorkspacesResponse> {
 		return request<ListWorkspacesResponse>("/workspaces");
 	},

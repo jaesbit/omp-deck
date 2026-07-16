@@ -84,6 +84,7 @@ export function buildRouter(
 			ok: true,
 			pid: info.pid,
 			defaultCwd: config.defaultCwd,
+			title: config.title,
 			extraWorkspaces: config.extraWorkspaces,
 			serverStartedAt: info.serverStartedAt,
 			version: info.version,
