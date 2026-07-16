@@ -211,6 +211,11 @@ export class InProcessAgentBridge implements AgentBridge {
 	/** Shared SDK model registry, lazily constructed on first session create. */
 	private modelRegistry: ModelRegistry | undefined;
 	private modelRegistryPromise: Promise<ModelRegistry> | undefined;
+	/** Extension load errors from the most recent `createSession`/`resumeSession`
+	 *  call, keyed by the resulting session id — read once by the agent worker
+	 *  right after session creation and forwarded to the parent process for
+	 *  the governance audit trail (T-35), then discarded. */
+	private pendingExtensionLoadErrors = new Map<string, Array<{ path: string; error: string }>>();
 
 	constructor(opts: {
 		idleTimeoutMs?: number;
@@ -266,6 +271,7 @@ export class InProcessAgentBridge implements AgentBridge {
 		}
 		if (!opts.internal) await this.wireExtensionRunner(session);
 		const handle = await this.attach(session, opts.cwd, sessionManager, result.setToolUIContext, !opts.internal);
+		if (ext?.errors?.length) this.pendingExtensionLoadErrors.set(handle.sessionId, ext.errors);
 		if (opts.planMode) {
 			await handle.setPlanMode(true);
 		}
@@ -305,6 +311,9 @@ export class InProcessAgentBridge implements AgentBridge {
 		});
 		const session = result.session;
 		const handle = await this.attach(session, cwd, sessionManager, result.setToolUIContext, true);
+		if (result.extensionsResult?.errors?.length) {
+			this.pendingExtensionLoadErrors.set(handle.sessionId, result.extensionsResult.errors);
+		}
 		await this.wireExtensionRunner(session);
 		log.info(`resumed session ${handle.sessionId} from ${opts.sessionPath}`);
 		return handle;
@@ -313,6 +322,15 @@ export class InProcessAgentBridge implements AgentBridge {
 
 	getSession(sessionId: string): SessionHandle | undefined {
 		return this.active.get(sessionId)?.handle;
+	}
+
+	/** One-shot read of extension load errors captured for `sessionId` during
+	 *  session creation/resume (T-35). Clears the entry so a later call for
+	 *  the same id returns empty rather than re-delivering stale errors. */
+	takeExtensionLoadErrors(sessionId: string): Array<{ path: string; error: string }> {
+		const errors = this.pendingExtensionLoadErrors.get(sessionId);
+		this.pendingExtensionLoadErrors.delete(sessionId);
+		return errors ?? [];
 	}
 
 	async listSessions(opts: { cwd?: string }): Promise<SessionSummary[]> {

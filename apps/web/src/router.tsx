@@ -14,8 +14,10 @@ import { OnboardingView } from "./views/OnboardingView";
 import { AutoWorkView } from "./views/AutoWorkView";
 import { ProjectConfigView } from "./views/ProjectConfigView";
 import { CodebaseMemoryView } from "./views/CodebaseMemoryView";
+import { MemoryView } from "./views/MemoryView";
 import { SubscriptionLimitsView } from "./views/SubscriptionLimitsView";
 import { SessionsView } from "./views/SessionsView";
+import { GovernanceView } from "./views/GovernanceView";
 import { onboardingApi } from "./lib/onboarding-api";
 
 /**
@@ -63,7 +65,9 @@ const router = createBrowserRouter([
 			{ path: "/auto-work", element: <AutoWorkView /> },
 			{ path: "/project-config", element: <ProjectConfigView /> },
 			{ path: "/codebase-memory", element: <CodebaseMemoryView /> },
+			{ path: "/memory", element: <MemoryView /> },
 			{ path: "/sessions", element: <SessionsView /> },
+			{ path: "/governance", element: <GovernanceView /> },
 			{ path: "/subscription-limits", element: <SubscriptionLimitsView /> },
 			{ path: "/settings", element: <SettingsView /> },
 			{ path: "/onboarding", element: <OnboardingView /> },

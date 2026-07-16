@@ -81,10 +81,12 @@ export async function runAgentWorker(): Promise<void> {
 		unsubscribeEvents = handle.subscribe((event) => {
 			send({ type: "event", channel: "session", event });
 		});
+		const extensionErrors = bridge.takeExtensionLoadErrors(handle.sessionId);
 		return {
 			sessionId: handle.sessionId,
 			sessionFile: handle.sessionFile,
 			cwd: handle.cwd,
+			...(extensionErrors.length > 0 ? { extensionErrors } : {}),
 		};
 	};
 

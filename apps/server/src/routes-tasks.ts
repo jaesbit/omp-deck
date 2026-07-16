@@ -223,10 +223,15 @@ export function buildTasksRouter(): Hono {
 		} catch {
 			return c.json({ error: "invalid json" }, 400);
 		}
-		const updated = updateState(c.req.param("id"), body);
-		if (!updated) return c.json({ error: "not found" }, 404);
-		notifyTasksChanged();
-		return c.json(updated);
+		try {
+			const updated = updateState(c.req.param("id"), body);
+			if (!updated) return c.json({ error: "not found" }, 404);
+			notifyTasksChanged();
+			return c.json(updated);
+		} catch (err) {
+			log.error("updateState failed", err);
+			return c.json({ error: String(err) }, 400);
+		}
 	});
 
 	app.delete("/task-states/:id", (c) => {
