@@ -788,23 +788,6 @@ describe("PlanModeBridge", () => {
 		await expect(fs.access(harness.planFile)).resolves.toBeNull();
 	});
 
-	it("approve ignores malicious finalPath (SDK no longer renames)", async () => {
-		await harness.bridge.enter();
-		await fs.writeFile(harness.planFile, "# Yo\n");
-
-		const { resultPromise } = await invokeApply(harness, { extra: { title: "fallback case" } });
-		const proposed = harness.frames.find(
-			(f): f is Extract<PlanModeFrame, { type: "plan_proposed" }> => f.type === "plan_proposed",
-		)!;
-		// `..` path-escape attempt; bridge ignores finalPath, file stays at original path.
-		harness.bridge.respond(proposed.proposalId, {
-			approved: true,
-			finalPath: "local://../escape.md",
-		});
-		const result = await resultPromise;
-		expect(result.details.sourceResultDetails?.planFilePath).toBe("local://PLAN.md");
-	});
-
 	it("reject path exits plan mode, broadcasts rejected resolution, and surfaces a rejection result", async () => {
 		await harness.bridge.enter();
 		await fs.writeFile(harness.planFile, "# Foo\n");

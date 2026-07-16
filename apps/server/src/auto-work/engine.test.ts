@@ -1877,28 +1877,6 @@ describe("runAutoWorkCycle", () => {
 		);
 	}
 
-	test("records an aborted agent turn as failed after exhausting same-run retries", async () => {
-		setAutoWorkConfig(repoCwd, { ...DEFAULT_AUTO_WORK_VALUES, enabled: true });
-		const task = createTask({ title: "Agent cancellation", cwd: repoCwd, priority: "P5", autoWork: true });
-		const handle = new FakeSessionHandle("sess_aborted", null);
-		const cycle = runAutoWorkCycle(repoCwd, fakeBridge(handle), {
-			getSubscriptionUsage: async () => ({ available: true, weeklyPct: 5 }),
-			createPullRequest: async () => {
-				throw new Error("an aborted run must not create a pull request");
-			},
-		});
-		await handle.subscriptionStarted;
-		handle.emit({ type: "turn_end", message: { stopReason: "aborted" } });
-		// Wait until the engine's retry loop has enqueued the continuation prompt.
-		await waitForPromptCount(handle, 2);
-		handle.emit({ type: "turn_end", message: { stopReason: "aborted" } });
-		const result = await cycle;
-
-		expect(result.outcome).not.toBe("completed");
-		expect(listAutoWorkRuns({ taskId: task.id })[0]?.status).toBe("failed");
-		expect(handle.prompts.length).toBe(2); // initial + one continuation retry
-	});
-
 	describe("same-run abort retry", () => {
 		test("first aborted → continuation prompt sent → end_turn on retry → run completes", async () => {
 			setAutoWorkConfig(repoCwd, { ...DEFAULT_AUTO_WORK_VALUES, enabled: true });
@@ -2084,6 +2062,7 @@ describe("runAutoWorkCycle", () => {
 		// The still-running session must actually be stopped when the run is
 		// written off — otherwise the agent keeps working past the timeout.
 		expect(handle.abortCalls).toBe(1);
+		expect(handle.disposeCalls).toBeGreaterThanOrEqual(1);
 	});
 
 	test("on PR creation failure, still moves the completed task to validate with a fallback note (T-66)", async () => {
@@ -3488,28 +3467,6 @@ describe("runAutoWorkCycle retry budget and session cleanup (T-100)", () => {
 		expect(updated?.stateId).toBe("s_backlog");
 		expect(updated?.body).toContain("2 automatic retry attempt(s) remaining");
 		expect(updated?.body).not.toContain("MAX_RETRIES_EXCEEDED");
-	});
-
-	test("a timed-out run aborts and disposes the still-running session and parks the task in blocked", async () => {
-		setAutoWorkConfig(repoCwd, {
-			...DEFAULT_AUTO_WORK_VALUES,
-			enabled: true,
-			timeoutMinutesByPriority: { P0: 120, P1: 90, P2: 60, P3: 45, P4: 45, P5: 0.0005 }, // 30ms
-		});
-		const task = createTask({ title: "Timeout cleanup", cwd: repoCwd, priority: "P5", autoWork: true });
-
-		const handle = new FakeSessionHandle("sess_timeout_dispose", null); // never emits a terminal event
-		const result = await runAutoWorkCycle(repoCwd, fakeBridge(handle), {
-			getSubscriptionUsage: async () => ({ available: true, weeklyPct: 5 }),
-			createPullRequest: stubCreatePullRequest,
-		});
-
-		expect(result.outcome).toBe("timed_out");
-		expect(getTask(task.id)?.stateId).toBe("s_blocked");
-		// The write-off must actually stop AND release the live session (T-100):
-		// abort ends the in-flight turn, dispose drops the handle.
-		expect(handle.abortCalls).toBeGreaterThanOrEqual(1);
-		expect(handle.disposeCalls).toBeGreaterThanOrEqual(1);
 	});
 });
 

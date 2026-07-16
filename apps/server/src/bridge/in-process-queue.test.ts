@@ -88,7 +88,7 @@ function makeHandle(branch: unknown[] = []): { handle: InProcessSessionHandle; s
 	const emitted: unknown[] = [];
 	const handle = new InProcessSessionHandle({
 		session: session as unknown as never,
-		sessionManager: { getBranch: () => branch } as never,
+		sessionManager: { getBranch: () => branch, getHeader: () => undefined } as never,
 		cwd: "/tmp/stub",
 		sessionId: "stub-1",
 		getModelRegistry: async () => ({}) as never,
@@ -99,6 +99,7 @@ function makeHandle(branch: unknown[] = []): { handle: InProcessSessionHandle; s
 			dispose() {},
 			getPlanModeContext: () => undefined,
 			getPendingPlanApproval: () => undefined,
+			getPendingPlanExecution: () => undefined,
 		} as never,
 		goalBridge: {
 			getContext: () => undefined,

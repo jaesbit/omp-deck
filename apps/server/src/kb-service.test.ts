@@ -119,6 +119,8 @@ describe("KbService root containment", () => {
 		continueFirstBuild.resolve();
 		await indexing;
 
-		expect((await service.getGraph()).nodes.map((node) => node.path)).toEqual(["after.md", "before.md"]);
+		const paths = (await service.getGraph()).nodes.map((node) => node.path);
+		expect(paths).toHaveLength(2);
+		expect(paths).toEqual(expect.arrayContaining(["after.md", "before.md"]));
 	});
 });

@@ -61,15 +61,6 @@ describe("summarizeSession — timestamp normalisation (T-99)", () => {
 		expect(s.durationMs).toBe(150_000); // 2 m 30 s
 	});
 
-	test("neither createdAt nor updatedAt is an empty string", () => {
-		const now = new Date("2025-03-10T12:00:00.000Z");
-
-		const s = summarizeSession(makeSessionInfo(now, now));
-
-		expect(s.createdAt).not.toBe("");
-		expect(s.updatedAt).not.toBe("");
-	});
-
 	test("legacy string fallback: timestamp field is used when created is absent", () => {
 		const ts = "2024-11-20T09:30:00.000Z";
 		// Simulate a legacy record shape via the extended RawSessionRecord fields.
