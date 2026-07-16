@@ -23,6 +23,7 @@ function config(defaultCwd: string): Config {
 		port: 8787,
 		defaultCwd,
 		extraWorkspaces: [],
+		title: "omp-deck",
 		devMode: true,
 		idleTimeoutMs: 0,
 		dbPath: path.join(defaultCwd, "deck.db"),
