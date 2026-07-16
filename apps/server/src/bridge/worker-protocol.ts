@@ -29,6 +29,10 @@ export interface WorkerSessionMetadata {
 	sessionId: string;
 	sessionFile: string | undefined;
 	cwd: string;
+	/** Extension load failures from this session's `createAgentSession` call
+	 *  (T-35), for the parent process to persist to the governance audit
+	 *  trail. Empty/absent when every discovered extension loaded cleanly. */
+	extensionErrors?: Array<{ path: string; error: string }>;
 }
 
 
