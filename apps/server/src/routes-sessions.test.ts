@@ -76,6 +76,7 @@ function fakeConfig(defaultCwd: string): Config {
 		defaultCwd,
 		extraWorkspaces: [],
 		devMode: true,
+		title: "omp-deck",
 		idleTimeoutMs: 0,
 		dbPath: ":memory:",
 		uploadsRoot: path.join(os.tmpdir(), "omp-deck-uploads-test"),

@@ -916,6 +916,21 @@ describe("waitForAutoWorkSessionTerminal", () => {
 		expect(await terminal).toBe("completed");
 	});
 
+	test("ignores TTSR advisories until the turn ends successfully", async () => {
+		const handle = new FakeSessionHandle("sess_ttsr_advisory", null);
+		const terminal = waitForAutoWorkSessionTerminal(handle as unknown as SessionHandle, 60_000, () => handle.prompt("go"));
+
+		handle.emit({ type: "notice", level: "error", message: "TTSR matched rules: tool policy" });
+		handle.emit({
+			type: "turn_end",
+			message: { stopReason: "aborted", errorMessage: "TTSR matched rules: tool policy" },
+		});
+		handle.emit({ type: "ttsr_triggered", rules: [{ name: "tool policy" }] });
+		handle.emit({ type: "turn_end", message: { stopReason: "end_turn" } });
+
+		expect(await terminal).toBe("completed");
+	});
+
 	test("preserves a real terminal failure after an intermediate tool-use round", async () => {
 		const handle = new FakeSessionHandle("sess_tool_then_failure", null);
 		const terminal = waitForAutoWorkSessionTerminal(handle as unknown as SessionHandle, 60_000, () => handle.prompt("go"));

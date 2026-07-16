@@ -41,6 +41,15 @@ export const ENV_SCHEMA: EnvSchemaEntry[] = [
 		description: "Vite dev server port.",
 	},
 	{
+		key: "OMP_DECK_TITLE",
+		defaultValue: "omp-deck",
+		valueType: "string",
+		sensitive: false,
+		restartRequired: true,
+		hotApply: false,
+		description: "Visible title in the upper-left corner of the web interface.",
+	},
+	{
 		key: "OMP_DECK_DEFAULT_CWD",
 		valueType: "path",
 		sensitive: false,

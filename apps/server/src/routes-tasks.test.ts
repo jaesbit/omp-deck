@@ -195,3 +195,67 @@ describe("auto-work workspace invariant (autoWork requires cwd)", () => {
 		expect(res.status).toBe(200);
 	});
 });
+
+describe("system-state protection routes (T-126)", () => {
+	test("DELETE /task-states/s_backlog returns 400 with a clear error", async () => {
+		bootDb();
+		const app = buildTasksRouter();
+		const res = await app.request("/task-states/s_backlog", { method: "DELETE" });
+		expect(res.status).toBe(400);
+		const body = (await res.json()) as { error: string };
+		expect(body.error).toMatch(/required by the dependency system/);
+	});
+
+	test("PATCH /task-states/s_active with a name change returns 400 not 500", async () => {
+		bootDb();
+		const app = buildTasksRouter();
+		const res = await app.request(
+			"/task-states/s_active",
+			jsonRequest("PATCH", { name: "in-progress" }),
+		);
+		expect(res.status).toBe(400);
+		const body = (await res.json()) as { error: string };
+		expect(body.error).toMatch(/required by the dependency system/);
+	});
+
+	test("PATCH /task-states/s_validate with a color change succeeds", async () => {
+		bootDb();
+		const app = buildTasksRouter();
+		const res = await app.request(
+			"/task-states/s_validate",
+			jsonRequest("PATCH", { color: "#123456" }),
+		);
+		expect(res.status).toBe(200);
+		const body = (await res.json()) as { color: string };
+		expect(body.color).toBe("#123456");
+	});
+
+	test("DELETE /task-states/:id still rejects the broadcast when a system state is targeted", async () => {
+		bootDb();
+		const app = buildTasksRouter();
+		const { frames, unsub } = captureFrames();
+		try {
+			const res = await app.request("/task-states/s_blocked", { method: "DELETE" });
+			expect(res.status).toBe(400);
+			expect(tasksChangedCount(frames)).toBe(0);
+		} finally {
+			unsub();
+		}
+	});
+
+	test("PATCH /task-states/:id does not broadcast when rename of system state is rejected", async () => {
+		bootDb();
+		const app = buildTasksRouter();
+		const { frames, unsub } = captureFrames();
+		try {
+			const res = await app.request(
+				"/task-states/s_backlog",
+				jsonRequest("PATCH", { name: "queue" }),
+			);
+			expect(res.status).toBe(400);
+			expect(tasksChangedCount(frames)).toBe(0);
+		} finally {
+			unsub();
+		}
+	});
+});
