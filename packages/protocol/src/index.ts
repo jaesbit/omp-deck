@@ -2730,6 +2730,44 @@ export interface DiscardDelegationArtifactResponse {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Policy governance — model roles, retry/fallback, auto-compaction (T-36)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * The OMP agent settings the deck governs for model-role assignment, retry
+ * and fallback behavior, and auto-compaction. Same pattern as delegation
+ * governance (T-28, `routes-delegation.ts`) and memory governance (T-34): the
+ * single source of truth is OMP's own settings store
+ * (`~/.omp/agent/config.yml`, surfaced through the SDK `Settings` singleton)
+ * — the deck never persists a copy of these values. Reads are call-time inside
+ * the SDK, so a change here applies to the next request even in live sessions.
+ */
+export type PolicySettingKey =
+	| "modelRoles"
+	| "defaultThinkingLevel"
+	| "retry.enabled"
+	| "retry.maxRetries"
+	| "retry.baseDelayMs"
+	| "retry.maxDelayMs"
+	| "retry.modelFallback"
+	| "retry.fallbackChains"
+	| "retry.fallbackRevertPolicy"
+	| "compaction.enabled"
+	| "compaction.midTurnEnabled"
+	| "compaction.strategy"
+	| "compaction.thresholdPercent"
+	| "compaction.thresholdTokens"
+	| "compaction.handoffSaveToDisk"
+	| "compaction.autoContinue";
+
+/** One selectable value for an enum-typed policy setting. */
+export interface PolicySettingOption {
+	value: string;
+	label: string;
+	description?: string;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Memory governance (T-34)
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -2763,6 +2801,44 @@ export interface MemorySettingOption {
 	description?: string;
 }
 
+/** Wire value for a governed policy setting — scalars plus the two record-shaped keys (`modelRoles`, `retry.fallbackChains`). */
+export type PolicySettingValue = number | string | boolean | Record<string, string> | Record<string, string[]>;
+
+/** Current value + OMP schema metadata for one governed policy setting. */
+export interface PolicySettingEntry {
+	key: PolicySettingKey;
+	type: "number" | "enum" | "boolean" | "record";
+	value: PolicySettingValue;
+	/** Schema default, `null` when the schema declares none. */
+	defaultValue: PolicySettingValue | null;
+	/** True when explicitly set in OMP config (vs falling back to the schema default). */
+	configured: boolean;
+	/** Effective-value source resolved by the public OMP Settings contract. */
+	origin: "omp-config" | "schema-default";
+	/** Label/description/options come verbatim from OMP's settings schema. */
+	label: string;
+	description: string;
+	options?: PolicySettingOption[];
+}
+
+/** A model role OMP knows about — built-in or custom — for the `modelRoles` editor. */
+export interface PolicyModelRoleInfo {
+	id: string;
+	name: string;
+	tag?: string;
+	/** Currently assigned model selector for this role, if any (mirrors `settings[key="modelRoles"].value[id]`). */
+	assignedModel?: string;
+}
+
+/** `GET /api/policies/settings` response. */
+export interface GetPolicySettingsResponse {
+	settings: PolicySettingEntry[];
+	/** Known model roles (built-ins first, then any custom roles configured), for the `modelRoles` editor. */
+	roles: PolicyModelRoleInfo[];
+	/** Absolute path of the OMP config file these values persist to. */
+	configPath: string;
+}
+
 /** Current value + OMP schema metadata for one governed memory setting. */
 export interface MemorySettingEntry {
 	key: MemorySettingKey;
@@ -2783,6 +2859,14 @@ export interface GetMemorySettingsResponse {
 	/** Absolute path of the OMP config file these values persist to. */
 	configPath: string;
 }
+
+/** `PATCH /api/policies/settings` request. Unknown keys are rejected. */
+export interface PatchPolicySettingsRequest {
+	updates: Partial<Record<PolicySettingKey, PolicySettingValue>>;
+}
+
+/** `PATCH /api/policies/settings` response — fresh post-write state. */
+export type PatchPolicySettingsResponse = GetPolicySettingsResponse;
 
 /** `PATCH /api/memory/settings` request. Unknown keys are rejected. */
 export interface PatchMemorySettingsRequest {

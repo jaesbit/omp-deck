@@ -44,6 +44,7 @@ const log = logger("routes");
 import { buildTasksRouter } from "./routes-tasks.ts";
 import { buildSettingsRouter, syncWorkspacesToEnv } from "./routes-settings.ts";
 import { buildDelegationRouter } from "./routes-delegation.ts";
+import { buildPoliciesRouter } from "./routes-policies.ts";
 import { buildAdvisorsRouter } from "./routes-advisors.ts";
 import { buildRoutinesRouter } from "./routes-routines.ts";
 import { buildHooksRouter } from "./routes-hooks.ts";
@@ -669,6 +670,7 @@ export function buildRouter(
 	app.route("/", buildFsRouter());
 	app.route("/", buildSettingsRouter(bridge, config, opts));
 	app.route("/", buildDelegationRouter());
+	app.route("/", buildPoliciesRouter());
 	app.route("/", buildAdvisorsRouter());
 	app.route("/", buildOrientationRouter());
 	app.route("/", buildBridgesRouter(supervisor));
