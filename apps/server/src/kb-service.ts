@@ -481,6 +481,43 @@ export class KbService {
 	}
 
 	/**
+	 * Create an empty directory at `subpath`. Mirrors `saveFile(..., "create")`'s
+	 * must-not-exist contract: fails with `{ kind: "conflict" }` if a file or
+	 * directory already sits at that path. Missing parent directories are
+	 * created on demand (same `resolveWriteAbs` symlink-safe walk used by
+	 * file creation).
+	 */
+	async createFolder(
+		subpath: string,
+	): Promise<{ kind: "ok"; entry: KbTreeEntry } | { kind: "conflict" } | { kind: "invalid-path" }> {
+		await this.ensureIndex();
+		const cleanRel = normalizeRel(subpath);
+		if (!cleanRel) return { kind: "invalid-path" };
+		if (this.pathIsExcluded(cleanRel)) return { kind: "invalid-path" };
+		const abs = await this.resolveWriteAbs(cleanRel);
+		if (!abs) return { kind: "invalid-path" };
+		if (existsSync(abs)) return { kind: "conflict" };
+
+		try {
+			await mkdir(abs, { recursive: true });
+		} catch (err) {
+			log.error(`mkdir failed at ${abs}`, err);
+			return { kind: "invalid-path" };
+		}
+
+		this.invalidate();
+		return {
+			kind: "ok",
+			entry: {
+				name: path.posix.basename(cleanRel),
+				path: cleanRel,
+				kind: "dir",
+				mdCount: 0,
+			},
+		};
+	}
+
+	/**
 	 * Full wiki-link graph + frontmatter-tag aggregation. Built lazily on
 	 * first request and cached until the watcher invalidates the index. For
 	 * the v1 scale (~600 visible nodes) the build cost is dominated by file
