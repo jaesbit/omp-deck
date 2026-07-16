@@ -1,5 +1,6 @@
 import { Hono } from "hono";
 import type {
+	AddWorkspaceRequest,
 	AgentMessageJson,
 	CreateSessionRequest,
 	CreateSessionResponse,
@@ -20,6 +21,8 @@ import type {
 	WorkspaceEntry,
 } from "@omp-deck/protocol";
 
+import * as fs from "node:fs";
+import * as path from "node:path";
 import type { Config } from "./config.ts";
 import { logger } from "./log.ts";
 import { broadcastBus } from "./broadcast-bus.ts";
@@ -28,7 +31,7 @@ import { getUpdateCheck } from "./update-check.ts";
 import type { AgentBridge, SessionHandle } from "./bridge/types.ts";
 import { getWorkspacePreference, listWorkspacePreferences, setWorkspacePreference } from "./db/workspace-preferences.ts";
 import { getTask } from "./db/tasks.ts";
-import { getTaskRewriteModel } from "./db/server-settings.ts";
+import { getTaskRewriteModel, getExtraWorkspaces, setExtraWorkspaces, getHiddenWorkspaces, setHiddenWorkspaces } from "./db/server-settings.ts";
 import { resolveIntegrationPrompt } from "./integration-prompts.ts";
 import { waitForAutoWorkSessionTerminal } from "./auto-work/engine.ts";
 import { getModelCatalogOverlay } from "./model-catalog-overlay.ts";
@@ -39,7 +42,7 @@ import { deriveLabel } from "./workspace-label.ts";
 const log = logger("routes");
 
 import { buildTasksRouter } from "./routes-tasks.ts";
-import { buildSettingsRouter } from "./routes-settings.ts";
+import { buildSettingsRouter, syncWorkspacesToEnv } from "./routes-settings.ts";
 import { buildDelegationRouter } from "./routes-delegation.ts";
 import { buildAdvisorsRouter } from "./routes-advisors.ts";
 import { buildRoutinesRouter } from "./routes-routines.ts";
@@ -107,9 +110,17 @@ export function buildRouter(
 			counts.set(s.cwd, (counts.get(s.cwd) ?? 0) + 1);
 		}
 
-		// Always include default + extras even if zero sessions.
-		const known = new Set<string>([config.defaultCwd, ...config.extraWorkspaces]);
+		const hiddenSet = new Set(getHiddenWorkspaces());
+		const dbExtras = getExtraWorkspaces();
+
+		// Always include default + env extras + DB-registered extras.
+		const known = new Set<string>([config.defaultCwd, ...config.extraWorkspaces, ...dbExtras]);
 		for (const cwd of counts.keys()) known.add(cwd);
+
+		// Filter hidden (defaultCwd is never filtered).
+		for (const cwd of hiddenSet) {
+			if (cwd !== config.defaultCwd) known.delete(cwd);
+		}
 
 		const preferenceByCwd = new Map(listWorkspacePreferences().map((p) => [p.cwd, p]));
 
@@ -132,6 +143,71 @@ export function buildRouter(
 			defaultCwd: config.defaultCwd,
 		};
 		return c.json(body);
+	});
+
+	app.post("/workspaces", async (c) => {
+		let body: AddWorkspaceRequest;
+		try {
+			body = (await c.req.json()) as AddWorkspaceRequest;
+		} catch {
+			return c.json({ error: "invalid json body" }, 400);
+		}
+		const cwd = body.cwd?.trim();
+		if (!cwd || !path.isAbsolute(cwd))
+			return c.json({ error: "cwd must be a non-empty absolute path" }, 400);
+		const resolved = path.resolve(cwd);
+
+		// Must be an existing directory under an allowed root.
+		try {
+			if (!fs.statSync(resolved).isDirectory())
+				return c.json({ error: "cwd must be a directory" }, 400);
+		} catch {
+			return c.json({ error: "cwd does not exist" }, 400);
+		}
+		if (!isCwdAllowed(resolved))
+			return c.json({ error: cwdNotAllowedMessage() }, 400);
+
+		// Register in DB.
+		const extras = getExtraWorkspaces();
+		if (!extras.includes(resolved)) setExtraWorkspaces([...extras, resolved]);
+
+		// Un-hide if it was previously hidden.
+		const hidden = getHiddenWorkspaces();
+		if (hidden.includes(resolved)) setHiddenWorkspaces(hidden.filter((h) => h !== resolved));
+
+		// Best-effort env sync — skips silently when OMP_DECK_WORKSPACES is shell-set.
+		if (!config.extraWorkspaces.includes(resolved)) {
+			await syncWorkspacesToEnv([...config.extraWorkspaces, resolved], config);
+		}
+
+		return c.json({ ok: true });
+	});
+
+	app.delete("/workspaces", async (c) => {
+		const cwd = c.req.query("cwd")?.trim();
+		if (!cwd) return c.json({ error: "cwd query param is required" }, 400);
+		const resolved = path.resolve(cwd);
+
+		if (resolved === config.defaultCwd)
+			return c.json({ error: "the default workspace cannot be removed" }, 400);
+
+		// Add to denylist.
+		const hidden = getHiddenWorkspaces();
+		if (!hidden.includes(resolved)) setHiddenWorkspaces([...hidden, resolved]);
+
+		// Remove from DB extras.
+		const extras = getExtraWorkspaces();
+		if (extras.includes(resolved)) setExtraWorkspaces(extras.filter((e) => e !== resolved));
+
+		// Best-effort env sync — remove from OMP_DECK_WORKSPACES if present and manageable.
+		if (config.extraWorkspaces.includes(resolved)) {
+			await syncWorkspacesToEnv(
+				config.extraWorkspaces.filter((e) => e !== resolved),
+				config,
+			);
+		}
+
+		return c.json({ ok: true });
 	});
 
 	// ─── Workspace preferences (T-42: per-cwd default model override) ──────

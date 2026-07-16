@@ -105,6 +105,10 @@ export interface ListWorkspacesResponse {
 	defaultCwd: string;
 }
 
+export interface AddWorkspaceRequest {
+	cwd: string;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Workspace preferences (per-cwd model default, T-42)
 // ─────────────────────────────────────────────────────────────────────────────

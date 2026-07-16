@@ -47,6 +47,7 @@ import type {
 	ListTasksResponse,
 	ListWorkspacePreferencesResponse,
 	ListWorkspacesResponse,
+	AddWorkspaceRequest,
 	ModelRef,
 	PatchDelegationSettingsRequest,
 	PatchDelegationSettingsResponse,
@@ -97,6 +98,17 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 export const api = {
 	listWorkspaces(): Promise<ListWorkspacesResponse> {
 		return request<ListWorkspacesResponse>("/workspaces");
+	},
+	addWorkspace(cwd: string): Promise<{ ok: true }> {
+		return request<{ ok: true }>("/workspaces", {
+			method: "POST",
+			body: JSON.stringify({ cwd } satisfies AddWorkspaceRequest),
+		});
+	},
+	removeWorkspace(cwd: string): Promise<{ ok: true }> {
+		return request<{ ok: true }>(`/workspaces?cwd=${encodeURIComponent(cwd)}`, {
+			method: "DELETE",
+		});
 	},
 	listSessions(cwd?: string): Promise<ListSessionsResponse> {
 		const q = cwd ? `?cwd=${encodeURIComponent(cwd)}` : "";
