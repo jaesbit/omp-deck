@@ -124,3 +124,39 @@ describe("KbService root containment", () => {
 		expect(paths).toEqual(expect.arrayContaining(["after.md", "before.md"]));
 	});
 });
+
+describe("KbService.createFolder", () => {
+	test("creates an empty directory that shows up in getTree, including missing parents", async () => {
+		mkdirSync(kbRoot);
+		const service = new KbService({ root: kbRoot });
+
+		const result = await service.createFolder("projects/new-app");
+		expect(result).toEqual({
+			kind: "ok",
+			entry: { name: "new-app", path: "projects/new-app", kind: "dir", mdCount: 0 },
+		});
+
+		const rootTree = await service.getTree();
+		expect(rootTree?.dirs.map((d) => d.path)).toEqual(["projects"]);
+		const nestedTree = await service.getTree("projects");
+		expect(nestedTree?.dirs.map((d) => d.path)).toEqual(["projects/new-app"]);
+	});
+
+	test("rejects when a file or directory already exists at the target path", async () => {
+		mkdirSync(kbRoot);
+		writeFileSync(path.join(kbRoot, "taken.md"), "# Taken\n", "utf8");
+		mkdirSync(path.join(kbRoot, "taken-dir"));
+		const service = new KbService({ root: kbRoot });
+
+		expect(await service.createFolder("taken.md")).toEqual({ kind: "conflict" });
+		expect(await service.createFolder("taken-dir")).toEqual({ kind: "conflict" });
+	});
+
+	test("rejects an empty name and a path that escapes the kb root", async () => {
+		mkdirSync(kbRoot);
+		const service = new KbService({ root: kbRoot });
+
+		expect(await service.createFolder("")).toEqual({ kind: "invalid-path" });
+		expect(await service.createFolder("../outside")).toEqual({ kind: "invalid-path" });
+	});
+});
