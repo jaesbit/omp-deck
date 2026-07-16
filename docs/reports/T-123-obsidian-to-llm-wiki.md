@@ -85,9 +85,12 @@ El startup **no tiene health gate**, y tiene un riesgo de enmascaramiento activo
 Apuntar `OMP_DECK_KB_ROOT=/ruta/al/vault/obsidian`. **Sin cambios de código.**
 `walk()` sólo indexa `.md`; los ficheros JSON de `.obsidian/` son invisibles para el índice.
 
-**Cambio de higiene recomendado (no requisito funcional):**
-Añadir `".obsidian"` y `".trash"` a `SKIP_DIR_NAMES` en `kb-service.ts` para que no
-aparezcan como directorios vacíos en el tree UI. No afecta al índice de ficheros.
+**Cambios recomendados (no requisitos funcionales):**
+- Añadir `".obsidian"` y `".trash"` a `SKIP_DIR_NAMES` en `kb-service.ts` para evitar
+  que aparezcan como directorios vacíos en el tree UI. No afecta al índice de ficheros.
+- En `index.ts`, antes de `seedKbTemplates`, comprobar si el root ya contiene contenido
+  ajeno al deck y omitir el seed — evita el enmascaramiento de misconfiguration descrito
+  en la sección de startup validation.
 
 **Pros:**
 - Cero latencia. Single source of truth. Watcher ya existente invalida el índice.
@@ -190,6 +193,5 @@ complejidad operacional sin beneficio material.
 | Guard en seedKbTemplates | 30 min |
 | Log ERROR startup | 15 min |
 | **Total** | **~50 min** |
-| SKIP_DIR_NAMES (higiene, opcional) | +30 min |
-| Tags inline (deferrable) | +2–4 h |
-| Aliases (deferrable) | +3–5 h |
+
+*Opcionales:* SKIP_DIR_NAMES (higiene) +30 min · Tags inline (deferrable) 2–4 h · Aliases (deferrable) 3–5 h.
