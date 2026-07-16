@@ -47,7 +47,7 @@ import { buildHooksRouter } from "./routes-hooks.ts";
 import { buildInboxRouter } from "./routes-inbox.ts";
 import { buildUtilityRouter } from "./routes-cron.ts";
 import { buildSlashCommandsRouter } from "./routes-slash-commands.ts";
-import { buildFsRouter, isCwdAllowed } from "./routes-fs.ts";
+import { buildFsRouter, cwdNotAllowedMessage, isCwdAllowed } from "./routes-fs.ts";
 import { buildBridgesRouter } from "./routes-bridges.ts";
 import { buildMarketplaceRouter } from "./routes-marketplace.ts";
 import { buildSkillsRouter } from "./routes-skills.ts";
@@ -144,10 +144,7 @@ export function buildRouter(
 		const cwd = c.req.query("cwd")?.trim();
 		if (!cwd) return c.json({ error: "cwd query param is required" }, 400);
 		if (!isCwdAllowed(cwd)) {
-			return c.json(
-				{ error: `cwd does not exist, isn't a directory, or is outside the home directory: ${cwd}` },
-				400,
-			);
+			return c.json({ error: cwdNotAllowedMessage() }, 400);
 		}
 		let body: SetWorkspacePreferenceRequest;
 		try {
@@ -216,10 +213,7 @@ export function buildRouter(
 			return c.json({ error: "cwd and sessionFile query params are required" }, 400);
 		}
 		if (!isCwdAllowed(cwd)) {
-			return c.json(
-				{ error: `cwd does not exist, isn't a directory, or is outside the home directory: ${cwd}` },
-				400,
-			);
+			return c.json({ error: cwdNotAllowedMessage() }, 400);
 		}
 		try {
 			const successor = await findHandoffSuccessor(cwd, sessionFile);
@@ -322,10 +316,7 @@ export function buildRouter(
 		// Only gate cwds the caller actually supplied — resuming a session or
 		// falling back to the (already-trusted) default shouldn't re-validate.
 		if (!body.resumeFromPath && requestedCwd && !isCwdAllowed(requestedCwd)) {
-			return c.json(
-				{ error: `cwd does not exist, isn't a directory, or is outside the home directory: ${requestedCwd}` },
-				400,
-			);
+			return c.json({ error: cwdNotAllowedMessage() }, 400);
 		}
 
 		// Model + Plan Mode are creation-time-only options (T-39): a resumed

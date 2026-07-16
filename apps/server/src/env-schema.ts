@@ -54,7 +54,7 @@ export const ENV_SCHEMA: EnvSchemaEntry[] = [
 		sensitive: false,
 		restartRequired: false,
 		hotApply: true,
-		description: "Comma-separated extra workspace roots.",
+		description: "Comma-separated additional allowed workspace roots for sessions, filesystem browsing, delegation artifacts, and workspace MCP routes.",
 	},
 	{
 		key: "OMP_DECK_IDLE_TIMEOUT_MS",

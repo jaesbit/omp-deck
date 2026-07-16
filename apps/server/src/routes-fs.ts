@@ -37,7 +37,7 @@ export function buildFsRouter(): Hono {
 		// authorization. A bug in another route shouldn't let the picker walk
 		// `C:\Windows`.
 		if (!isCwdAllowed(cwd)) {
-			return c.json({ error: "cwd is not under an allowed root" }, 403);
+			return c.json({ error: cwdNotAllowedMessage() }, 403);
 		}
 
 		const cached = inventoryCache.get(cwd);
@@ -69,7 +69,7 @@ export function buildFsRouter(): Hono {
 		const requested = raw ? path.resolve(raw) : path.resolve(resolveHome());
 
 		if (!isCwdAllowed(requested)) {
-			return c.json({ error: "path is not under an allowed root" }, 403);
+			return c.json({ error: pathNotAllowedMessage() }, 403);
 		}
 
 		let dirs: string[];
@@ -274,6 +274,17 @@ function score(entries: InventoryEntry[], rawQ: string, limit: number): Inventor
  * runtime env overrides, which trips up tests that stub `$HOME`). */
 function resolveHome(): string {
 	return process.env.HOME ?? process.env.USERPROFILE ?? os.homedir();
+}
+
+export const ALLOWED_WORKSPACE_ROOTS_GUIDANCE =
+	"Configure additional workspace roots in Settings → Env → OMP_DECK_WORKSPACES.";
+
+export function cwdNotAllowedMessage(): string {
+	return `cwd is not an allowed workspace. It must be an existing directory under $HOME or a root in OMP_DECK_WORKSPACES. ${ALLOWED_WORKSPACE_ROOTS_GUIDANCE}`;
+}
+
+export function pathNotAllowedMessage(label = "path"): string {
+	return `${label} is not under an allowed workspace root. ${ALLOWED_WORKSPACE_ROOTS_GUIDANCE}`;
 }
 
 export function isCwdAllowed(cwd: string): boolean {
